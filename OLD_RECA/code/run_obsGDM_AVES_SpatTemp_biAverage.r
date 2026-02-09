@@ -1,0 +1,495 @@
+library(ffbase)
+library(raster)
+library(dynowindow)
+library(feather)
+library(Gdm01)
+library(SDMTools)
+library(raster)
+library(nnls)
+library(lubridate)
+
+source("//ces-10-cdc/OSM_CDC_MMRG_work/users/GPAAG_refuge/BIOL/G/DEV/_tools/ObsPairSampler/site-richness-extractor-bigData.R")
+source("//lw-osm-02-cdc/OSM_CBR_LW_BACKCAST_work/DEV/hos06j/code/obsPairSampler-bigData-RECA.r")
+source("//lw-osm-02-cdc/OSM_CBR_LW_BACKCAST_work/DEV/hos06j/code/siteAggregator.r")
+source("//lw-osm-02-cdc/OSM_CBR_LW_BACKCAST_work/DEV/hos06j/code/dynowindow.r")
+source("//lw-osm-02-cdc/OSM_CBR_LW_BACKCAST_work/DEV/hos06j/code/getSamples_AND_ENV.r")
+source("//lw-osm-02-cdc/OSM_CBR_LW_BACKCAST_work/DEV/hos06j/code/obs.gdm.plot_logit.R")
+source("Y:\\MOD\\G\\GDM\\_tools\\create_5splineOutput2.R")
+source("Y:\\MOD\\G\\GDM\\_tools\\gdm.spline.plot.R")
+source("U:\\users\\hos06j\\R scripts\\nnnpls.fit2_(good).R")
+source("U:\\users\\hos06j\\R scripts\\negexp_GDMlink.R")
+source("U:\\users\\hos06j\\R scripts\\fitGDM.R")
+
+RsqGLM <- function(obs = NULL, pred = NULL, model = NULL) {
+  # version 1.2 (3 Jan 2015)
+ 
+  model.provided <- ifelse(is.null(model), FALSE, TRUE)
+ 
+  if (model.provided) {
+    if (!("glm" %in% class(model))) stop ("'model' must be of class 'glm'.")
+    if (!is.null(pred)) message("Argument 'pred' ignored in favour of 'model'.")
+    if (!is.null(obs)) message("Argument 'obs' ignored in favour of 'model'.")
+    obs <- model$y
+    pred <- model$fitted.values
+ 
+  } else { # if model not provided
+    if (is.null(obs) | is.null(pred)) stop ("You must provide either 'obs' and 'pred', or a 'model' object of class 'glm'")
+    if (length(obs) != length(pred)) stop ("'obs' and 'pred' must be of the same length (and in the same order).")
+    #if (!(obs %in% c(0, 1)) | pred < 0 | pred > 1) stop ("Sorry, 'obs' and 'pred' options currently only implemented for binomial GLMs (binary response variable with values 0 or 1) with logit link.")
+    logit <- log(pred / (1 - pred))
+    model <- glm(obs ~ logit, family = "binomial")
+  }
+ 
+  null.mod <- glm(obs ~ 1, family = family(model))
+  loglike.M <- as.numeric(logLik(model))
+  loglike.0 <- as.numeric(logLik(null.mod))
+  N <- length(obs)
+ 
+  # based on Nagelkerke 1991:
+  CoxSnell <- 1 - exp(-(2 / N) * (loglike.M - loglike.0))
+  Nagelkerke <- CoxSnell / (1 - exp((2 * N ^ (-1)) * loglike.0))
+ 
+  # based on Allison 2014:
+  McFadden <- 1 - (loglike.M / loglike.0)
+  Tjur <- mean(pred[obs == 1]) - mean(pred[obs == 0])
+  sqPearson <- cor(obs, pred) ^ 2
+ 
+  return(list(CoxSnell = CoxSnell, Nagelkerke = Nagelkerke, McFadden = McFadden, Tjur = Tjur, sqPearson = sqPearson))
+}
+
+
+## inverse link 
+inv.logit <- function(x){exp(x)/(1+exp(x))}
+
+## transform obs to diss
+ObsTrans <- function(p0,w,p){
+
+	prw <- (p*w) / ((1-p) + (p*w))
+
+	p0w <- (p0*w) / ((1-p0) + (p0*w))
+
+	out <- 1 - ((1-prw) / (1-p0w))
+	return(list(prw=prw,out=out))
+}
+
+## fit obs GDM
+fitGDM <- function(formula=NULL,data=NULL){
+
+	fit <- glm(formula,family=binomial(),data=data,control=list(maxit=500),method='nnls.fit')
+
+	return(fit)
+}
+
+rasterOptions(tmpdir="S:\\rasterTemp")
+
+
+
+
+setwd("//lw-osm-02-cdc/OSM_CBR_LW_BACKCAST_work/DEV/hos06j/")
+
+# which data file to use
+file_name <- "//lw-osm-02-cdc/OSM_CBR_LW_BACKCAST_work/DEV/biol/birds/from-ala/filtered/filtered_data_2018-11-20.csv"
+
+## get grid parametres from env grid\\ces-10-cdc\OSM_CDC_GISDATA_work\_DEV\her134\SUBS\out\DES_mean.flt
+ras <- "//lw-osm-02-cdc/OSM_CBR_LW_BACKCAST_work/DEV/AWAP_monthly/RECA/monthly/years1901_2017/Centered1960/FWPT_mean_Cmean_mean_1946_1975.flt" ##"//ces-10-cdc/OSM_CDC_GISDATA_work/_DEV/her134/SUBS/out/DES_mean.flt"
+ras_sp <- raster(ras)
+res <- res(ras_sp)[1] ## resolution
+box <- extent(ras_sp) ## bounding box
+
+## load raw specise observations
+dat <- read.csv(file_name)
+
+## aggregate to site
+datRED <- siteAggregator(dat,res,box)
+
+## clean sites where substrate gives NAs
+writeRaster(ras_sp,file="TEMP_RAS.grd")
+ras_sp <- raster("TEMP_RAS.grd")
+test <- is.na(extract(ras_sp,datRED[,c(6,7)]))
+datRED <- datRED[!test,]
+file.remove("TEMP_RAS.grd")
+file.remove("TEMP_RAS.gri")
+
+setwd("//lw-osm-02-cdc/OSM_CBR_LW_BACKCAST_work/DEV/hos06j")
+write.csv(datRED,"AVES_aggregated_basicFilt.csv",row.names=FALSE)
+save(datRED,file="AVES_aggregated_basicFilt.RData")
+
+### load datRED from siteAggregator process
+#
+s1 <- Sys.time()
+load("AVES_aggregated_basicFilt.RData")
+
+nMatch <- 1000000
+
+
+
+
+## calculate obsPair transform weights
+nMatch <- 2000000
+nSamples <- nMatch*4
+idx <- 1:nrow(datRED)
+s1 <- sample(idx,nSamples,replace=T)
+s2 <- sample(idx,nSamples,replace=T)
+miss <- datRED$gen_spec[s1] != datRED$gen_spec[s2]
+
+missCount <- sum(miss)
+matchCount <- nSamples - missCount
+propMiss <- missCount / nSamples
+propMatch <- matchCount / nSamples
+w <- propMiss/propMatch
+w
+
+## get obsPairs sample
+#require(dynowindow)
+require(raster)
+require(feather)
+require(doSNOW)
+require(foreach)
+require(parallel)
+#source("//lw-osm-02-cdc/OSM_CBR_LW_BACKCAST_work/DEV/hos06j/code/dynowindow.r")
+
+nMatch <- 1000000
+setwd("//lw-osm-02-cdc/OSM_CBR_LW_BACKCAST_work/DEV/hos06j")
+load("AVES_aggregated_basicFilt.RData")
+## reduce to dates where we have env data
+datRED <- datRED[datRED$eventDate != "",]
+date_test <- as.Date(datRED$eventDate) > (as.Date("1911-01-01") %m+% years(45))
+datRED <- datRED[date_test,]
+date_test <- as.Date(datRED$eventDate) < as.Date("2018-01-01")
+datRED <- datRED[date_test,]
+datRED <- droplevels(datRED)
+
+
+if(is.null(nMatch)){stop("nMatch == null: Need to specify number of matches to extract.")}
+
+exe <- exe
+
+data <- data.frame(ID=datRED$ID,Latitude=datRED$latID,Longitude=datRED$lonID,species=datRED$gen_spec,nRecords=datRED$nRecords,nRecords.exDateLocDups=datRED$nRecords.exDateLocDups,nSiteVisits=datRED$nSiteVisits,richness=datRED$richness,stringsAsFactors=FALSE)
+## reduce data to unique site by species
+## calculate number of unique species per site
+LocDups <- paste(data$ID,data$species,sep=":")
+test <- duplicated(LocDups)
+data <- data[!test,]
+## sort by site
+odr <- order(data$ID)
+data <- data[odr,]
+## add row.count
+data$row.count <- 1:nrow(data)
+## species list to factor
+data$species <- as.factor(data$species)
+
+# ## count the number of unique species*site records
+ LocDups <- as.factor(LocDups)
+ ones <- rep(1,nrow(datRED))
+ count <- bySum(ones,LocDups)
+
+
+## use site.richness.extractor to get site x species matrix - used in calculating sorenson - not needed but useful for validation
+sitesPerIteration=50000
+frog.auGrid <- site.richness.extractor.bigData(frog.auGrid=data)
+
+## back to full dataset
+frog.auGrid <- data.frame(ID=datRED$ID,Latitude=datRED$latID,Longitude=datRED$lonID,species=datRED$gen_spec,eventDate=as.character(datRED$eventDate),nRecords=datRED$nRecords,nRecords.exDateLocDups=datRED$nRecords.exDateLocDups,nSiteVisits=datRED$nSiteVisits,richness=datRED$richness,stringsAsFactors=FALSE,Site.Richness=datRED$richness)
+
+## expand m1 back to full dataset
+row.nums <- 1:nrow(m1)
+row.vect <- rep(row.nums,count)
+m2 <- m1[row.vect,]
+
+# garbage collection
+gc()
+
+## run obsPair sampler
+obsPairs_out <- obsPairSampler.bigData.RECA(frog.auGrid,nMatch,m1=m2,richness=TRUE,speciesThreshold=500,coresToUse=detectCores()-1)
+
+registerDoSEQ()
+
+	fn=paste("ObsPairsTable_RECA_",biol_group,"WindowTestRuns.RData",sep="")
+	save(obsPairs_out,file=fn)
+
+	
+	fn=paste("ObsPairsTable_RECA_",biol_group,"WindowTestRuns.RData",sep="")
+s1 <- Sys.time()
+## extract env data - current hardcode window lengths
+ext_data <- obsPairs_out[,2:9]
+
+biol_group="AVES"
+run <- 1
+
+c_yrs <- rev(seq(61,75,by=2)) ## climate time frame
+w_yrs <- c(1)#,2,3) ## weather time frame
+
+##c_yrs <- c_yrs[10:18] ##1:9
+
+for(c_yr in c_yrs){
+	for(w_yr in w_yrs){
+
+		load(fn)
+		tst_1 <- as.Date(paste(obsPairs_out$year1,'-01-01',sep="")) > (as.Date("1911-01-01") %m+% years(max(c_yrs)))
+		tst_2 <- as.Date(paste(obsPairs_out$year2,'-01-01',sep="")) > (as.Date("1911-01-01") %m+% years(max(c_yrs)))
+		obsPairs_out <- obsPairs_out[tst_1 & tst_2,]
+		ext_data <- obsPairs_out[,2:9]
+		nMatch <- 1000000
+		save_prefix <- paste("AVES_","1mil_",c_yr,"climYr_",w_yr,"weathYr_biAverage_",sep="")
+
+## get samples and env data
+
+#obsPairs_out <- getSamples_AND_Env_RECA(datRED=datRED,nMatch=nMtch,biol_group="AVES",gen_windows2=gen_windows,exe2=exe)
+if(TRUE){
+	
+
+	init_params <- list(
+		list(variables = c("mean_PT_191101-201712"),
+			mstat = 'mean', 
+			cstat = 'mean', 
+			window = c_yr,
+			prefix=paste("XbrXbr",c_yr,sep="_")),
+		list(variables = c("TNn_191101-201712", "FWPT_191101-201712"),
+			mstat = 'mean', 
+			cstat = 'min', 
+			window = c_yr,
+			prefix=paste("MinXbr",c_yr,sep="_")),	
+		list(variables = c("max_PT_191101-201712", "FWPT_191101-201712"),
+			mstat = 'mean', 
+			cstat = 'max', 
+			window = c_yr,
+			prefix=paste("MaxXbr",c_yr,sep="_")),		
+		list(variables = c("FD_191101-201712", "TXx_191101-201712"),
+			mstat = 'mean', 
+			cstat = 'max', 
+			window = c_yr,
+			prefix=paste("MaxXbr",c_yr,sep="_")),		
+		list(variables = c("TNn_191101-201712", "PD_191101-201712"),
+			mstat = 'mean', 
+			cstat = 'max', 
+			window = c_yr,
+			prefix=paste("MaxXbr",c_yr,sep="_")),
+			
+		list(variables = c("mean_PT_191101-201712"),
+			mstat = 'mean', 
+			cstat = 'mean', 
+			window = w_yr,
+			prefix=paste("XbrXbr",w_yr,sep="_")),
+		list(variables = c("TNn_191101-201712", "FWPT_191101-201712"),
+			mstat = 'mean', 
+			cstat = 'min', 
+			window = w_yr,
+			prefix=paste("MinXbr",w_yr,sep="_")),	
+		list(variables = c("max_PT_191101-201712", "FWPT_191101-201712"),
+			mstat = 'mean', 
+			cstat = 'max', 
+			window = w_yr,
+			prefix=paste("MaxXbr",w_yr,sep="_")),		
+		list(variables = c("FD_191101-201712", "TXx_191101-201712"),
+			mstat = 'mean', 
+			cstat = 'max', 
+			window = w_yr,
+			prefix=paste("MaxXbr",w_yr,sep="_")),		
+		list(variables = c("TNn_191101-201712", "PD_191101-201712"),
+			mstat = 'mean', 
+			cstat = 'max', 
+			window = w_yr,
+			prefix=paste("MaxXbr",w_yr,sep="_"))
+	)
+	
+	
+	cl <- makeCluster(length(init_params))
+	registerDoSNOW(cl)
+	
+	env_outA <- foreach(x=1:length(init_params),.combine='cbind',.packages="feather") %dopar% {
+		out <- gen_windows(pairs=ext_data,
+		variables = init_params[[x]]$variables,
+		mstat =  init_params[[x]]$mstat, 
+		cstat =  init_params[[x]]$cstat, 
+		window =  init_params[[x]]$window,
+		)
+		colnames(out) <- paste(init_params[[x]]$prefix,colnames(out),sep="_")
+		out[,9:ncol(out)]
+	}
+
+	
+	env_outB <- foreach(x=1:length(init_params),.combine='cbind',.packages="feather") %dopar% {
+		out <- gen_windows(pairs=ext_data[,c(1,2,7,8,5,6,3,4)],
+		variables = init_params[[x]]$variables,
+		mstat =  init_params[[x]]$mstat, 
+		cstat =  init_params[[x]]$cstat, 
+		window =  init_params[[x]]$window,
+		)
+		colnames(out) <- paste(init_params[[x]]$prefix,colnames(out),sep="_")
+		out[,9:ncol(out)]
+	}
+	stopCluster(cl)
+	registerDoSEQ()
+	
+	env_out <- (env_outA + env_outB) / 2
+
+##here	
+
+		
+	## reshuffle env_out
+	env_out1 <- env_out[,grep("201712_1",names(env_out))]
+	env_out2 <- env_out[,grep("201712_2",names(env_out))]
+	
+	## make anomalies
+	env_anom_out1 <- env_out1[,grep(paste("_",w_yr,"_",sep=""),colnames(env_out1))] - env_out1[,grep(paste("_",c_yr,"_",sep=""),colnames(env_out1))]
+	colnames(env_anom_out1) <- gsub("191101-201712","anom",colnames(env_anom_out1))
+	env_anom_out2 <- env_out2[,grep(paste("_",w_yr,"_",sep=""),colnames(env_out2))] - env_out2[,grep(paste("_",c_yr,"_",sep=""),colnames(env_out2))]
+	colnames(env_anom_out2) <- gsub("191101-201712","anom",colnames(env_anom_out2))
+		
+	pnt1 <- SpatialPoints(data.frame(ext_data$Lon1,ext_data$Lat1))
+	pnt2 <- SpatialPoints(data.frame(ext_data$Lon2,ext_data$Lat2))
+
+	subs_brk <- brick("SUBS_brk_AVES.grd")
+	env1_subs <- extract(subs_brk,pnt1)
+	env2_subs <- extract(subs_brk,pnt2)
+	
+	
+	nms <- paste(colnames(env1_subs),"_1",sep="")
+	colnames(env1_subs) <- nms
+	nms <- paste(colnames(env2_subs),"_2",sep="")
+	colnames(env2_subs) <- nms
+	
+	Sys.time() - s1
+	
+	Trng_1 <- abs(env_out1[,c(grep(paste("MinXbr_",c_yr,"_TNn_191101-201712",sep=""),colnames(env_out1)),grep(paste("MinXbr_",w_yr,"_TNn_191101-201712",sep=""),colnames(env_out1)))] - env_out1[,c(grep(paste("MaxXbr_",c_yr,"_TXx_191101-201712",sep=""),colnames(env_out1)),grep(paste("MaxXbr_",w_yr,"_TXx_191101-201712",sep=""),colnames(env_out1)))])
+	names(Trng_1) <- c("Trng_15_191101-201712_1","Trng_1_191101-201712_1")
+	Trng_2 <- abs(env_out2[,c(grep(paste("MinXbr_",c_yr,"_TNn_191101-201712",sep=""),colnames(env_out2)),grep(paste("MinXbr_",w_yr,"_TNn_191101-201712",sep=""),colnames(env_out2)))] - env_out2[,c(grep(paste("MaxXbr_",c_yr,"_TXx_191101-201712",sep=""),colnames(env_out2)),grep(paste("MaxXbr_",w_yr,"_TXx_191101-201712",sep=""),colnames(env_out2)))])
+	names(Trng_2) <- c("Trng_15_191101-201712_2","Trng_1_191101-201712_2")
+	
+	Sys.time()-s1
+	
+	# obsPairs_out <- cbind(obsPairs_out,
+							# env15_meanmean[,9:12],env15_minmean[,9:18],env15_maxmean[,9:16],
+							# env1_meanmean[,9:12],env1_minmean[,9:18],env1_maxmean[,9:16],
+							# env1_subs,env2_subs)
+	obsPairs_out <- cbind(obsPairs_out,
+							env_out1,env1_subs,Trng_1,env_anom_out1,
+							env_out2,env2_subs,Trng_2,env_anom_out2)
+
+	## clean up
+	#rm(ext_data)
+	rm(frog.auGrid)
+	rm(data)
+	rm(m1)
+	rm(list=c("env_out","env_out1","env_out2","env1_subs","env2_subs","Trng_1","Trng_2"))
+	gc()
+	
+	## save
+	save(obsPairs_out,file=paste(save_prefix,"ObsEnvTable.RData",sep=""))
+	#write.csv()
+	}
+
+
+
+
+## temporalily remove NAs - this to be fixed in getSamples before sampling
+test <- is.na(rowSums(obsPairs_out[,23:96]))
+obsPairs_out <- obsPairs_out[!test,]
+
+## there's NAflags present (-9999). Find and remove
+tst <- c()
+for(c in 23:96){
+	if(any(obsPairs_out[,c] == -9999)){
+	tst <- c(tst,c);print(c)}
+	}
+test <- rep(0,nrow(obsPairs_out))
+for(c in 23:96){
+	test <- test + (obsPairs_out[,c] == -9999)
+}
+test <- test == 0
+
+obsPairs_out <- obsPairs_out[test,]
+
+print(nrow(obsPairs_out))
+
+# ## check correlctions
+# #cor_test <- cor(obsPairs_out[,23:78])
+# cor_test <- cor(obsPairs_out[,23:102])
+
+# prs <- c()
+# cors <- c()
+
+# for(i in 1:nrow(cor_test)){
+	# for(j in 1:ncol(cor_test)){
+		# if(j > i){
+			# tst <-abs(cor_test[i,j] > 0.7 & cor_test[i,j] < 1.0)
+			# if(tst){
+			# prs <- c(prs,paste(rownames(cor_test)[i],colnames(cor_test)[j],sep="~"))
+			# cors <- c(cors,cor_test[i,j] )
+			# }
+		# }
+	# }
+# }
+
+# #cbind(prs,cors)
+
+
+# cor(obsPairs_out[tst,c(23:33)[3:4]],pch="+")
+
+## spline data
+toSpline  <- obsPairs_out[,c(23:ncol(obsPairs_out))]
+toSpline <- toSpline[,-c(10:18,47:55)]
+##toSpline <- toSpline[,-c(grep("XbrXbr",colnames(toSpline)),grep("MinXbr_1_TNn_",colnames(toSpline)),grep("MinXbr_15_TNn_",colnames(toSpline)),grep("MinXbr_1_TNn_anom",colnames(toSpline)))]
+#toSpline  <- obsPairs_out[,c(23,24,51,52)] ## testing
+splined <- splineData(toSpline)
+
+#splined <- splined[,1:3] ## testing
+
+## fit model
+mod_ready <- cbind(Match=obsPairs_out$Match,as.data.frame(splined)) ## make table
+colnames(mod_ready) <- gsub("191101-201712_","",colnames(mod_ready)) ## make colnames r friendly
+f1 <- paste(colnames(mod_ready)[-1],collapse="+") ## fformula
+formula <- as.formula(paste(colnames(mod_ready)[1],"~",f1,sep="")) ## formula
+obsGDM_1 <- fitGDM(formula=formula,data=mod_ready) ## fit
+
+
+gdm_dev <- RsqGLM(obs = obsGDM_1$y, pred = fitted(obsGDM_1))
+save(gdm_dev,file=paste(save_prefix,file="DevianceCalcs.RData"))
+
+## rejoin everything to fit for diagnostic plots
+fit <- list()
+fit$intercept <- coef(obsGDM_1)[1]
+fit$sample <- nrow(data)
+
+fit$predictors <- gsub("191101-201712_","",gsub("_spl1","",colnames(splined)[grep("_spl1",colnames(splined))]))
+fit$coefficients <- coef(obsGDM_1)[-1]
+fit$coefficients[is.na(fit$coefficients)] <- 0
+fitnms <- names(fit$quantiles)
+## fold X and create site vector
+nc <- ncol(toSpline)
+nc2 <- nc/2
+X1 <- toSpline[,1:nc2]
+X2 <- toSpline[,(nc2+1):nc]
+nms <- names(X1)
+names(X2) <- nms
+## site vector
+sv <- c(rep(1,nrow(X1)),rep(2,nrow(X2)))
+XX <- rbind(X1,X2)
+fit$quantiles <- unlist(lapply(1:ncol(XX),function(x){quantile(XX[,x],c(0,0.5,1))}))
+#names(fit$quantiles) <- c(fitnms,names(MDSquan))
+fit$splines <- rep(3,ncol(XX))
+fit$predicted <- fitted(obsGDM_1)
+fit$ecological <- obsGDM_1$linear.predictors
+
+save(fit,file=paste(save_prefix,"fittedGDM.RData",sep="_"))
+coefs<-coef(obsGDM_1)
+save(coefs,file=paste(save_prefix,"coefficients.RData",sep="_"))
+D2 <- (obsGDM_1$null.deviance - obsGDM_1$deviance) /obsGDM_1$null.deviance
+print(paste("Climate: ",c_yr," yrs   Weather: ",w_yr," yrs",sep=""))
+print(paste('Deviance exp:',D2))
+save(D2,file=paste(save_prefix,"D2_deviance.RData",sep="_"))
+#save(obsGDM,filename=paste(save_prefix,"fittedMODobj.RData",sep="_"))
+
+## diagnostic plots
+tiff(paste(save_prefix,"GDM-ObsDiag.tif",sep="_"),height=6,width=6,units="in",res=200,compression="lzw")
+obs.gdm.plot(obsGDM_1,paste(save_prefix),w,Is=fit$intercept)
+dev.off()
+
+pdf(paste(save_prefix,"GDM-gdmDiag.pdf",sep="_"))
+gdm.spline.plot(fit)		
+dev.off()
+
+
+} ## end for loop w_years
+
+} ## end for loop c_years

@@ -1,0 +1,163 @@
+##############################################################################
+##
+## RECA obsGDM Configuration
+##
+## All paths and run parameters are defined here. Override any setting by
+## setting the corresponding environment variable before sourcing this file,
+## or by editing the defaults below.
+##
+##############################################################################
+
+# ---------------------------------------------------------------------------
+# Helper: read env var with fallback default
+# ---------------------------------------------------------------------------
+env_or_default <- function(var, default) {
+  val <- Sys.getenv(var, unset = NA)
+  if (is.na(val)) default else val
+}
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+
+config <- list()
+
+## Root directory for this project
+config$project_root <- env_or_default(
+  "RECA_PROJECT_ROOT",
+  normalizePath(file.path(dirname(sys.frame(1)$ofile)), mustWork = FALSE)
+)
+
+## R module directory (auto-derived)
+config$r_dir <- file.path(config$project_root, "R")
+
+## Python executable (for gen_windows → pyper.py calls)
+config$python_exe <- env_or_default("RECA_PYTHON_EXE", "python3")
+
+## Path to pyper.py script
+config$pyper_script <- env_or_default(
+	"RECA_PYPER_SCRIPT",
+	file.path(config$project_root, "python", "pyper.py")
+)
+
+## Input data directory (ALA CSV files, substrate rasters, etc.)
+config$data_dir <- env_or_default("RECA_DATA_DIR", file.path(config$project_root, "data"))
+
+## AWAP geonpy .npy files directory
+config$npy_src <- env_or_default("RECA_NPY_SRC", file.path(config$data_dir, "geonpy"))
+
+## Substrate raster brick file (.grd)
+config$substrate_raster <- env_or_default(
+  "RECA_SUBSTRATE_RASTER",
+  file.path(config$data_dir, "SUBS_brk_AVES.grd")
+)
+
+## Reference raster for grid alignment (.flt)
+config$reference_raster <- env_or_default(
+  "RECA_REFERENCE_RASTER",
+  file.path(config$data_dir, "FWPT_mean_Cmean_mean_1946_1975.flt")
+)
+
+## Output directory
+config$output_dir <- env_or_default("RECA_OUTPUT_DIR", file.path(config$project_root, "output"))
+
+## Raster temp directory (rasterOptions(tmpdir=...))
+config$raster_tmpdir <- env_or_default("RECA_RASTER_TMPDIR", tempdir())
+
+## Temp directory for feather exchange files
+config$feather_tmpdir <- env_or_default("RECA_FEATHER_TMPDIR", tempdir())
+
+# ---------------------------------------------------------------------------
+# Run parameters (defaults for AVES SpatTemp biAverage v3)
+# ---------------------------------------------------------------------------
+
+## Species group: "AVES", "PLANTS", or "VAS"
+config$species_group <- env_or_default("RECA_SPECIES_GROUP", "AVES")
+
+## Input observations CSV filename (relative to data_dir)
+config$obs_csv <- env_or_default("RECA_OBS_CSV", "filtered_data_2018-11-20.csv")
+
+## Number of observation-pair matches to sample
+config$nMatch <- as.integer(env_or_default("RECA_NMATCH", "1000000"))
+
+## Climate window years to iterate over
+config$c_yrs <- eval(parse(text = env_or_default("RECA_C_YRS", "seq(61, 75, by = 2)")))
+
+## Weather window years to iterate over
+config$w_yrs <- eval(parse(text = env_or_default("RECA_W_YRS", "c(1)")))
+
+## Use bidirectional averaging of env extraction (biAverage)
+config$biAverage <- as.logical(env_or_default("RECA_BIAVERAGE", "TRUE"))
+
+## Decomposition variant: "none", "v2" (spatial-temporal), or "v3" (same_site|same_time only)
+config$decomposition <- env_or_default("RECA_DECOMPOSITION", "v3")
+
+## Minimum observation date filter (observations before this date are excluded)
+config$min_date <- as.Date(env_or_default("RECA_MIN_DATE", "1911-01-01"))
+
+## Maximum observation date filter
+config$max_date <- as.Date(env_or_default("RECA_MAX_DATE", "2018-01-01"))
+
+## Date offset in years added to min_date for temporal filtering
+## (observations need env data going back c_yr years from their date)
+config$date_offset_years <- as.integer(env_or_default("RECA_DATE_OFFSET_YEARS", "45"))
+
+## Grid resolution for site aggregation (degrees)
+config$grid_resolution <- as.numeric(env_or_default("RECA_GRID_RESOLUTION", "0.01"))
+
+## geonpy start year (first year of monthly climate data)
+config$geonpy_start_year <- as.integer(env_or_default("RECA_GEONPY_START_YEAR", "1911"))
+
+## Parallel settings
+config$cores_to_use <- as.integer(env_or_default(
+  "RECA_CORES",
+  as.character(max(1, parallel::detectCores() - 1))
+))
+
+## Species threshold for switching parallel strategies in obsPairSampler
+config$species_threshold <- as.integer(env_or_default("RECA_SPECIES_THRESHOLD", "500"))
+
+## Number of samples for estimating mismatch/match ratio (w)
+config$w_estimation_samples <- as.integer(env_or_default("RECA_W_SAMPLES", "8000000"))
+
+## Skip env extraction if output file already exists
+config$skip_existing_env <- as.logical(env_or_default("RECA_SKIP_EXISTING_ENV", "TRUE"))
+
+# ---------------------------------------------------------------------------
+# Environmental variable extraction parameters
+#
+# Each element is a list with:
+#   variables - character vector of geonpy variable names (without .npy)
+#   mstat     - monthly summary statistic ('mean', 'min', 'max')
+#   cstat     - climatology summary statistic ('mean', 'min', 'max')
+# ---------------------------------------------------------------------------
+config$env_params <- list(
+  list(variables = c("mean_PT_191101-201712"),
+       mstat = "mean", cstat = "mean"),
+  list(variables = c("TNn_191101-201712", "FWPT_191101-201712"),
+       mstat = "mean", cstat = "min"),
+  list(variables = c("max_PT_191101-201712", "FWPT_191101-201712"),
+       mstat = "mean", cstat = "max"),
+  list(variables = c("FD_191101-201712", "TXx_191101-201712"),
+       mstat = "mean", cstat = "max"),
+  list(variables = c("TNn_191101-201712", "PD_191101-201712"),
+       mstat = "mean", cstat = "max")
+)
+
+# ---------------------------------------------------------------------------
+# Create output directory if needed
+# ---------------------------------------------------------------------------
+if (!dir.exists(config$output_dir)) {
+  dir.create(config$output_dir, recursive = TRUE)
+}
+
+cat("RECA config loaded.\n")
+cat("  Species group :", config$species_group, "\n")
+cat("  Data dir      :", config$data_dir, "\n")
+cat("  Output dir    :", config$output_dir, "\n")
+cat("  nMatch        :", config$nMatch, "\n")
+cat("  c_yrs         :", paste(config$c_yrs, collapse = ", "), "\n")
+cat("  w_yrs         :", paste(config$w_yrs, collapse = ", "), "\n")
+cat("  biAverage     :", config$biAverage, "\n")
+cat("  decomposition :", config$decomposition, "\n")
+cat("  cores         :", config$cores_to_use, "\n")

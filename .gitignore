@@ -1,0 +1,2 @@
+# Data files - large datasets should not be committed to version control
+data/

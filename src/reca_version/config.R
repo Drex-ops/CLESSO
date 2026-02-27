@@ -22,14 +22,14 @@ env_or_default <- function(var, default) {
 
 config <- list()
 
-## Root directory for this project
+## Root directory for this project (two levels up from this config file)
 config$project_root <- env_or_default(
   "RECA_PROJECT_ROOT",
-  normalizePath(file.path(dirname(sys.frame(1)$ofile)), mustWork = FALSE)
+  normalizePath(file.path(dirname(sys.frame(1)$ofile), "..", ".."), mustWork = FALSE)
 )
 
 ## R module directory (auto-derived)
-config$r_dir <- file.path(config$project_root, "R")
+config$r_dir <- file.path(config$project_root, "src", "reca_version", "R")
 
 ## Python executable (for gen_windows → pyper.py calls)
 config$python_exe <- env_or_default("RECA_PYTHON_EXE", "python3")
@@ -37,7 +37,7 @@ config$python_exe <- env_or_default("RECA_PYTHON_EXE", "python3")
 ## Path to pyper.py script
 config$pyper_script <- env_or_default(
 	"RECA_PYPER_SCRIPT",
-	file.path(config$project_root, "python", "pyper.py")
+	file.path(config$project_root, "src", "reca_version", "python", "pyper.py")
 )
 
 ## Input data directory (ALA CSV files, substrate rasters, etc.)
@@ -55,11 +55,11 @@ config$substrate_raster <- env_or_default(
 ## Reference raster for grid alignment (.flt)
 config$reference_raster <- env_or_default(
   "RECA_REFERENCE_RASTER",
-  file.path(config$data_dir, "FWPT_mean_Cmean_mean_1946_1975.flt")
+  file.path(config$data_dir, "FWPT_mean_Cmax_mean_1946_1975.flt")
 )
 
 ## Output directory
-config$output_dir <- env_or_default("RECA_OUTPUT_DIR", file.path(config$project_root, "output"))
+config$output_dir <- env_or_default("RECA_OUTPUT_DIR", file.path(config$project_root, "src", "reca_version", "output"))
 
 ## Raster temp directory (rasterOptions(tmpdir=...))
 config$raster_tmpdir <- env_or_default("RECA_RASTER_TMPDIR", tempdir())

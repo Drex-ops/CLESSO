@@ -12,7 +12,7 @@
 # ---------------------------------------------------------------------------
 load_packages <- function() {
   pkgs <- c("raster", "nnls", "lubridate", "data.table",
-            "doSNOW", "foreach", "parallel", "Matrix")
+            "doSNOW", "foreach", "parallel", "Matrix","arrow")
   for (pkg in pkgs) {
     if (!requireNamespace(pkg, quietly = TRUE)) {
       stop(paste("Required package not installed:", pkg))

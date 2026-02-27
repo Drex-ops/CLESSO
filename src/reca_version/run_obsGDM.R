@@ -23,8 +23,14 @@ cat("Loading configuration...\n")
 # ---------------------------------------------------------------------------
 # Source configuration and modules
 # ---------------------------------------------------------------------------
-this_dir <- dirname(sys.frame(1)$ofile)
-source(file.path(this_dir, "config.R"))
+this_dir <- tryCatch(
+  dirname(sys.frame(1)$ofile),           # works when sourced
+  error = function(e) {
+    if (nchar(getwd()) > 0) getwd()      # fallback: current working directory
+    else stop("Cannot determine script directory.")
+  }
+)
+source(file.path(this_dir, "src", "reca_version","config.R"))
 source(file.path(config$r_dir, "utils.R"))
 source(file.path(config$r_dir, "gdm_functions.R"))
 source(file.path(config$r_dir, "site_aggregator.R"))
@@ -155,8 +161,11 @@ obsPairs_out <- obsPairSampler.bigData.RECA(
 registerDoSEQ()
 
 obspairs_file <- file.path(config$output_dir,
-  paste0("ObsPairsTable_RECA_", config$species_group, "_WindowTestRuns.RData"))
-save(obsPairs_out, file = obspairs_file)
+  paste0("ObsPairsTable_RECA_", config$species_group, "_WindowTestRuns.rds"))
+saveRDS(obsPairs_out, file = obspairs_file)
+
+## Keep original in memory for the loop (avoids OneDrive read issues)
+obsPairs_orig <- obsPairs_out
 
 # ===========================================================================
 # STEP 6: Loop over climate/weather window combinations
@@ -169,8 +178,8 @@ for (c_yr in config$c_yrs) {
 
     cat(sprintf("\n>>> Climate: %d yrs | Weather: %d yrs\n", c_yr, w_yr))
 
-    ## Reload obs pairs and apply temporal filter
-    load(obspairs_file)
+    ## Reload obs pairs from in-memory copy and apply temporal filter
+    obsPairs_out <- obsPairs_orig
     tst_1 <- as.Date(paste0(obsPairs_out$year1, "-01-01")) >
                (as.Date("1911-01-01") %m+% years(max(config$c_yrs)))
     tst_2 <- as.Date(paste0(obsPairs_out$year2, "-01-01")) >
@@ -212,11 +221,16 @@ for (c_yr in config$c_yrs) {
       env_outA <- foreach(x = 1:length(init_params), .combine = "cbind",
                           .packages = "arrow") %dopar% {
         out <- gen_windows(
-          pairs     = ext_data,
-          variables = init_params[[x]]$variables,
-          mstat     = init_params[[x]]$mstat,
-          cstat     = init_params[[x]]$cstat,
-          window    = init_params[[x]]$window
+          pairs        = ext_data,
+          variables    = init_params[[x]]$variables,
+          mstat        = init_params[[x]]$mstat,
+          cstat        = init_params[[x]]$cstat,
+          window       = init_params[[x]]$window,
+          npy_src      = config$npy_src,
+          start_year   = config$geonpy_start_year,
+          python_exe   = config$python_exe,
+          pyper_script = config$pyper_script,
+          feather_tmpdir = config$feather_tmpdir
         )
         colnames(out) <- paste(init_params[[x]]$prefix, colnames(out), sep = "_")
         out[, 9:ncol(out)]
@@ -228,11 +242,16 @@ for (c_yr in config$c_yrs) {
         env_outB <- foreach(x = 1:length(init_params), .combine = "cbind",
                             .packages = "arrow") %dopar% {
           out <- gen_windows(
-            pairs     = ext_data[, c(1, 2, 7, 8, 5, 6, 3, 4)],  # swap sites
-            variables = init_params[[x]]$variables,
-            mstat     = init_params[[x]]$mstat,
-            cstat     = init_params[[x]]$cstat,
-            window    = init_params[[x]]$window
+            pairs        = ext_data[, c(1, 2, 7, 8, 5, 6, 3, 4)],  # swap sites
+            variables    = init_params[[x]]$variables,
+            mstat        = init_params[[x]]$mstat,
+            cstat        = init_params[[x]]$cstat,
+            window       = init_params[[x]]$window,
+            npy_src      = config$npy_src,
+            start_year   = config$geonpy_start_year,
+            python_exe   = config$python_exe,
+            pyper_script = config$pyper_script,
+            feather_tmpdir = config$feather_tmpdir
           )
           colnames(out) <- paste(init_params[[x]]$prefix, colnames(out), sep = "_")
           out[, 9:ncol(out)]

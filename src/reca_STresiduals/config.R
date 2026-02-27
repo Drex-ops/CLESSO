@@ -84,11 +84,15 @@ config$obs_csv <- env_or_default("RECA_OBS_CSV", "filtered_data_2018-11-20.csv")
 ## Number of observation-pair matches to sample
 config$nMatch <- as.integer(env_or_default("RECA_NMATCH", "1000000"))
 
-## Climate window years to iterate over
+## Climate window years to iterate over (kept for compatibility)
 config$c_yrs <- eval(parse(text = env_or_default("RECA_C_YRS", "seq(61, 75, by = 2)")))
 
-## Weather window years to iterate over
+## Weather window years to iterate over (kept for compatibility)
 config$w_yrs <- eval(parse(text = env_or_default("RECA_W_YRS", "c(1)")))
+
+## Fixed climate window size in years for spatial-temporal residual extraction.
+## Used as the averaging window for both spatial and temporal env extraction.
+config$climate_window <- as.integer(env_or_default("RECA_CLIMATE_WINDOW", "30"))
 
 ## Use bidirectional averaging of env extraction (biAverage)
 config$biAverage <- as.logical(env_or_default("RECA_BIAVERAGE", "TRUE"))
@@ -156,12 +160,13 @@ if (!dir.exists(config$output_dir)) {
 }
 
 cat("RECA config loaded.\n")
-cat("  Species group :", config$species_group, "\n")
-cat("  Data dir      :", config$data_dir, "\n")
-cat("  Output dir    :", config$output_dir, "\n")
-cat("  nMatch        :", config$nMatch, "\n")
-cat("  c_yrs         :", paste(config$c_yrs, collapse = ", "), "\n")
-cat("  w_yrs         :", paste(config$w_yrs, collapse = ", "), "\n")
-cat("  biAverage     :", config$biAverage, "\n")
-cat("  decomposition :", config$decomposition, "\n")
-cat("  cores         :", config$cores_to_use, "\n")
+cat("  Species group  :", config$species_group, "\n")
+cat("  Data dir       :", config$data_dir, "\n")
+cat("  Output dir     :", config$output_dir, "\n")
+cat("  nMatch         :", config$nMatch, "\n")
+cat("  climate_window :", config$climate_window, "years\n")
+cat("  c_yrs          :", paste(config$c_yrs, collapse = ", "), "\n")
+cat("  w_yrs          :", paste(config$w_yrs, collapse = ", "), "\n")
+cat("  biAverage      :", config$biAverage, "\n")
+cat("  decomposition  :", config$decomposition, "\n")
+cat("  cores          :", config$cores_to_use, "\n")

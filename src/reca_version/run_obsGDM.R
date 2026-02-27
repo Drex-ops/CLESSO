@@ -173,7 +173,7 @@ obsPairs_orig <- obsPairs_out
 cat("\n--- Step 6: Climate window loop ---\n")
 biol_group <- config$species_group
 
-for (c_yr in config$c_yrs) {
+for (c_yr in config$c_yrs[1]) {
   for (w_yr in config$w_yrs) {
 
     cat(sprintf("\n>>> Climate: %d yrs | Weather: %d yrs\n", c_yr, w_yr))

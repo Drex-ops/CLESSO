@@ -31,7 +31,7 @@ I_spline <- function(predVal, q1, q2, q3) {
 }
 
 # ---------------------------------------------------------------------------
-# splineData - Create I-spline transformed site-pair distance table
+# splineData - Create I-spline transformed site-pair distance table (ORIGINAL)
 #
 # Takes a matrix X where the first half of columns are site-1 values and
 # the second half are site-2 values. Applies I-spline basis transformation
@@ -104,6 +104,86 @@ splineData <- function(X, splines = NULL, quantiles = NULL) {
 }
 
 # ---------------------------------------------------------------------------
+# splineData_fast - Optimised I-spline site-pair distance table
+#
+# Drop-in replacement for splineData(). Same inputs and outputs, but
+# avoids the three main bottlenecks of the original:
+#
+#   1. cbind() growth loop — replaced by pre-allocated result matrix
+#   2. rbind(X1, X2)       — sites processed separately (halves row count)
+#   3. End-of-function split — abs difference computed in-place
+#
+# Produces numerically identical results to splineData().
+# ---------------------------------------------------------------------------
+splineData_fast <- function(X, splines = NULL, quantiles = NULL) {
+  nc  <- ncol(X)
+  nc2 <- as.integer(nc / 2)
+  if (nc %% 2 != 0) stop("X must have an even number of columns")
+
+  nr <- nrow(X)
+
+  ## Coerce to matrix once (avoids repeated data.frame dispatch)
+  X  <- as.matrix(X)
+  X1 <- X[, 1:nc2, drop = FALSE]
+  X2 <- X[, (nc2 + 1L):nc, drop = FALSE]
+  nms <- colnames(X1)
+  if (is.null(nms)) nms <- paste0("V", seq_len(nc2))
+
+  ## Default: 3 I-spline bases per predictor
+  if (is.null(splines)) splines <- rep(3L, nc2)
+  total_splines <- sum(splines)
+
+  ## Compute quantiles from combined data WITHOUT stacking
+  if (is.null(quantiles)) {
+    if (!all(splines == 3L))
+      stop("Must specify quantile positions if all(splines) != 3")
+    quantiles <- numeric(total_splines)
+    for (j in seq_len(nc2)) {
+      q <- quantile(c(X1[, j], X2[, j]), c(0, 0.5, 1))
+      base <- (j - 1L) * 3L
+      quantiles[base + 1L] <- q[1L]
+      quantiles[base + 2L] <- q[2L]
+      quantiles[base + 3L] <- q[3L]
+    }
+  }
+
+  if (length(quantiles) != total_splines)
+    stop("Number of quantiles must equal number of splines")
+
+  ## Pre-allocate output matrix (the single biggest speedup)
+  result <- matrix(NA_real_, nrow = nr, ncol = total_splines)
+
+  ## Process each predictor — apply I_spline to X1 and X2 separately
+  csp     <- c(0L, cumsum(splines))
+  out_col <- 0L
+
+  for (j in seq_len(nc2)) {
+    ns   <- splines[j]
+    v1   <- X1[, j]
+    v2   <- X2[, j]
+    quan <- quantiles[(csp[j] + 1L):(csp[j] + ns)]
+
+    for (sp in seq_len(ns)) {
+      out_col <- out_col + 1L
+
+      if (sp == 1L)       { q1 <- quan[1]; q2 <- quan[1]; q3 <- quan[2] }
+      else if (sp == ns)  { q1 <- quan[ns - 1]; q2 <- quan[ns]; q3 <- quan[ns] }
+      else                { q1 <- quan[sp - 1]; q2 <- quan[sp]; q3 <- quan[sp + 1] }
+
+      result[, out_col] <- abs(I_spline(v1, q1, q2, q3) -
+                                I_spline(v2, q1, q2, q3))
+    }
+  }
+
+  ## Column names (identical to splineData output)
+  NMS   <- rep(nms, splines)
+  SPNMS <- paste0("spl", unlist(lapply(splines, function(x) seq_len(x))))
+  colnames(result) <- paste(NMS, SPNMS, sep = "_")
+
+  result
+}
+
+# ---------------------------------------------------------------------------
 # negexp - Negative exponential GDM link function for glm()
 #
 # Link:         g(mu)  = -log(1 - mu)
@@ -139,7 +219,8 @@ negexp <- function() {
 # ---------------------------------------------------------------------------
 nnls.fit <- function(x, y, weights = rep(1, nobs), start = NULL,
                      etastart = NULL, mustart = NULL, offset = rep(0, nobs),
-                     family = gaussian(), control = list(), intercept = TRUE) {
+                     family = gaussian(), control = list(), intercept = TRUE,
+                     singular.ok = TRUE, ...) {
   require(nnls)
   control  <- do.call("glm.control", control)
   x        <- as.matrix(x)

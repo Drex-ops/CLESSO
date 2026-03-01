@@ -48,7 +48,7 @@ config$pyper_script <- env_or_default(
 config$data_dir <- env_or_default("RECA_DATA_DIR", file.path(config$project_root, "data"))
 
 ## AWAP geonpy .npy files directory
-config$npy_src <- env_or_default("RECA_NPY_SRC", "/Volumes/DATA/MAIN/NATIONAL/CLIMATE/geonpy")
+config$npy_src <- env_or_default("RECA_NPY_SRC", "/Volumes/PortableSSD/CLIMATE/geonpy")
 
 ## Substrate raster brick file (.grd)
 config$substrate_raster <- env_or_default(

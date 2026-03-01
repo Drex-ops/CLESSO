@@ -8,4 +8,6 @@ __pycache__/
 *.pyd
 *.log
 
-src/reca_version/output/*
+
+# Ignore any folder called output
+**/output/

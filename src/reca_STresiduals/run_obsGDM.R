@@ -37,6 +37,7 @@ source(file.path(config$r_dir, "site_aggregator.R"))
 source(file.path(config$r_dir, "site_richness_extractor.R"))
 source(file.path(config$r_dir, "obs_pair_sampler.R"))
 source(file.path(config$r_dir, "gen_windows.R"))
+source(file.path(config$r_dir, "run_chunked_env.R"))
 source(file.path(config$r_dir, "plotting.R"))
 
 # ---------------------------------------------------------------------------
@@ -258,44 +259,13 @@ if (get_env) {
   cl <- makeCluster(n_workers)
   registerDoSNOW(cl)
 
-  env_spatA <- foreach(x = 1:length(spatial_params), .combine = "cbind",
-                       .packages = "arrow") %dopar% {
-    out <- gen_windows(
-      pairs        = spatial_pairs,
-      variables    = spatial_params[[x]]$variables,
-      mstat        = spatial_params[[x]]$mstat,
-      cstat        = spatial_params[[x]]$cstat,
-      window       = spatial_params[[x]]$window,
-      npy_src      = config$npy_src,
-      start_year   = config$geonpy_start_year,
-      python_exe   = config$python_exe,
-      pyper_script = config$pyper_script,
-      feather_tmpdir = config$feather_tmpdir
-    )
-    colnames(out) <- paste(spatial_params[[x]]$prefix, colnames(out), sep = "_")
-    out[, 9:ncol(out)]
-  }
+  env_spatA <- run_chunked_env(spatial_pairs, spatial_params, "Spatial-A")
 
   ## Bidirectional averaging (spatial only – temporal pairs share the same site)
   if (config$biAverage) {
     cat("  Computing bidirectional average (spatial)...\n")
-    env_spatB <- foreach(x = 1:length(spatial_params), .combine = "cbind",
-                         .packages = "arrow") %dopar% {
-      out <- gen_windows(
-        pairs        = spatial_pairs[, c(5, 6, 7, 8, 1, 2, 3, 4)],  # swap sites
-        variables    = spatial_params[[x]]$variables,
-        mstat        = spatial_params[[x]]$mstat,
-        cstat        = spatial_params[[x]]$cstat,
-        window       = spatial_params[[x]]$window,
-        npy_src      = config$npy_src,
-        start_year   = config$geonpy_start_year,
-        python_exe   = config$python_exe,
-        pyper_script = config$pyper_script,
-        feather_tmpdir = config$feather_tmpdir
-      )
-      colnames(out) <- paste(spatial_params[[x]]$prefix, colnames(out), sep = "_")
-      out[, 9:ncol(out)]
-    }
+    env_spatB <- run_chunked_env(spatial_pairs, spatial_params, "Spatial-B",
+                                  swap_sites = TRUE)
     env_spatial <- (env_spatA + env_spatB) / 2
   } else {
     env_spatial <- env_spatA
@@ -303,23 +273,7 @@ if (get_env) {
 
   ## --- Parallel extraction: TEMPORAL component ---
   cat("  Extracting temporal environmental data...\n")
-  env_temporal <- foreach(x = 1:length(temporal_params), .combine = "cbind",
-                          .packages = "arrow") %dopar% {
-    out <- gen_windows(
-      pairs        = temporal_pairs,
-      variables    = temporal_params[[x]]$variables,
-      mstat        = temporal_params[[x]]$mstat,
-      cstat        = temporal_params[[x]]$cstat,
-      window       = temporal_params[[x]]$window,
-      npy_src      = config$npy_src,
-      start_year   = config$geonpy_start_year,
-      python_exe   = config$python_exe,
-      pyper_script = config$pyper_script,
-      feather_tmpdir = config$feather_tmpdir
-    )
-    colnames(out) <- paste(temporal_params[[x]]$prefix, colnames(out), sep = "_")
-    out[, 9:ncol(out)]
-  }
+  env_temporal <- run_chunked_env(temporal_pairs, temporal_params, "Temporal")
 
   stopCluster(cl)
   registerDoSEQ()
@@ -397,11 +351,11 @@ if (config$decomposition == "v3") {
 # ------------------------------------------------------------------
 # STEP 6d: I-spline transformation
 # ------------------------------------------------------------------
-cat("  Computing I-spline basis...\n")
+cat("  Computing I-spline basis (fast)...\n")
 toSpline <- obsPairs_out[, env_cols]
 ## Remove substrate-only columns if present (handled separately in some variants)
 ## This preserves the structure from the original scripts
-splined  <- splineData(toSpline)
+splined  <- splineData_fast(toSpline)
 
 if (config$decomposition == "v3") {
   splined_new <- splined[keep, ]

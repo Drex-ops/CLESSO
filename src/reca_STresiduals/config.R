@@ -28,8 +28,8 @@ config$project_root <- env_or_default(
   normalizePath(file.path(dirname(sys.frame(1)$ofile), "..", ".."), mustWork = FALSE)
 )
 
-## R module directory (auto-derived)
-config$r_dir <- file.path(config$project_root, "src", "reca_version", "R")
+## Shared R module directory
+config$r_dir <- file.path(config$project_root, "src", "shared", "R")
 
 ## Python executable (for gen_windows → pyper.py calls)
 ## Default to the project venv Python so pyarrow/geonpy are available
@@ -41,7 +41,7 @@ config$python_exe <- env_or_default(
 ## Path to pyper.py script
 config$pyper_script <- env_or_default(
 	"RECA_PYPER_SCRIPT",
-	file.path(config$project_root, "src", "reca_version", "python", "pyper.py")
+	file.path(config$project_root, "src", "shared", "python", "pyper.py")
 )
 
 ## Input data directory (ALA CSV files, substrate rasters, etc.)
@@ -121,6 +121,9 @@ config$cores_to_use <- as.integer(env_or_default(
   "RECA_CORES",
   as.character(max(1, parallel::detectCores() - 1))
 ))
+
+## Chunk size for chunked env extraction (rows per chunk)
+config$chunk_size <- as.integer(env_or_default("RECA_CHUNK_SIZE", "10000"))
 
 ## Species threshold for switching parallel strategies in obsPairSampler
 config$species_threshold <- as.integer(env_or_default("RECA_SPECIES_THRESHOLD", "500"))

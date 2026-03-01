@@ -37,6 +37,7 @@ source(file.path(config$r_dir, "site_aggregator.R"))
 source(file.path(config$r_dir, "site_richness_extractor.R"))
 source(file.path(config$r_dir, "obs_pair_sampler.R"))
 source(file.path(config$r_dir, "gen_windows.R"))
+source(file.path(config$r_dir, "run_chunked_env.R"))
 source(file.path(config$r_dir, "plotting.R"))
 
 # ---------------------------------------------------------------------------
@@ -214,72 +215,8 @@ for (c_yr in config$c_yrs[1]) {
       }
 
       ## ---- Chunked parallel env extraction with progress reporting ----
-      CHUNK_SIZE <- 10000
       n_params   <- length(init_params)
       n_workers  <- min(n_params, config$cores_to_use)
-
-      ## Helper: run one direction, chunked with progress
-      run_chunked_env <- function(ext_data, init_params, direction_label,
-                                  swap_sites = FALSE) {
-        n_total       <- nrow(ext_data)
-        local_idx     <- split(1:n_total, ceiling(1:n_total / CHUNK_SIZE))
-        local_nchunks <- length(local_idx)
-        n_params      <- length(init_params)
-
-        cat(sprintf("  [%s] Direction %s: %d rows, %d chunks, %d env-params, %d workers\n",
-                    format(Sys.time(), "%H:%M:%S"), direction_label,
-                    n_total, local_nchunks, n_params, n_workers))
-
-        chunk_results <- vector("list", local_nchunks)
-        t0 <- proc.time()
-
-        for (i in seq_along(local_idx)) {
-          rows <- local_idx[[i]]
-          if (swap_sites) {
-            ext_chunk <- ext_data[rows, c(1, 2, 7, 8, 5, 6, 3, 4)]
-          } else {
-            ext_chunk <- ext_data[rows, ]
-          }
-
-          chunk_out <- foreach(x = 1:n_params, .combine = "cbind",
-                               .packages = "arrow") %dopar% {
-            out <- gen_windows(
-              pairs        = ext_chunk,
-              variables    = init_params[[x]]$variables,
-              mstat        = init_params[[x]]$mstat,
-              cstat        = init_params[[x]]$cstat,
-              window       = init_params[[x]]$window,
-              npy_src      = config$npy_src,
-              start_year   = config$geonpy_start_year,
-              python_exe   = config$python_exe,
-              pyper_script = config$pyper_script,
-              feather_tmpdir = config$feather_tmpdir
-            )
-            colnames(out) <- paste(init_params[[x]]$prefix, colnames(out), sep = "_")
-            out[, 9:ncol(out)]
-          }
-
-          chunk_results[[i]] <- chunk_out
-
-          elapsed   <- (proc.time() - t0)["elapsed"]
-          rows_done <- max(rows)
-          pct       <- 100 * rows_done / n_total
-          rate      <- rows_done / elapsed
-          remaining <- (n_total - rows_done) / rate
-          cat(sprintf("  [%s] (%s) Chunk %d/%d | %d/%d rows (%.1f%%) | %.1fs elapsed | est. %.1f min remaining\n",
-                      format(Sys.time(), "%H:%M:%S"), direction_label,
-                      i, local_nchunks, rows_done, n_total, pct,
-                      elapsed, remaining / 60))
-        }
-
-        total_elapsed <- (proc.time() - t0)["elapsed"]
-        env_out <- do.call(rbind, chunk_results)
-        cat(sprintf("  [%s] Direction %s COMPLETE: %.1f sec (%.1f min) — %d x %d\n",
-                    format(Sys.time(), "%H:%M:%S"), direction_label,
-                    total_elapsed, total_elapsed / 60,
-                    nrow(env_out), ncol(env_out)))
-        env_out
-      }
 
       cl <- makeCluster(n_workers)
       registerDoSNOW(cl)

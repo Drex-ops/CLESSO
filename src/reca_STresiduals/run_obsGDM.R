@@ -30,7 +30,14 @@ this_dir <- tryCatch(
     else stop("Cannot determine script directory.")
   }
 )
-source(file.path(this_dir, "src", "reca_STresiduals","config.R"))
+
+## Locate config.R: if this_dir is already the reca_STresiduals folder, use it
+## directly; otherwise assume this_dir is the project root.
+config_path <- file.path(this_dir, "config.R")
+if (!file.exists(config_path)) {
+  config_path <- file.path(this_dir, "src", "reca_STresiduals", "config.R")
+}
+source(config_path)
 source(file.path(config$r_dir, "utils.R"))
 source(file.path(config$r_dir, "gdm_functions.R"))
 source(file.path(config$r_dir, "site_aggregator.R"))

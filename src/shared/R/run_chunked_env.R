@@ -49,12 +49,18 @@ run_chunked_env <- function(pairs_data, params, direction_label,
   cat(sprintf("  [%s] %s: %d rows, %d chunks (size %d), %d env-params\n",
               format(Sys.time(), "%H:%M:%S"), direction_label,
               n_total, local_nchunks, chunk_size, n_params))
+  flush.console()
 
   chunk_results <- vector("list", local_nchunks)
   t0 <- proc.time()
 
   for (i in seq_along(local_idx)) {
     rows <- local_idx[[i]]
+    cat(sprintf("  [%s] (%s) Starting chunk %d/%d (rows %d-%d)...\n",
+                format(Sys.time(), "%H:%M:%S"), direction_label,
+                i, local_nchunks, min(rows), max(rows)))
+    flush.console()
+
     if (swap_sites) {
       ext_chunk <- pairs_data[rows, c(1, 2, 7, 8, 5, 6, 3, 4)]
     } else {
@@ -91,6 +97,7 @@ run_chunked_env <- function(pairs_data, params, direction_label,
                 format(Sys.time(), "%H:%M:%S"), direction_label,
                 i, local_nchunks, rows_done, n_total, pct,
                 elapsed, remaining / 60))
+    flush.console()
   }
 
   total_elapsed <- (proc.time() - t0)["elapsed"]
@@ -99,5 +106,6 @@ run_chunked_env <- function(pairs_data, params, direction_label,
               format(Sys.time(), "%H:%M:%S"), direction_label,
               total_elapsed, total_elapsed / 60,
               nrow(env_out), ncol(env_out)))
+  flush.console()
   env_out
 }

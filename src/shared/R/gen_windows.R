@@ -38,6 +38,10 @@ gen_windows <- function(pairs, variables, mstat, cstat, window,
 
   require(arrow)
 
+  ## Verbose timing (set GEN_WINDOWS_VERBOSE=TRUE to enable)
+  verbose <- identical(Sys.getenv("GEN_WINDOWS_VERBOSE", "FALSE"), "TRUE")
+  if (verbose) t_start <- proc.time()
+
   type_pairs <- class(pairs)
   if (type_pairs != "character") {
     ## data.frame-like input
@@ -56,7 +60,13 @@ gen_windows <- function(pairs, variables, mstat, cstat, window,
                    min_year, start_year))
     }
 
+    if (verbose) t_pre_write <- proc.time()
     arrow::write_feather(as.data.frame(pairs), pairs_dst)
+    if (verbose) {
+      dt <- (proc.time() - t_pre_write)["elapsed"]
+      cat(sprintf("    [gen_windows] feather WRITE: %.3fs (%d rows, %s)\n",
+                  dt, nrow(pairs), pairs_dst))
+    }
   } else {
     pairs_dst <- pairs
   }
@@ -76,12 +86,25 @@ gen_windows <- function(pairs, variables, mstat, cstat, window,
   }
 
   ## Execute Python
+  if (verbose) {
+    cat(sprintf("    [gen_windows] PYTHON CMD: %s\n", call))
+    t_pre_py <- proc.time()
+  }
   output_fp <- system(call, intern = TRUE)
+  if (verbose) {
+    dt <- (proc.time() - t_pre_py)["elapsed"]
+    cat(sprintf("    [gen_windows] PYTHON exec: %.3fs → %s\n", dt, output_fp))
+  }
 
   ## Read result
+  if (verbose) t_pre_read <- proc.time()
   output <- tryCatch({
     arrow::read_feather(output_fp)
   }, error = function(e) e)
+  if (verbose) {
+    dt <- (proc.time() - t_pre_read)["elapsed"]
+    cat(sprintf("    [gen_windows] feather READ: %.3fs\n", dt))
+  }
 
   if (!length(grep("data.frame", class(output)))) {
     stop(sprintf("Could not read output file. Error: %s", output_fp))
@@ -91,6 +114,12 @@ gen_windows <- function(pairs, variables, mstat, cstat, window,
   tryCatch(file.remove(output_fp), error = function(e) NULL)
   if (type_pairs != "character") {
     tryCatch(file.remove(pairs_dst), error = function(e) NULL)
+  }
+
+  if (verbose) {
+    dt <- (proc.time() - t_start)["elapsed"]
+    cat(sprintf("    [gen_windows] TOTAL: %.3fs (%d rows, %d vars)\n",
+                dt, nrow(pairs), length(variables)))
   }
 
   as.data.frame(output)

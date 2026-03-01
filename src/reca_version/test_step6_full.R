@@ -31,7 +31,11 @@ this_dir <- tryCatch(
     else stop("Cannot determine script directory.")
   }
 )
-source(file.path(this_dir, "src", "reca_version", "config.R"))
+config_path <- file.path(this_dir, "config.R")
+if (!file.exists(config_path)) {
+  config_path <- file.path(this_dir, "src", "reca_version", "config.R")
+}
+source(config_path)
 source(file.path(config$r_dir, "utils.R"))
 source(file.path(config$r_dir, "gdm_functions.R"))
 source(file.path(config$r_dir, "gen_windows.R"))

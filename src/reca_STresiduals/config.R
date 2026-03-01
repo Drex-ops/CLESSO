@@ -48,7 +48,7 @@ config$pyper_script <- env_or_default(
 config$data_dir <- env_or_default("RECA_DATA_DIR", file.path(config$project_root, "data"))
 
 ## AWAP geonpy .npy files directory
-config$npy_src <- env_or_default("RECA_NPY_SRC", "/Volumes/DATA/MAIN/NATIONAL/CLIMATE/geonpy")
+config$npy_src <- env_or_default("RECA_NPY_SRC", "/Volumes/PortableSSD/CLIMATE/geonpy")
 
 ## Substrate raster brick file (.grd)
 config$substrate_raster <- env_or_default(
@@ -63,7 +63,7 @@ config$reference_raster <- env_or_default(
 )
 
 ## Output directory
-config$output_dir <- env_or_default("RECA_OUTPUT_DIR", file.path(config$project_root, "src", "reca_version", "output"))
+config$output_dir <- env_or_default("RECA_OUTPUT_DIR", file.path(config$project_root, "src", "reca_STresiduals", "output"))
 
 ## Raster temp directory (rasterOptions(tmpdir=...))
 config$raster_tmpdir <- env_or_default("RECA_RASTER_TMPDIR", tempdir())
@@ -98,7 +98,7 @@ config$climate_window <- as.integer(env_or_default("RECA_CLIMATE_WINDOW", "30"))
 config$biAverage <- as.logical(env_or_default("RECA_BIAVERAGE", "TRUE"))
 
 ## Decomposition variant: "none", "v2" (spatial-temporal), or "v3" (same_site|same_time only)
-config$decomposition <- env_or_default("RECA_DECOMPOSITION", "v3")
+config$decomposition <- env_or_default("RECA_DECOMPOSITION", "none")
 
 ## Minimum observation date filter (observations before this date are excluded)
 config$min_date <- as.Date(env_or_default("RECA_MIN_DATE", "1911-01-01"))

@@ -302,11 +302,12 @@ if (get_env) {
   colnames(env1_subs) <- paste0(colnames(env1_subs), "_1")
   colnames(env2_subs) <- paste0(colnames(env2_subs), "_2")
 
-  ## Combine: obsPairs metadata + spatial env + substrate + temporal env
+  ## Combine: obsPairs metadata + ALL site-1/baseline cols + ALL site-2/obs cols
+  ## IMPORTANT: splineData_fast splits at the midpoint, so all _1 columns must
+  ## come first and all _2 columns second, in matching order.
   parts <- list(obsPairs_out,
-                env_spat1, env1_subs,
-                env_spat2, env2_subs,
-                env_temp1, env_temp2)
+                env_spat1, env1_subs, env_temp1,
+                env_spat2, env2_subs, env_temp2)
   parts <- parts[!sapply(parts, is.null)]
   obsPairs_out <- do.call(cbind, parts)
 
@@ -405,27 +406,47 @@ save(D2, file = paste0(out_prefix, "D2_deviance.RData"))
 coefs <- coef(obsGDM_1)
 save(coefs, file = paste0(out_prefix, "coefficients.RData"))
 
-## Build fit object for plotting
-fit <- list()
-fit$intercept    <- coef(obsGDM_1)[1]
-fit$sample       <- nrow(mod_ready)
-fit$predictors   <- gsub("191101-201712_", "",
-                          gsub("_spl1", "", colnames(splined)[grep("_spl1", colnames(splined))]))
-fit$coefficients <- coef(obsGDM_1)[-1]
-fit$coefficients[is.na(fit$coefficients)] <- 0
+## Build fit object for plotting and metadata
+    fit <- list()
+    fit$intercept    <- coef(obsGDM_1)[1]
+    fit$sample       <- nrow(mod_ready)
+    fit$predictors   <- gsub("191101-201712_", "",
+                              gsub("_spl1", "", colnames(splined)[grep("_spl1", colnames(splined))]))
+    fit$coefficients <- coef(obsGDM_1)[-1]
+    fit$coefficients[is.na(fit$coefficients)] <- 0
 
-## Compute quantiles from the data
-nc  <- ncol(toSpline)
-nc2 <- nc / 2
-X1  <- toSpline[, 1:nc2]
-X2  <- toSpline[, (nc2 + 1):nc]
-nms <- names(X1); names(X2) <- nms
-sv  <- c(rep(1, nrow(X1)), rep(2, nrow(X2)))
-XX  <- rbind(X1, X2)
-fit$quantiles  <- unlist(lapply(1:ncol(XX), function(x) quantile(XX[, x], c(0, 0.5, 1))))
-fit$splines    <- rep(3, ncol(XX))
-fit$predicted  <- fitted(obsGDM_1)
-fit$ecological <- obsGDM_1$linear.predictors
+    ## Compute quantiles from the data
+    nc  <- ncol(toSpline)
+    nc2 <- nc / 2
+    X1  <- toSpline[, 1:nc2]
+    X2  <- toSpline[, (nc2 + 1):nc]
+    nms <- names(X1); names(X2) <- nms
+    sv  <- c(rep(1, nrow(X1)), rep(2, nrow(X2)))
+    XX  <- rbind(X1, X2)
+    fit$quantiles  <- unlist(lapply(1:ncol(XX), function(x) quantile(XX[, x], c(0, 0.5, 1))))
+    fit$splines    <- rep(3, ncol(XX))
+    fit$predicted  <- fitted(obsGDM_1)
+    fit$ecological <- obsGDM_1$linear.predictors
+
+    ## ---- Run metadata ----
+    fit$species_group   <- config$species_group
+    fit$climate_window  <- c_yr
+    fit$nMatch          <- config$nMatch
+    fit$w_ratio         <- w
+    fit$biAverage       <- config$biAverage
+    fit$decomposition   <- config$decomposition
+    fit$date_range      <- c(as.character(config$min_date), as.character(config$max_date))
+    fit$date_offset_yrs <- config$date_offset_years
+    fit$obs_csv         <- config$obs_csv
+    fit$n_pairs         <- nrow(obsPairs_out)
+    fit$D2              <- D2
+    fit$nagelkerke_r2   <- gdm_dev$Nagelkerke
+    fit$env_params      <- config$env_params
+    fit$substrate_raster <- basename(config$substrate_raster)
+    fit$reference_raster <- basename(config$reference_raster)
+    fit$grid_resolution  <- config$grid_resolution
+    fit$geonpy_start_year <- config$geonpy_start_year
+    fit$run_timestamp   <- Sys.time()
 save(fit, file = paste0(out_prefix, "fittedGDM.RData"))
 
 ## Diagnostic plots

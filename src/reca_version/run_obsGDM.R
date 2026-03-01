@@ -397,7 +397,7 @@ for (c_yr in config$c_yrs[1]) {
     coefs <- coef(obsGDM_1)
     save(coefs, file = paste0(out_prefix, "coefficients.RData"))
 
-    ## Build fit object for plotting
+    ## Build fit object for plotting and metadata
     fit <- list()
     fit$intercept    <- coef(obsGDM_1)[1]
     fit$sample       <- nrow(mod_ready)
@@ -418,6 +418,27 @@ for (c_yr in config$c_yrs[1]) {
     fit$splines    <- rep(3, ncol(XX))
     fit$predicted  <- fitted(obsGDM_1)
     fit$ecological <- obsGDM_1$linear.predictors
+
+    ## ---- Run metadata ----
+    fit$species_group    <- config$species_group
+    fit$climate_window   <- c_yr
+    fit$weather_window   <- w_yr
+    fit$nMatch           <- config$nMatch
+    fit$w_ratio          <- w
+    fit$biAverage        <- config$biAverage
+    fit$decomposition    <- config$decomposition
+    fit$date_range       <- c(as.character(config$min_date), as.character(config$max_date))
+    fit$date_offset_yrs  <- config$date_offset_years
+    fit$obs_csv          <- config$obs_csv
+    fit$n_pairs          <- nrow(obsPairs_out)
+    fit$D2               <- D2
+    fit$nagelkerke_r2    <- gdm_dev$Nagelkerke
+    fit$env_params       <- config$env_params
+    fit$substrate_raster <- basename(config$substrate_raster)
+    fit$reference_raster <- basename(config$reference_raster)
+    fit$grid_resolution  <- config$grid_resolution
+    fit$geonpy_start_year <- config$geonpy_start_year
+    fit$run_timestamp    <- Sys.time()
     save(fit, file = paste0(out_prefix, "fittedGDM.RData"))
 
     ## Diagnostic plots

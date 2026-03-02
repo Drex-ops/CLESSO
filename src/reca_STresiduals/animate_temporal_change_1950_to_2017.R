@@ -45,7 +45,8 @@ pyper_script <- file.path(project_root, "src/shared/python/pyper.py")
 
 ## ---- Year range ----
 year1     <- 1950L
-year2_seq <- 1951L:2017L     # each target year
+year2_seq <- seq(1955L, 2015L, by = 5L)
+year2_seq <- c(year2_seq, 2017L)       # always include 2017 as the final year
 
 ## ---- Chunk size for pixel processing ----
 chunk_size <- 10000L
@@ -142,12 +143,13 @@ for (yi in seq_along(year2_seq)) {
 
     chunk_result <- tryCatch(
       predict_temporal_gdm(
-        fit          = fit,
-        points       = pts[rows, ],
-        npy_src      = npy_src,
-        python_exe   = python_exe,
-        pyper_script = pyper_script,
-        verbose      = FALSE
+        fit            = fit,
+        points         = pts[rows, ],
+        npy_src        = npy_src,
+        python_exe     = python_exe,
+        pyper_script   = pyper_script,
+        feather_tmpdir = tempdir(),
+        verbose        = FALSE
       ),
       error = function(e) {
         warning(sprintf("  Year %d, chunk %d failed: %s", yr2, ci, conditionMessage(e)))

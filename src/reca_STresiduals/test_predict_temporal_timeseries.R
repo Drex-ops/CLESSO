@@ -52,14 +52,14 @@ load(fit_path)   # loads 'fit'
 summarise_temporal_gdm(fit)
 
 # ---------------------------------------------------------------------------
-# 3. Sample 100 random non-NA points from reference raster
+# 3. Sample 1000 random non-NA points from reference raster
 # ---------------------------------------------------------------------------
-cat("\n--- Sampling 100 random non-NA points from reference raster ---\n")
+cat("\n--- Sampling 1000 random non-NA points from reference raster ---\n")
 if (!file.exists(ref_raster)) stop(paste("Reference raster not found:", ref_raster))
 ras <- raster(ref_raster)
 
 set.seed(42)
-samp <- as.data.frame(sampleRandom(ras, size = 100, na.rm = TRUE, xy = TRUE))
+samp <- as.data.frame(sampleRandom(ras, size = 1000, na.rm = TRUE, xy = TRUE))
 colnames(samp)[1:2] <- c("lon", "lat")
 n_sites <- nrow(samp)
 cat(sprintf("  Sampled %d points (lon [%.2f, %.2f], lat [%.2f, %.2f])\n",

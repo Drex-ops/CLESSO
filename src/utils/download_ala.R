@@ -35,6 +35,9 @@
 ##   FISH    — Actinopterygii (ray-finned fishes)
 ##   INSECT  — Insects (class Insecta)
 ##   ARACH   — Arachnids (class Arachnida)
+##   INVERT  — Terrestrial/freshwater invertebrates (Arthropoda,
+##             Mollusca, Annelida, Nematoda, Platyhelminthes,
+##             Onychophora, Tardigrada — excludes marine-only phyla)
 ##
 ## You can also pass an arbitrary taxon name via the `taxon` argument.
 ##
@@ -61,19 +64,37 @@ library(galah)
 # Each entry has:
 #   taxon  — name passed to galah::identify()
 #   rank   — taxonomic rank (informational)
-#   filter_class — optional extra filter on the `class` field
-#                  (used when identify() is at a higher rank)
+#   filter_class  — optional extra filter on the `class` field
+#                   (used when identify() is at a higher rank)
+#   filter_phylum — optional character vector of phyla to INCLUDE
+#                   (used for broad groups like INVERT)
 # ---------------------------------------------------------------------------
 GROUP_TAXA <- list(
-  AVES    = list(taxon = "Aves",           rank = "class",   filter_class = NULL),
-  VAS     = list(taxon = "Plantae",        rank = "kingdom", filter_class = "Equisetopsida"),
-  PLANTAE = list(taxon = "Plantae",        rank = "kingdom", filter_class = NULL),
-  MAM     = list(taxon = "Mammalia",       rank = "class",   filter_class = NULL),
-  REP     = list(taxon = "Reptilia",       rank = "class",   filter_class = NULL),
-  AMP     = list(taxon = "Amphibia",       rank = "class",   filter_class = NULL),
-  FISH    = list(taxon = "Actinopterygii", rank = "class",   filter_class = NULL),
-  INSECT  = list(taxon = "Insecta",        rank = "class",   filter_class = NULL),
-  ARACH   = list(taxon = "Arachnida",      rank = "class",   filter_class = NULL)
+  AVES    = list(taxon = "Aves",           rank = "class",   filter_class = NULL, filter_phylum = NULL),
+  VAS     = list(taxon = "Plantae",        rank = "kingdom", filter_class = "Equisetopsida", filter_phylum = NULL),
+  PLANTAE = list(taxon = "Plantae",        rank = "kingdom", filter_class = NULL, filter_phylum = NULL),
+  MAM     = list(taxon = "Mammalia",       rank = "class",   filter_class = NULL, filter_phylum = NULL),
+  REP     = list(taxon = "Reptilia",       rank = "class",   filter_class = NULL, filter_phylum = NULL),
+  AMP     = list(taxon = "Amphibia",       rank = "class",   filter_class = NULL, filter_phylum = NULL),
+  FISH    = list(taxon = "Actinopterygii", rank = "class",   filter_class = NULL, filter_phylum = NULL),
+  INSECT  = list(taxon = "Insecta",        rank = "class",   filter_class = NULL, filter_phylum = NULL),
+  ARACH   = list(taxon = "Arachnida",      rank = "class",   filter_class = NULL, filter_phylum = NULL),
+  INVERT  = list(
+    taxon = "Animalia", rank = "kingdom",
+    filter_class = NULL,
+    filter_phylum = c(
+      "Arthropoda",       # insects, arachnids, myriapods, crustaceans
+      "Mollusca",         # snails, slugs (terrestrial gastropods)
+      "Annelida",         # earthworms, leeches
+      "Nematoda",         # roundworms
+      "Platyhelminthes",  # flatworms (some terrestrial)
+      "Onychophora",      # velvet worms
+      "Tardigrada"        # tardigrades
+    )
+    ## Excludes marine-only phyla: Porifera, Cnidaria, Echinodermata,
+    ## Ctenophora, Bryozoa, Brachiopoda, Chaetognatha, Hemichordata,
+    ## Sipuncula, etc.  Also excludes Chordata (vertebrates).
+  )
 )
 
 # ---------------------------------------------------------------------------
@@ -139,7 +160,8 @@ download_ala_occurrences <- function(
   # -----------------------------------------------------------------------
   # 1. Resolve taxonomic group
   # -----------------------------------------------------------------------
-  filter_class <- NULL
+  filter_class  <- NULL
+  filter_phylum <- NULL
 
   if (!is.null(taxon)) {
     taxon_name  <- taxon
@@ -150,13 +172,15 @@ download_ala_occurrences <- function(
       stop(sprintf("Unknown species_group '%s'. Valid options: %s\n  Or supply taxon = '<name>' directly.",
                    species_group, paste(names(GROUP_TAXA), collapse = ", ")))
     }
-    taxon_name   <- GROUP_TAXA[[species_group]]$taxon
-    filter_class <- GROUP_TAXA[[species_group]]$filter_class
-    group_label  <- species_group
+    taxon_name    <- GROUP_TAXA[[species_group]]$taxon
+    filter_class  <- GROUP_TAXA[[species_group]]$filter_class
+    filter_phylum <- GROUP_TAXA[[species_group]]$filter_phylum
+    group_label   <- species_group
   }
 
   cat(sprintf("  Taxon  : %s\n", taxon_name))
-  if (!is.null(filter_class)) cat(sprintf("  Class  : %s (additional filter)\n", filter_class))
+  if (!is.null(filter_class))  cat(sprintf("  Class  : %s (additional filter)\n", filter_class))
+  if (!is.null(filter_phylum)) cat(sprintf("  Phyla  : %s\n", paste(filter_phylum, collapse = ", ")))
   cat(sprintf("  Group  : %s\n", group_label))
   cat(sprintf("  Years  : %d – %d\n", min_year, max_year - 1L))
 
@@ -177,6 +201,10 @@ download_ala_occurrences <- function(
     ## Apply additional class filter if needed (e.g. VAS = Equisetopsida)
     if (!is.null(filter_class)) {
       q <- q |> filter(class == filter_class)
+    }
+    ## Apply phylum inclusion filter if needed (e.g. INVERT)
+    if (!is.null(filter_phylum)) {
+      q <- q |> filter(phylum == filter_phylum)
     }
     q
   }
@@ -408,15 +436,17 @@ count_ala_occurrences <- function(
   galah_config(atlas = "Australia", email = email, verbose = FALSE)
 
   if (!is.null(taxon)) {
-    taxon_name   <- taxon
-    filter_class <- NULL
+    taxon_name    <- taxon
+    filter_class  <- NULL
+    filter_phylum <- NULL
   } else {
     species_group <- toupper(species_group)
     if (!species_group %in% names(GROUP_TAXA)) {
       stop(sprintf("Unknown species_group '%s'.", species_group))
     }
-    taxon_name   <- GROUP_TAXA[[species_group]]$taxon
-    filter_class <- GROUP_TAXA[[species_group]]$filter_class
+    taxon_name    <- GROUP_TAXA[[species_group]]$taxon
+    filter_class  <- GROUP_TAXA[[species_group]]$filter_class
+    filter_phylum <- GROUP_TAXA[[species_group]]$filter_phylum
   }
 
   q <- galah_call() |>
@@ -428,6 +458,9 @@ count_ala_occurrences <- function(
     )
   if (!is.null(filter_class)) {
     q <- q |> filter(class == filter_class)
+  }
+  if (!is.null(filter_phylum)) {
+    q <- q |> filter(phylum == filter_phylum)
   }
 
   counts <- q |>

@@ -145,10 +145,10 @@ frog.auGrid <- data.frame(
   Site.Richness = datRED$richness
 )
 
-row.nums <- 1:nrow(m1)
-row.vect <- rep(row.nums, count)
-m2       <- m1[row.vect, ]
-gc()
+## Build full-record proxy (maps each row of frog.auGrid to its site)
+full_site_map <- match(as.character(frog.auGrid$ID), site_levels)
+m2 <- site_species_proxy(site_sp_matrix, full_site_map)
+rm(m1); gc()
 
 # ===========================================================================
 # STEP 5: Run observation-pair sampler

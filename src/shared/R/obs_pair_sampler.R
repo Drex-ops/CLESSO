@@ -11,8 +11,38 @@
 ##   - Replaced ffbase::bySum with data.table equivalent (from utils.R)
 ##   - Cleaned up commented-out legacy code
 ##   - Formatting and documentation
+##   - v2: Chunked shared-species calculation to avoid OOM on dense == 2
 ##
 ##############################################################################
+
+# ---------------------------------------------------------------------------
+# Helper: compute shared species count for pairs, in memory-safe chunks.
+#
+# Old approach: m1[s1, ] + m1[s2, ] == 2  → dense logical 1M × 20K = 20 GB
+# New approach: rowSums(m1[s1, ] * m1[s2, ]) in chunks of 50K rows.
+#   Element-wise * of two sparse binary matrices stays sparse (intersection),
+#   so peak memory per chunk is ~100 MB instead of 20 GB.
+# ---------------------------------------------------------------------------
+.shared_species_chunked <- function(m1, samp1, samp2, chunk_size = 50000L) {
+  n <- length(samp1)
+  if (n == 0L) return(numeric(0))
+  shared <- numeric(n)
+  starts <- seq(1L, n, by = chunk_size)
+  for (s in starts) {
+    e   <- min(s + chunk_size - 1L, n)
+    idx <- s:e
+    a   <- m1[samp1[idx], ]
+    b   <- m1[samp2[idx], ]
+    ## Element-wise product: 1*1 = 1 only where both sites have the species
+    ab  <- a * b
+    if (is.null(nrow(ab))) {
+      shared[idx] <- sum(ab)       # single-pair case
+    } else {
+      shared[idx] <- rowSums(ab)
+    }
+  }
+  shared
+}
 
 obsPairSampler.bigData.RECA <- function(frog.auGrid, nMatch, m1,
                                         richness = TRUE,
@@ -81,13 +111,7 @@ obsPairSampler.bigData.RECA <- function(frog.auGrid, nMatch, m1,
   if (richness) {
     obsMatch$Richness.S1[place]    <- frog.auGrid$Site.Richness[samp1]
     obsMatch$Richness.S2[place]    <- frog.auGrid$Site.Richness[samp2]
-    test <- m1[samp1, ] + m1[samp2, ]
-    test <- test == 2
-    if (is.null(nrow(test))) {
-      obsMatch$SharedSpecies[place] <- sum(test)
-    } else {
-      obsMatch$SharedSpecies[place] <- rowSums(test)
-    }
+    obsMatch$SharedSpecies[place]  <- .shared_species_chunked(m1, samp1, samp2)
   }
 
   binMiss <- length(obsMatch$Match[obsMatch$Match == 1 & !is.na(obsMatch$Match)])
@@ -156,13 +180,7 @@ obsPairSampler.bigData.RECA <- function(frog.auGrid, nMatch, m1,
     if (richness) {
       obsMatch$Richness.S1[place]    <- frog.auGrid$Site.Richness[samp1]
       obsMatch$Richness.S2[place]    <- frog.auGrid$Site.Richness[samp2]
-      test <- m1[samp1, ] + m1[samp2, ]
-      test <- test == 2
-      if (length(nrow(test)) == 0) {
-        obsMatch$SharedSpecies[place] <- sum(test)
-      } else {
-        obsMatch$SharedSpecies[place] <- rowSums(test)
-      }
+      obsMatch$SharedSpecies[place]  <- .shared_species_chunked(m1, samp1, samp2)
     }
 
     binMiss   <- length(obsMatch$Match[obsMatch$Match == 1 & !is.na(obsMatch$Match)])
@@ -338,13 +356,7 @@ obsPairSampler.bigData.RECA <- function(frog.auGrid, nMatch, m1,
         if (richness) {
           obsMatch$Richness.S1[place]    <- frog.auGrid$Site.Richness[samp1]
           obsMatch$Richness.S2[place]    <- frog.auGrid$Site.Richness[samp2]
-          test <- m1[samp1, ] + m1[samp2, ]
-          test <- test == 2
-          if (length(nrow(test)) == 0) {
-            obsMatch$SharedSpecies[place] <- sum(test)
-          } else {
-            obsMatch$SharedSpecies[place] <- rowSums(test)
-          }
+          obsMatch$SharedSpecies[place]  <- .shared_species_chunked(m1, samp1, samp2)
         }
       }
     }

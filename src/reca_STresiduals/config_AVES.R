@@ -53,7 +53,7 @@ config$npy_src <- env_or_default("RECA_NPY_SRC", "/Volumes/PortableSSD/CLIMATE/g
 ## Substrate raster brick file (.grd)
 config$substrate_raster <- env_or_default(
   "RECA_SUBSTRATE_RASTER",
-  file.path(config$data_dir, "SUBS_brk_VAS.grd")
+  file.path(config$data_dir, "SUBS_brk_AVES.grd")
 )
 
 ## Reference raster for grid alignment (.flt)
@@ -76,10 +76,10 @@ config$feather_tmpdir <- env_or_default("RECA_FEATHER_TMPDIR", tempdir())
 # ---------------------------------------------------------------------------
 
 ## Species group: "AVES", "PLANTS", or "VAS"
-config$species_group <- env_or_default("RECA_SPECIES_GROUP", "VAS")
+config$species_group <- env_or_default("RECA_SPECIES_GROUP", "AVES")
 
 ## Input observations CSV filename (relative to data_dir)
-config$obs_csv <- env_or_default("RECA_OBS_CSV", "ala_vas_2026-03-03.csv")
+config$obs_csv <- env_or_default("RECA_OBS_CSV", "filtered_data_2018-11-20.csv")
 
 ## Number of observation-pair matches to sample
 config$nMatch <- as.integer(env_or_default("RECA_NMATCH", "1000000"))

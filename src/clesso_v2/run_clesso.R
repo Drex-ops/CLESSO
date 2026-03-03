@@ -45,7 +45,7 @@ source(file.path(clesso_config$r_dir, "gdm_functions.R"))
 source(file.path(clesso_config$r_dir, "site_aggregator.R"))
 
 ## Source CLESSO v2 modules
-source(file.path(clesso_config$clesso_dir, "clesso_sampler.R"))
+source(file.path(clesso_config$clesso_dir, "clesso_sampler_optimised.R"))
 source(file.path(clesso_config$clesso_dir, "clesso_prepare_data.R"))
 source(file.path(clesso_config$clesso_dir, "clesso_predict.R"))
 

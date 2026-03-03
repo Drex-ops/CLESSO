@@ -148,9 +148,16 @@ clesso_config$standardize_Z <- as.logical(env_or_default("CLESSO_STANDARDIZE_Z",
 clesso_config$alpha_init <- as.numeric(env_or_default("CLESSO_ALPHA_INIT", "20"))
 
 ## ----------- Alpha spline settings -----------
-## Use P-spline smooth terms for the alpha (richness) sub-model.
-## When TRUE, g_k(z) are penalised B-spline smooths; when FALSE, linear.
+## Use spline smooth terms for the alpha (richness) sub-model.
+## When TRUE, g_k(z) are B-spline terms; when FALSE, linear only.
 clesso_config$use_alpha_splines <- as.logical(env_or_default("CLESSO_USE_ALPHA_SPLINES", "TRUE"))
+
+## Spline type: "penalised" (P-spline, default) or "regression" (fixed knots,
+## no smoothness penalty — coefficients estimated as fixed effects).
+## For regression splines the knot number/positions fully determine the
+## flexibility; for P-splines the penalty parameter lambda is estimated.
+clesso_config$alpha_spline_type <- tolower(env_or_default("CLESSO_ALPHA_SPLINE_TYPE", "penalised"))
+stopifnot(clesso_config$alpha_spline_type %in% c("penalised", "regression"))
 
 ## Number of interior knots per alpha covariate spline
 clesso_config$alpha_n_knots <- as.integer(env_or_default("CLESSO_ALPHA_N_KNOTS", "10"))
@@ -159,7 +166,18 @@ clesso_config$alpha_n_knots <- as.integer(env_or_default("CLESSO_ALPHA_N_KNOTS",
 clesso_config$alpha_spline_deg <- as.integer(env_or_default("CLESSO_ALPHA_SPLINE_DEG", "3"))
 
 ## Difference penalty order (2 = penalise 2nd differences, standard P-spline)
+## Only used when alpha_spline_type = "penalised".
 clesso_config$alpha_pen_order <- as.integer(env_or_default("CLESSO_ALPHA_PEN_ORDER", "2"))
+
+## User-specified interior knot positions (optional).
+## When NULL (default), knots are placed at equally-spaced quantiles of the
+## covariate values. To set custom positions, provide a list of numeric
+## vectors — one per alpha covariate — via the R environment or by
+## assigning directly after sourcing this config:
+##   clesso_config$alpha_knot_positions <- list(c(10,20,30), c(0.1,0.5,0.9))
+## When set, alpha_n_knots is ignored and the number of knots is determined
+## by the length of each vector.
+clesso_config$alpha_knot_positions <- NULL
 
 ## Climate window size in years (for env extraction)
 clesso_config$climate_window <- as.integer(env_or_default("CLESSO_CLIMATE_WINDOW", "30"))
@@ -222,9 +240,13 @@ cat("  balance weights :", clesso_config$balance_weights, "\n")
 cat("  n_splines       :", clesso_config$n_splines, "\n")
 cat("  geo_distance    :", clesso_config$geo_distance, "\n")
 cat("  alpha splines   :", clesso_config$use_alpha_splines, "\n")
+cat("  alpha spline typ:", clesso_config$alpha_spline_type, "\n")
 cat("  alpha n_knots   :", clesso_config$alpha_n_knots, "\n")
 cat("  alpha spline deg:", clesso_config$alpha_spline_deg, "\n")
-cat("  alpha pen order :", clesso_config$alpha_pen_order, "\n")
+cat("  alpha pen order :", clesso_config$alpha_pen_order,
+    ifelse(clesso_config$alpha_spline_type == "regression", "(unused)", ""), "\n")
+cat("  alpha knot pos  :", if (is.null(clesso_config$alpha_knot_positions)) "auto (quantile)"
+                           else "user-specified", "\n")
 cat("  climate_window  :", clesso_config$climate_window, "years\n")
 cat("  cores           :", clesso_config$cores, "\n")
 cat("  seed            :", clesso_config$seed, "\n")

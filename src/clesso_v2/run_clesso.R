@@ -194,17 +194,18 @@ if (!is.null(subs_raster)) {
 cat("\n--- Step 5: Prepare model data ---\n")
 
 model_data <- clesso_prepare_model_data(
-  pairs_dt           = pairs_dt,
-  site_covs          = site_covs,
-  env_site_table     = env_site_table,
-  geo_distance       = clesso_config$geo_distance,
-  n_splines          = clesso_config$n_splines,
-  standardize_Z      = clesso_config$standardize_Z,
-  alpha_init         = clesso_config$alpha_init,
-  use_alpha_splines  = clesso_config$use_alpha_splines,
-  alpha_n_knots      = clesso_config$alpha_n_knots,
-  alpha_spline_deg   = clesso_config$alpha_spline_deg,
-  alpha_pen_order    = clesso_config$alpha_pen_order
+  pairs_dt              = pairs_dt,
+  site_covs             = site_covs,
+  env_site_table        = env_site_table,
+  geo_distance          = clesso_config$geo_distance,
+  n_splines             = clesso_config$n_splines,
+  standardize_Z         = clesso_config$standardize_Z,
+  alpha_init            = clesso_config$alpha_init,
+  use_alpha_splines     = clesso_config$use_alpha_splines,
+  alpha_n_knots         = clesso_config$alpha_n_knots,
+  alpha_spline_deg      = clesso_config$alpha_spline_deg,
+  alpha_pen_order       = clesso_config$alpha_pen_order,
+  alpha_knot_positions  = clesso_config$alpha_knot_positions
 )
 
 ## Save model data
@@ -242,6 +243,10 @@ dyn.load(dynlib(file.path(clesso_config$clesso_dir, cpp_basename)))
 ## b_alpha coefficients are also random (penalised via lambda * b'Sb).
 ## When splines are disabled, we map b_alpha and log_lambda_alpha to NA
 ## so TMB holds them fixed at their initial values (zeros/dummy).
+##
+## Regression spline mode (alpha_spline_type = "regression"):
+## Spline basis is used but without the smoothness penalty — b_alpha are
+## estimated as fixed effects and log_lambda_alpha is mapped to NA.
 random_effects <- "u_site"
 tmb_map <- list()
 
@@ -251,6 +256,12 @@ if (!clesso_config$use_alpha_splines) {
   n_lam   <- length(model_data$parameters$log_lambda_alpha)
   tmb_map$b_alpha          <- factor(rep(NA, K_dummy))
   tmb_map$log_lambda_alpha <- factor(rep(NA, n_lam))
+} else if (clesso_config$alpha_spline_type == "regression") {
+  ## Regression splines: b_alpha stays as fixed effects (not in random),
+  ## and the smoothness penalty is disabled by mapping log_lambda_alpha to NA.
+  n_lam <- length(model_data$parameters$log_lambda_alpha)
+  tmb_map$log_lambda_alpha <- factor(rep(NA, n_lam))
+  cat("  Regression spline mode: b_alpha as fixed effects, no smoothness penalty\n")
 }
 
 obj <- MakeADFun(

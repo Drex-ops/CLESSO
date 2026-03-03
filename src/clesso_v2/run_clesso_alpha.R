@@ -201,16 +201,19 @@ alpha_spline_info <- NULL
 use_splines <- clesso_config$use_alpha_splines
 
 if (use_splines) {
-  cat("\n--- Building alpha P-spline basis ---\n")
+  spline_label <- ifelse(clesso_config$alpha_spline_type == "regression",
+                         "regression spline", "P-spline")
+  cat(sprintf("\n--- Building alpha %s basis ---\n", spline_label))
   Z_for_splines <- site_info$Z_raw
   if (is.null(Z_for_splines)) Z_for_splines <- Z
 
   alpha_spline_info <- clesso_build_alpha_splines(
-    Z_raw      = Z_for_splines,
-    n_knots    = clesso_config$alpha_n_knots,
-    spline_deg = clesso_config$alpha_spline_deg,
-    pen_order  = clesso_config$alpha_pen_order,
-    cov_names  = site_info$alpha_cov_cols
+    Z_raw          = Z_for_splines,
+    n_knots        = clesso_config$alpha_n_knots,
+    spline_deg     = clesso_config$alpha_spline_deg,
+    pen_order      = clesso_config$alpha_pen_order,
+    cov_names      = site_info$alpha_cov_cols,
+    knot_positions = clesso_config$alpha_knot_positions
   )
 
   B_alpha <- alpha_spline_info$B_alpha
@@ -265,6 +268,7 @@ model_data <- list(
     z_center          = site_info$z_center,
     z_scale           = site_info$z_scale,
     use_alpha_splines = use_splines,
+    spline_type       = clesso_config$alpha_spline_type,
     spline_info       = alpha_spline_info
   ),
   pairs_dt = pairs_dt
@@ -317,6 +321,7 @@ dyn.load(dynlib(file.path(clesso_config$clesso_dir, cpp_basename)))
 ## u_site is always a random effect.
 ## When alpha splines are enabled, b_alpha coefficients are also random.
 ## When splines are disabled, map b_alpha and log_lambda_alpha to NA.
+## Regression spline mode: b_alpha as fixed effects, penalty disabled.
 random_effects <- "u_site"
 tmb_map <- list()
 
@@ -325,6 +330,11 @@ if (!use_splines) {
   n_lam   <- length(parameters$log_lambda_alpha)
   tmb_map$b_alpha          <- factor(rep(NA, K_dummy))
   tmb_map$log_lambda_alpha <- factor(rep(NA, n_lam))
+} else if (clesso_config$alpha_spline_type == "regression") {
+  ## Regression splines: b_alpha as fixed effects, no smoothness penalty
+  n_lam <- length(parameters$log_lambda_alpha)
+  tmb_map$log_lambda_alpha <- factor(rep(NA, n_lam))
+  cat("  Regression spline mode: b_alpha as fixed effects, no smoothness penalty\n")
 }
 
 obj <- MakeADFun(

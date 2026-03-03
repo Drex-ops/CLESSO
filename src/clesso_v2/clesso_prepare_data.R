@@ -151,10 +151,11 @@ clesso_build_site_table <- function(pairs_dt, site_covs = NULL,
 #     boundary_list - list of boundary knots per covariate
 # ---------------------------------------------------------------------------
 clesso_build_alpha_splines <- function(Z_raw,
-                                       n_knots    = 10,
-                                       spline_deg = 3,
-                                       pen_order  = 2,
-                                       cov_names  = NULL) {
+                                       n_knots        = 10,
+                                       spline_deg     = 3,
+                                       pen_order      = 2,
+                                       cov_names      = NULL,
+                                       knot_positions = NULL) {
   require(splines)
 
   if (!is.matrix(Z_raw)) Z_raw <- as.matrix(Z_raw)
@@ -166,6 +167,15 @@ clesso_build_alpha_splines <- function(Z_raw,
                  else paste0("z", seq_len(n_cov))
   }
 
+  ## Validate user-supplied knot positions
+  if (!is.null(knot_positions)) {
+    if (!is.list(knot_positions) || length(knot_positions) != n_cov) {
+      stop(sprintf(
+        "knot_positions must be a list of length %d (one numeric vector per covariate), got length %d",
+        n_cov, length(knot_positions)))
+    }
+  }
+
   B_list    <- vector("list", n_cov)
   S_list    <- vector("list", n_cov)
   knot_list <- vector("list", n_cov)
@@ -175,12 +185,21 @@ clesso_build_alpha_splines <- function(Z_raw,
   for (k in seq_len(n_cov)) {
     x <- Z_raw[, k]
 
-    ## Determine knot positions (equally-spaced quantiles)
+    ## Determine knot positions
     bnd <- range(x, na.rm = TRUE)
     ## Add small buffer to boundaries to avoid edge issues
     bnd_buf <- bnd + c(-1, 1) * diff(bnd) * 0.001
-    interior_knots <- quantile(x, probs = seq(0, 1, length.out = n_knots + 2)[-c(1, n_knots + 2)],
-                               na.rm = TRUE)
+
+    if (!is.null(knot_positions)) {
+      ## User-specified interior knots for this covariate
+      interior_knots <- sort(as.numeric(knot_positions[[k]]))
+      n_knots_k <- length(interior_knots)
+    } else {
+      ## Default: equally-spaced quantiles
+      interior_knots <- quantile(x, probs = seq(0, 1, length.out = n_knots + 2)[-c(1, n_knots + 2)],
+                                 na.rm = TRUE)
+      n_knots_k <- n_knots
+    }
 
     ## B-spline basis
     B_k <- splines::bs(x,
@@ -202,8 +221,9 @@ clesso_build_alpha_splines <- function(Z_raw,
     knot_list[[k]] <- interior_knots
     bnd_list[[k]]  <- bnd_buf
 
-    cat(sprintf("    Covariate '%s': %d B-spline bases (degree %d, %d interior knots)\n",
-                cov_names[k], n_bases_k, spline_deg, n_knots))
+    cat(sprintf("    Covariate '%s': %d B-spline bases (degree %d, %d interior knots%s)\n",
+                cov_names[k], n_bases_k, spline_deg, n_knots_k,
+                if (!is.null(knot_positions)) " [user-specified]" else ""))
   }
 
   ## Stack into block-diagonal structure
@@ -464,7 +484,8 @@ clesso_prepare_model_data <- function(pairs_dt,
                                       use_alpha_splines  = FALSE,
                                       alpha_n_knots      = 10,
                                       alpha_spline_deg   = 3,
-                                      alpha_pen_order    = 2) {
+                                      alpha_pen_order    = 2,
+                                      alpha_knot_positions = NULL) {
   require(data.table)
   pairs_dt <- as.data.table(copy(pairs_dt))
 
@@ -518,11 +539,12 @@ clesso_prepare_model_data <- function(pairs_dt,
     }
 
     alpha_spline_info <- clesso_build_alpha_splines(
-      Z_raw      = Z_for_splines,
-      n_knots    = alpha_n_knots,
-      spline_deg = alpha_spline_deg,
-      pen_order  = alpha_pen_order,
-      cov_names  = site_info$alpha_cov_cols
+      Z_raw          = Z_for_splines,
+      n_knots        = alpha_n_knots,
+      spline_deg     = alpha_spline_deg,
+      pen_order      = alpha_pen_order,
+      cov_names      = site_info$alpha_cov_cols,
+      knot_positions = alpha_knot_positions
     )
 
     B_alpha <- alpha_spline_info$B_alpha

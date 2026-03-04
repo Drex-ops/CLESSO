@@ -365,7 +365,9 @@ cat(sprintf("  Final objective: %.4f\n", fit$objective))
 cat(sprintf("  Fitting time: %.1f seconds\n", t_fit["elapsed"]))
 
 ## Standard errors
-rep <- sdreport(obj)
+## getReportCovariance = FALSE avoids building the dense covariance matrix
+## of all ADREPORT'd quantities, which can exceed memory limits.
+rep <- sdreport(obj, getReportCovariance = FALSE)
 
 
 # ===========================================================================
@@ -376,18 +378,17 @@ cat("\n--- Step 7: Results and diagnostics ---\n")
 est <- summary(rep, "report")
 
 ## Alpha (richness) estimates per site
-alpha_rows     <- grep("^alpha_site", rownames(est))
-log_alpha_rows <- grep("^log_alpha_site", rownames(est))
+## alpha_site and log_alpha_site are reported via REPORT() (not ADREPORT)
+## to avoid the huge delta-method Jacobian. Retrieve via obj$report().
+rpt <- obj$report()
 
 alpha_estimates <- data.table(
   site_id       = site_table$site_id,
   site_index    = site_table$site_index,
   lon           = site_table$lon,
   lat           = site_table$lat,
-  alpha_est     = est[alpha_rows, "Estimate"],
-  alpha_se      = est[alpha_rows, "Std. Error"],
-  log_alpha_est = est[log_alpha_rows, "Estimate"],
-  log_alpha_se  = est[log_alpha_rows, "Std. Error"]
+  alpha_est     = rpt$alpha_site,
+  log_alpha_est = rpt$log_alpha_site
 )
 
 cat(sprintf("  Alpha estimates: mean = %.1f, range = [%.1f, %.1f]\n",

@@ -352,7 +352,9 @@ cat(sprintf("  Final objective: %.4f\n", fit$objective))
 cat(sprintf("  Fitting time: %.1f seconds\n", t_fit["elapsed"]))
 
 ## Standard errors
-rep <- sdreport(obj)
+## getReportCovariance = FALSE avoids building the dense covariance matrix
+## of all ADREPORT'd quantities, which can exceed memory limits.
+rep <- sdreport(obj, getReportCovariance = FALSE)
 
 
 # ===========================================================================
@@ -380,10 +382,10 @@ if (length(beta_rows) > 0) {
   print(beta_est)
 }
 
-## Predicted similarity summary
-S_rows <- grep("^S_pred$", rownames(est))
-if (length(S_rows) > 0) {
-  S_est <- est[S_rows, "Estimate"]
+## Predicted similarity summary (retrieved via REPORT, not ADREPORT)
+rpt <- obj$report()
+if (!is.null(rpt$S_pred)) {
+  S_est <- rpt$S_pred
   cat(sprintf("  Predicted similarity (S): mean = %.3f, range = [%.3f, %.3f]\n",
               mean(S_est), min(S_est), max(S_est)))
 }

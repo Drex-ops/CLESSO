@@ -102,25 +102,22 @@ Type objective_function<Type>::operator() ()
     if (n_lambda == 1) {
       // Single smoothing parameter for all bases
       Type lambda = exp(log_lambda_alpha(0));
-      Type pen = Type(0.0);
-      for (int i = 0; i < K_basis; i++) {
-        for (int j = 0; j < K_basis; j++) {
-          pen += b_alpha(i) * S_alpha(i, j) * b_alpha(j);
-        }
-      }
+      // Efficient sparse b' S b via matrix-vector product
+      vector<Type> Sb = S_alpha * b_alpha;
+      Type pen = (b_alpha * Sb).sum();
       nll += Type(0.5) * lambda * pen;
 
     } else {
       // Per-covariate-block penalties
+      // Use sparse mat-vec on full S then accumulate per block
+      vector<Type> Sb = S_alpha * b_alpha;
       int offset = 0;
       for (int blk = 0; blk < n_lambda; blk++) {
         Type lambda_k = exp(log_lambda_alpha(blk));
         int bsz = alpha_block_sizes(blk);
         Type pen_k = Type(0.0);
         for (int i = 0; i < bsz; i++) {
-          for (int j = 0; j < bsz; j++) {
-            pen_k += b_alpha(offset + i) * S_alpha(offset + i, offset + j) * b_alpha(offset + j);
-          }
+          pen_k += b_alpha(offset + i) * Sb(offset + i);
         }
         nll += Type(0.5) * lambda_k * pen_k;
         offset += bsz;
@@ -153,8 +150,11 @@ Type objective_function<Type>::operator() ()
   // =========================================================================
   // REPORTS
   // =========================================================================
-  ADREPORT(alpha_site);
-  ADREPORT(log_alpha_site);
+  // Use REPORT (not ADREPORT) for large per-site vectors to avoid
+  // building the delta-method Jacobian in sdreport(), which can
+  // exceed memory limits when nSites is large. Retrieve via obj$report().
+  REPORT(alpha_site);
+  REPORT(log_alpha_site);
   ADREPORT(theta_alpha);
   ADREPORT(alpha0);
   ADREPORT(sigma_u);

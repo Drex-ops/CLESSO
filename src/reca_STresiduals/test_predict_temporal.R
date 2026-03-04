@@ -11,21 +11,17 @@
 cat("=== Test: Temporal GDM Prediction ===\n\n")
 
 # ---------------------------------------------------------------------------
-# 0. Paths — edit these if your layout differs
+# 0. Source config
 # ---------------------------------------------------------------------------
-project_root <- tryCatch(
-  normalizePath(file.path(dirname(sys.frame(1)$ofile), "..", ".."), mustWork = FALSE),
-  error = function(e) getwd()
-)
-if (!dir.exists(project_root)) project_root <- getwd()
+this_dir <- tryCatch(dirname(sys.frame(1)$ofile), error = function(e) getwd())
+source(file.path(this_dir, "config.R"))
 
-fit_path     <- file.path(project_root,
-  "src/reca_STresiduals/output/AVES_1mil_30climWin_STresid_biAverage_fittedGDM.RData")
-ref_raster   <- file.path(project_root,
-  "data/FWPT_mean_Cmax_mean_1946_1975.flt")
-npy_src      <- "/Volumes/PortableSSD/CLIMATE/geonpy"
-python_exe   <- file.path(project_root, ".venv/bin/python3")
-pyper_script <- file.path(project_root, "src/shared/python/pyper.py")
+project_root <- config$project_root
+fit_path     <- config$fit_path
+ref_raster   <- config$reference_raster
+npy_src      <- config$npy_src
+python_exe   <- config$python_exe
+pyper_script <- config$pyper_script
 
 # ---------------------------------------------------------------------------
 # 1. Source dependencies
@@ -91,7 +87,7 @@ print(summary(result[, c("temporal_distance", "linear_predictor",
 # 5. Plots
 # ---------------------------------------------------------------------------
 cat("\n--- Generating plots ---\n")
-out_dir <- file.path(project_root, "src/reca_STresiduals/output")
+out_dir <- config$output_dir
 if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
 
 ## Colour palette: blue (low change) → red (high change)
@@ -107,7 +103,7 @@ col_idx    <- pmax(1, pmin(n_cols,
 pt_cols    <- pal[col_idx]
 
 ## ---- Plot 1: Map of temporal dissimilarity ----
-pdf_map <- file.path(out_dir, "test_temporal_dissimilarity_map.pdf")
+pdf_map <- file.path(out_dir, paste0(fit$species_group, "_temporal_dissimilarity_map.pdf"))
 pdf(pdf_map, width = 10, height = 8)
 
 plot(ras, col = grey(0.9), legend = FALSE, axes = TRUE,
@@ -131,7 +127,7 @@ dev.off()
 cat(sprintf("  Saved: %s\n", basename(pdf_map)))
 
 ## ---- Plot 2: Multi-panel diagnostics ----
-pdf_diag <- file.path(out_dir, "test_temporal_prediction_diagnostics.pdf")
+pdf_diag <- file.path(out_dir, paste0(fit$species_group, "_temporal_prediction_diagnostics.pdf"))
 pdf(pdf_diag, width = 10, height = 10)
 
 par(mfrow = c(2, 2), mar = c(4.5, 4.5, 3, 1))
@@ -186,7 +182,7 @@ dev.off()
 cat(sprintf("  Saved: %s\n", basename(pdf_diag)))
 
 ## ---- Plot 3: Dissimilarity on longitude × latitude (bubble plot) ----
-pdf_bubble <- file.path(out_dir, "test_temporal_bubble_map.pdf")
+pdf_bubble <- file.path(out_dir, paste0(fit$species_group, "_temporal_bubble_map.pdf"))
 pdf(pdf_bubble, width = 10, height = 8)
 
 ## Scale point sizes by dissimilarity

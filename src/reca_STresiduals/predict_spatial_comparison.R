@@ -26,23 +26,19 @@
 cat("=== Spatial Prediction Comparison: PCA vs Landmark MDS vs Reference ===\n\n")
 
 # ---------------------------------------------------------------------------
-# 0. Paths and parameters
+# 0. Source config and set parameters
 # ---------------------------------------------------------------------------
-project_root <- tryCatch(
-  normalizePath(file.path(dirname(sys.frame(1)$ofile), "..", ".."), mustWork = FALSE),
-  error = function(e) getwd()
-)
-if (!dir.exists(project_root)) project_root <- getwd()
+this_dir <- tryCatch(dirname(sys.frame(1)$ofile), error = function(e) getwd())
+source(file.path(this_dir, "config.R"))
 
-fit_path     <- file.path(project_root,
-  "src/reca_STresiduals/output/AVES_1mil_30climWin_STresid_biAverage_fittedGDM.RData")
-ref_raster   <- file.path(project_root,
-  "data/FWPT_mean_Cmax_mean_1946_1975.flt")
-subs_raster  <- file.path(project_root,
-  "data/SUBS_brk_AVES.grd")
-npy_src      <- "/Volumes/PortableSSD/CLIMATE/geonpy"
-python_exe   <- file.path(project_root, ".venv/bin/python3")
-pyper_script <- file.path(project_root, "src/shared/python/pyper.py")
+project_root <- config$project_root
+fit_path     <- config$fit_path
+ref_raster   <- config$reference_raster
+subs_raster  <- config$substrate_raster
+npy_src      <- config$npy_src
+python_exe   <- config$python_exe
+pyper_script <- config$pyper_script
+out_dir      <- config$output_dir
 
 ref_year  <- 1960L
 ref_month <- 6L
@@ -67,7 +63,6 @@ ref_sites <- data.frame(
   stringsAsFactors = FALSE
 )
 
-out_dir <- file.path(project_root, "src/reca_STresiduals/output")
 if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
 
 # ---------------------------------------------------------------------------

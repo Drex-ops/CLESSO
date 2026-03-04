@@ -43,6 +43,7 @@ source(config_path)
 source(file.path(clesso_config$r_dir, "utils.R"))
 source(file.path(clesso_config$r_dir, "gdm_functions.R"))
 source(file.path(clesso_config$r_dir, "site_aggregator.R"))
+source(file.path(clesso_config$r_dir, "gen_windows.R"))
 
 ## Source CLESSO v2 modules
 source(file.path(clesso_config$clesso_dir, "clesso_sampler_optimised.R"))
@@ -187,6 +188,103 @@ if (!is.null(subs_raster)) {
   cat("  No env site table. Turnover model uses geographic distance only.\n")
 }
 
+## ---- Climate variable extraction via geonpy (fixed 30-year average) ----
+## Extract a 30-year climate average centred on 2010 for every unique site.
+## pyper.py expects pairwise input (x1,y1,year1,month1,x2,y2,year2,month2),
+## so we pair each site with itself and use only the _1 output columns.
+if (length(clesso_config$env_params) > 0 &&
+    file.exists(clesso_config$pyper_script) &&
+    dir.exists(clesso_config$npy_src)) {
+
+  cat("  Extracting climate variables (30-year mean centred on 2010)...\n")
+  require(arrow)
+
+  ## Fixed reference: year 2010, month 6 (mid-year), window = config value
+  clim_year   <- 2010L
+  clim_month  <- 6L
+  clim_window <- clesso_config$climate_window  # default 30 years
+
+  ## Build dummy pairs (each site paired with itself)
+  clim_pairs <- data.frame(
+    Lon1   = unique_sites$lon,
+    Lat1   = unique_sites$lat,
+    year1  = rep(clim_year, nrow(unique_sites)),
+    month1 = rep(clim_month, nrow(unique_sites)),
+    Lon2   = unique_sites$lon,
+    Lat2   = unique_sites$lat,
+    year2  = rep(clim_year, nrow(unique_sites)),
+    month2 = rep(clim_month, nrow(unique_sites))
+  )
+
+  ## Iterate through env_params groups (same structure as reca_STresiduals)
+  clim_parts <- list()
+  for (j in seq_along(clesso_config$env_params)) {
+    ep <- clesso_config$env_params[[j]]
+    cat(sprintf("    [%d/%d] %s | mstat=%s cstat=%s\n",
+                j, length(clesso_config$env_params),
+                paste(ep$variables, collapse = ", "),
+                ep$mstat, ep$cstat))
+
+    raw <- gen_windows(
+      pairs          = clim_pairs,
+      variables      = ep$variables,
+      mstat          = ep$mstat,
+      cstat          = ep$cstat,
+      window         = clim_window,
+      npy_src        = clesso_config$npy_src,
+      start_year     = clesso_config$geonpy_start_year,
+      python_exe     = clesso_config$python_exe,
+      pyper_script   = clesso_config$pyper_script,
+      feather_tmpdir = clesso_config$feather_tmpdir
+    )
+
+    ## Keep only _1 columns (site-level values; skip first 8 coord columns)
+    env_cols <- raw[, 9:ncol(raw), drop = FALSE]
+    idx_1    <- grep("_1$", names(env_cols))
+    site_env <- env_cols[, idx_1, drop = FALSE]
+
+    ## Strip date-range patterns (e.g. "191101-201712_") and _1 suffix
+    names(site_env) <- gsub("\\d{6}-\\d{6}_", "", names(site_env))
+    names(site_env) <- gsub("_1$", "", names(site_env))
+
+    ## Prefix with cstat to keep names unique across groups
+    names(site_env) <- paste0(ep$cstat, "_", names(site_env))
+
+    clim_parts[[j]] <- site_env
+  }
+
+  clim_dt <- as.data.table(do.call(cbind, clim_parts))
+
+  ## Check for sentinels / NA
+  n_na   <- sum(is.na(clim_dt))
+  n_sent <- sum(clim_dt == -9999, na.rm = TRUE)
+  if (n_na > 0)   warning(sprintf("  %d NA values in climate extraction.", n_na))
+  if (n_sent > 0)  warning(sprintf("  %d sentinel (-9999) values in climate extraction.", n_sent))
+
+  cat(sprintf("  Extracted %d climate variables at %d sites\n",
+              ncol(clim_dt), nrow(clim_dt)))
+
+  ## Append to site_covs (alpha model)
+  if (!is.null(site_covs)) {
+    site_covs <- cbind(site_covs, clim_dt)
+  } else {
+    site_covs <- cbind(unique_sites[, .(site_id)], clim_dt)
+  }
+
+  ## Append to env_site_table (turnover / beta model)
+  if (!is.null(env_site_table)) {
+    env_site_table <- cbind(env_site_table, clim_dt)
+  } else {
+    env_site_table <- cbind(unique_sites[, .(site_id)], clim_dt)
+  }
+
+  cat(sprintf("  Final site_covs: %d columns | env_site_table: %d columns\n",
+              ncol(site_covs) - 1, ncol(env_site_table) - 1))
+
+} else {
+  cat("  Skipping climate extraction (env_params empty or geonpy not available).\n")
+}
+
 
 # ===========================================================================
 # STEP 5: Prepare TMB model data
@@ -289,7 +387,9 @@ cat(sprintf("  Convergence: %d (message: %s)\n", fit$convergence, fit$message))
 cat(sprintf("  Final objective: %.4f\n", fit$objective))
 
 ## Standard errors
-rep <- sdreport(obj)
+## getReportCovariance = FALSE avoids building the dense covariance matrix
+## of all ADREPORT'd quantities, which can exceed memory limits.
+rep <- sdreport(obj, getReportCovariance = FALSE)
 
 
 # ===========================================================================
@@ -300,18 +400,17 @@ cat("\n--- Step 7: Results and diagnostics ---\n")
 est <- summary(rep, "report")
 
 ## Alpha (richness) estimates per site
-alpha_rows <- grep("^alpha_site", rownames(est))
-log_alpha_rows <- grep("^log_alpha_site", rownames(est))
+## alpha_site and log_alpha_site are reported via REPORT() (not ADREPORT)
+## to avoid the huge delta-method Jacobian. Retrieve via obj$report().
+rpt <- obj$report()
 
 alpha_estimates <- data.table(
-  site_id     = model_data$site_info$site_table$site_id,
-  site_index  = model_data$site_info$site_table$site_index,
-  lon         = model_data$site_info$site_table$lon,
-  lat         = model_data$site_info$site_table$lat,
-  alpha_est   = est[alpha_rows, "Estimate"],
-  alpha_se    = est[alpha_rows, "Std. Error"],
-  log_alpha_est = est[log_alpha_rows, "Estimate"],
-  log_alpha_se  = est[log_alpha_rows, "Std. Error"]
+  site_id       = model_data$site_info$site_table$site_id,
+  site_index    = model_data$site_info$site_table$site_index,
+  lon           = model_data$site_info$site_table$lon,
+  lat           = model_data$site_info$site_table$lat,
+  alpha_est     = rpt$alpha_site,
+  log_alpha_est = rpt$log_alpha_site
 )
 
 cat(sprintf("  Alpha estimates: mean = %.1f, range = [%.1f, %.1f]\n",

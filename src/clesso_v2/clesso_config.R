@@ -156,7 +156,7 @@ clesso_config$use_alpha_splines <- as.logical(env_or_default("CLESSO_USE_ALPHA_S
 ## no smoothness penalty — coefficients estimated as fixed effects).
 ## For regression splines the knot number/positions fully determine the
 ## flexibility; for P-splines the penalty parameter lambda is estimated.
-clesso_config$alpha_spline_type <- tolower(env_or_default("CLESSO_ALPHA_SPLINE_TYPE", "penalised"))
+clesso_config$alpha_spline_type <- tolower(env_or_default("CLESSO_ALPHA_SPLINE_TYPE", "regression"))
 stopifnot(clesso_config$alpha_spline_type %in% c("penalised", "regression"))
 
 ## Number of interior knots per alpha covariate spline

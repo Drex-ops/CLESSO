@@ -10,20 +10,27 @@
 cat("=== IBRA Region Dissimilarity Maps ===\n\n")
 
 # ---------------------------------------------------------------------------
-# 0. Paths
+# 0. Source config and derive paths
 # ---------------------------------------------------------------------------
-project_root <- tryCatch(
-  normalizePath(file.path(dirname(sys.frame(1)$ofile), "..", ".."), mustWork = FALSE),
-  error = function(e) getwd()
-)
-if (!dir.exists(project_root)) project_root <- getwd()
+this_dir <- tryCatch(dirname(sys.frame(1)$ofile), error = function(e) getwd())
+source(file.path(this_dir, "config.R"))
 
-dissim_tif <- file.path(project_root,
-  "src/reca_STresiduals/output/AVES_30yr_1950_to_2017_temporal_dissimilarity.tif")
-ibra_shp   <- file.path(project_root,
-  "data/ibra51_reg/ibra51_regions.shp")
-out_dir    <- file.path(project_root, "src/reca_STresiduals/output")
+## Prediction years (must match predict_temporal_raster.R settings)
+year1 <- 1950L
+year2 <- 2017L
+
+## Dissimilarity TIF produced by predict_temporal_raster.R
+dissim_prefix <- sprintf("%s_%dyr_%d_to_%d",
+                         config$species_group, config$climate_window, year1, year2)
+dissim_tif <- file.path(config$output_dir,
+                        paste0(dissim_prefix, "_temporal_dissimilarity.tif"))
+ibra_shp   <- file.path(config$data_dir, "ibra51_reg", "ibra51_regions.shp")
+out_dir    <- config$output_dir
 if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
+
+## Label used in plot titles
+map_label <- sprintf("%s | %d → %d | %d yr climate window",
+                     config$species_group, year1, year2, config$climate_window)
 
 # ---------------------------------------------------------------------------
 # 1. Load packages
@@ -181,7 +188,7 @@ pal100 <- make_pal(100)
 ## Map 1: Mean dissimilarity
 plot_ibra_map(
   ibra_stats, "mean_dissim",
-  title = "Mean Temporal Dissimilarity by IBRA Region\nAVES | 1950 → 2017 | 30 yr climate window",
+  title = paste0("Mean Temporal Dissimilarity by IBRA Region\n", map_label),
   legend_title = "Mean Dissimilarity",
   pal = pal100,
   out_pdf = file.path(out_dir, "ibra_map_mean_dissim.pdf")
@@ -190,7 +197,7 @@ plot_ibra_map(
 ## Map 2: SD dissimilarity
 plot_ibra_map(
   ibra_stats, "sd_dissim",
-  title = "SD of Temporal Dissimilarity by IBRA Region\nAVES | 1950 → 2017 | 30 yr climate window",
+  title = paste0("SD of Temporal Dissimilarity by IBRA Region\n", map_label),
   legend_title = "SD Dissimilarity",
   pal = pal100,
   out_pdf = file.path(out_dir, "ibra_map_sd_dissim.pdf")
@@ -199,7 +206,7 @@ plot_ibra_map(
 ## Map 3: Max dissimilarity
 plot_ibra_map(
   ibra_stats, "max_dissim",
-  title = "Max Temporal Dissimilarity by IBRA Region\nAVES | 1950 → 2017 | 30 yr climate window",
+  title = paste0("Max Temporal Dissimilarity by IBRA Region\n", map_label),
   legend_title = "Max Dissimilarity",
   pal = pal100,
   out_pdf = file.path(out_dir, "ibra_map_max_dissim.pdf")
@@ -208,7 +215,7 @@ plot_ibra_map(
 ## Map 4: Median dissimilarity
 plot_ibra_map(
   ibra_stats, "median_dissim",
-  title = "Median Temporal Dissimilarity by IBRA Region\nAVES | 1950 → 2017 | 30 yr climate window",
+  title = paste0("Median Temporal Dissimilarity by IBRA Region\n", map_label),
   legend_title = "Median Dissimilarity",
   pal = pal100,
   out_pdf = file.path(out_dir, "ibra_map_median_dissim.pdf")
@@ -252,7 +259,7 @@ for (stat_col in c("mean_dissim", "sd_dissim", "max_dissim", "median_dissim")) {
   }
 }
 
-mtext("Temporal Dissimilarity by IBRA Region — AVES | 1950 → 2017 | 30 yr climate window",
+mtext(paste0("Temporal Dissimilarity by IBRA Region — ", map_label),
       outer = TRUE, cex = 1.1, font = 2)
 
 dev.off()

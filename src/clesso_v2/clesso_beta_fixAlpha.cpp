@@ -94,6 +94,7 @@ Type objective_function<Type>::operator() ()
   ADREPORT(eta0);
 
   // Report predicted similarity for each pair (useful for diagnostics)
+  // Use REPORT (not ADREPORT) to avoid huge Jacobian when P is large.
   vector<Type> S_pred(P);
   vector<Type> eta_pred(P);
   for (int p = 0; p < P; p++) {
@@ -104,8 +105,8 @@ Type objective_function<Type>::operator() ()
     eta_pred(p) = eta_p;
     S_pred(p) = exp(-eta_p);
   }
-  ADREPORT(eta_pred);
-  ADREPORT(S_pred);
+  REPORT(eta_pred);
+  REPORT(S_pred);
 
   return nll;
 }

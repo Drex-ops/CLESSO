@@ -156,6 +156,18 @@ config$env_params <- list(
 )
 
 # ---------------------------------------------------------------------------
+# Derived: fitted model path
+# ---------------------------------------------------------------------------
+config$fit_filename <- paste0(
+  config$species_group, "_",
+  format(config$nMatch / 1e6, nsmall = 0), "mil_",
+  config$climate_window, "climWin_STresid_",
+  if (config$biAverage) "biAverage_" else "",
+  "fittedGDM.RData"
+)
+config$fit_path <- file.path(config$output_dir, config$fit_filename)
+
+# ---------------------------------------------------------------------------
 # Create output directory if needed
 # ---------------------------------------------------------------------------
 if (!dir.exists(config$output_dir)) {
@@ -164,6 +176,7 @@ if (!dir.exists(config$output_dir)) {
 
 cat("RECA config loaded.\n")
 cat("  Species group  :", config$species_group, "\n")
+cat("  Fit file       :", config$fit_filename, "\n")
 cat("  Data dir       :", config$data_dir, "\n")
 cat("  Output dir     :", config$output_dir, "\n")
 cat("  nMatch         :", config$nMatch, "\n")

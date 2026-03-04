@@ -12,21 +12,17 @@
 cat("=== Test: Temporal GDM Time-Series Prediction ===\n\n")
 
 # ---------------------------------------------------------------------------
-# 0. Paths and parameters
+# 0. Source config and set parameters
 # ---------------------------------------------------------------------------
-project_root <- tryCatch(
-  normalizePath(file.path(dirname(sys.frame(1)$ofile), "..", ".."), mustWork = FALSE),
-  error = function(e) getwd()
-)
-if (!dir.exists(project_root)) project_root <- getwd()
+this_dir <- tryCatch(dirname(sys.frame(1)$ofile), error = function(e) getwd())
+source(file.path(this_dir, "config.R"))
 
-fit_path     <- file.path(project_root,
-  "src/reca_STresiduals/output/AVES_1mil_30climWin_STresid_biAverage_fittedGDM.RData")
-ref_raster   <- file.path(project_root,
-  "data/FWPT_mean_Cmax_mean_1946_1975.flt")
-npy_src      <- "/Volumes/PortableSSD/CLIMATE/geonpy"
-python_exe   <- file.path(project_root, ".venv/bin/python3")
-pyper_script <- file.path(project_root, "src/shared/python/pyper.py")
+project_root <- config$project_root
+fit_path     <- config$fit_path
+ref_raster   <- config$reference_raster
+npy_src      <- config$npy_src
+python_exe   <- config$python_exe
+pyper_script <- config$pyper_script
 
 ## Time-series parameters
 baseline_year <- 1950L
@@ -140,7 +136,7 @@ cat(sprintf("  Mean dissimilarity range: [%.4f (%d), %.4f (%d)]\n",
 # 6. Plots
 # ---------------------------------------------------------------------------
 cat("\n--- Generating plots ---\n")
-out_dir <- file.path(project_root, "src/reca_STresiduals/output")
+out_dir <- config$output_dir
 if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
 
 ## Colour palette for sites (by latitude, south=blue → north=red)
@@ -151,7 +147,7 @@ site_cols  <- character(n_sites)
 site_cols[lat_order] <- lat_pal
 
 ## ============ Plot 1: Spaghetti plot — all sites =========================
-pdf_spag <- file.path(out_dir, "test_timeseries_spaghetti.pdf")
+pdf_spag <- file.path(out_dir, paste0(fit$species_group, "_test_timeseries_spaghetti.pdf"))
 pdf(pdf_spag, width = 12, height = 7)
 
 par(mar = c(5, 5, 4, 2))
@@ -184,7 +180,7 @@ dev.off()
 cat(sprintf("  Saved: %s\n", basename(pdf_spag)))
 
 ## ============ Plot 2: Mean + quantile ribbon =============================
-pdf_ribbon <- file.path(out_dir, "test_timeseries_ribbon.pdf")
+pdf_ribbon <- file.path(out_dir, paste0(fit$species_group, "_test_timeseries_ribbon.pdf"))
 pdf(pdf_ribbon, width = 12, height = 7)
 
 par(mar = c(5, 5, 4, 2))
@@ -224,7 +220,7 @@ dev.off()
 cat(sprintf("  Saved: %s\n", basename(pdf_ribbon)))
 
 ## ============ Plot 3: Heatmap (sites × years) ============================
-pdf_heat <- file.path(out_dir, "test_timeseries_heatmap.pdf")
+pdf_heat <- file.path(out_dir, paste0(fit$species_group, "_test_timeseries_heatmap.pdf"))
 pdf(pdf_heat, width = 14, height = 8)
 
 par(mar = c(5, 5, 4, 6))
@@ -258,7 +254,7 @@ dev.off()
 cat(sprintf("  Saved: %s\n", basename(pdf_heat)))
 
 ## ============ Plot 4: Multi-panel — ecological distance + dissimilarity + rate
-pdf_multi <- file.path(out_dir, "test_timeseries_multipanel.pdf")
+pdf_multi <- file.path(out_dir, paste0(fit$species_group, "_test_timeseries_multipanel.pdf"))
 pdf(pdf_multi, width = 12, height = 12)
 
 par(mfrow = c(3, 1), mar = c(4.5, 5, 3, 2))
@@ -303,7 +299,7 @@ dev.off()
 cat(sprintf("  Saved: %s\n", basename(pdf_multi)))
 
 ## ============ Plot 5: Selected site trajectories =========================
-pdf_sites <- file.path(out_dir, "test_timeseries_selected_sites.pdf")
+pdf_sites <- file.path(out_dir, paste0(fit$species_group, "_test_timeseries_selected_sites.pdf"))
 pdf(pdf_sites, width = 12, height = 8)
 
 par(mar = c(5, 5, 4, 8), xpd = TRUE)
@@ -335,7 +331,7 @@ cat(sprintf("  Saved: %s\n", basename(pdf_sites)))
 # ---------------------------------------------------------------------------
 # 7. Save results
 # ---------------------------------------------------------------------------
-rds_file <- file.path(out_dir, "test_timeseries_results.rds")
+rds_file <- file.path(out_dir, paste0(fit$species_group, "_test_timeseries_results.rds"))
 saveRDS(list(
   baseline_year  = baseline_year,
   target_years   = target_years,

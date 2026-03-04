@@ -12,31 +12,25 @@
 cat("=== IBRA Region Temporal GDM Time-Series ===\n\n")
 
 # ---------------------------------------------------------------------------
-# 0. Paths and parameters
+# 0. Source config and set parameters
 # ---------------------------------------------------------------------------
-project_root <- tryCatch(
-  normalizePath(file.path(dirname(sys.frame(1)$ofile), "..", ".."), mustWork = FALSE),
-  error = function(e) getwd()
-)
-if (!dir.exists(project_root)) project_root <- getwd()
+this_dir <- tryCatch(dirname(sys.frame(1)$ofile), error = function(e) getwd())
+source(file.path(this_dir, "config.R"))
 
-fit_path     <- file.path(project_root,
-  "src/reca_STresiduals/output/AVES_1mil_30climWin_STresid_biAverage_fittedGDM.RData")
-ref_raster   <- file.path(project_root,
-  "data/FWPT_mean_Cmax_mean_1946_1975.flt")
-ibra_shp     <- file.path(project_root,
-  "data/ibra51_reg/ibra51_regions.shp")
-npy_src      <- "/Volumes/PortableSSD/CLIMATE/geonpy"
-python_exe   <- file.path(project_root, ".venv/bin/python3")
-pyper_script <- file.path(project_root, "src/shared/python/pyper.py")
+project_root <- config$project_root
+fit_path     <- config$fit_path
+ref_raster   <- config$reference_raster
+ibra_shp     <- file.path(config$data_dir, "ibra51_reg", "ibra51_regions.shp")
+npy_src      <- config$npy_src
+python_exe   <- config$python_exe
+pyper_script <- config$pyper_script
+out_dir      <- config$output_dir
 
 ## Time-series parameters
 baseline_year  <- 1950L
 target_years   <- 1951L:2017L
 pixels_per_reg <- 1000L   # max pixels to sample per region
 
-## Output
-out_dir <- file.path(project_root, "src/reca_STresiduals/output")
 if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
 
 # ---------------------------------------------------------------------------
@@ -231,7 +225,7 @@ cat(sprintf("\n--- All regions complete: %.1f min total ---\n", total_time / 60)
 # ---------------------------------------------------------------------------
 # 6. Save results
 # ---------------------------------------------------------------------------
-rds_file <- file.path(out_dir, "ibra_timeseries_results.rds")
+rds_file <- file.path(out_dir, paste0(fit$species_group, "_ibra_timeseries_results.rds"))
 saveRDS(list(
   baseline_year  = baseline_year,
   target_years   = target_years,
@@ -251,7 +245,7 @@ cat(sprintf("  Saved results: %s\n", basename(rds_file)))
 # ---------------------------------------------------------------------------
 cat("\n--- Generating per-region ribbon plots ---\n")
 
-pdf_ribbon <- file.path(out_dir, "ibra_timeseries_ribbon_per_region.pdf")
+pdf_ribbon <- file.path(out_dir, paste0(fit$species_group, "_ibra_timeseries_ribbon_per_region.pdf"))
 pdf(pdf_ribbon, width = 12, height = 7)
 
 for (reg in active_regions) {
@@ -342,7 +336,7 @@ change_pal <- colorRampPalette(c("#2166AC", "#67A9CF", "#D1E5F0",
 reg_colours <- setNames(change_pal, region_medians$region)
 
 ## --- Plot A: All median trajectories overlaid ---
-pdf_all <- file.path(out_dir, "ibra_timeseries_all_regions.pdf")
+pdf_all <- file.path(out_dir, paste0(fit$species_group, "_ibra_timeseries_all_regions.pdf"))
 pdf(pdf_all, width = 14, height = 9)
 
 par(mar = c(5, 5, 4, 2))
@@ -380,7 +374,7 @@ dev.off()
 cat(sprintf("  Saved: %s\n", basename(pdf_all)))
 
 ## --- Plot B: Bar chart of final-year median dissimilarity by region ---
-pdf_bar <- file.path(out_dir, "ibra_timeseries_final_dissim_barplot.pdf")
+pdf_bar <- file.path(out_dir, paste0(fit$species_group, "_ibra_timeseries_final_dissim_barplot.pdf"))
 pdf(pdf_bar, width = 14, height = max(8, n_plotted * 0.22))
 
 par(mar = c(5, 14, 4, 2))
@@ -403,7 +397,7 @@ cat(sprintf("  Saved: %s\n", basename(pdf_bar)))
 # ---------------------------------------------------------------------------
 cat("\n--- Generating small-multiple ribbon grid ---\n")
 
-pdf_grid <- file.path(out_dir, "ibra_timeseries_ribbon_grid.pdf")
+pdf_grid <- file.path(out_dir, paste0(fit$species_group, "_ibra_timeseries_ribbon_grid.pdf"))
 pdf(pdf_grid, width = 16, height = 11)
 
 ## Use the ranked order (highest change first)

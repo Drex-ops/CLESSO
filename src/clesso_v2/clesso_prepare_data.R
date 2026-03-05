@@ -1,6 +1,6 @@
 ##############################################################################
 ##
-## clesso_prepare_data.R — Prepare model inputs for CLESSO v2 TMB model
+## clesso_prepare_data.R -- Prepare model inputs for CLESSO v2 TMB model
 ##
 ## Transforms the paired dataset from clesso_sampler() into the matrices
 ## and vectors required by the TMB model (clesso_v2.cpp):
@@ -14,10 +14,10 @@
 ##   - w:         pair weights
 ##
 ## Functions:
-##   clesso_build_site_table()       — unique site table with covariates
-##   clesso_build_alpha_splines()    — P-spline basis + penalty for alpha
-##   clesso_build_turnover_X()       — pairwise |env_i - env_j| matrix
-##   clesso_prepare_model_data()     — main orchestrator → TMB data list
+##   clesso_build_site_table()       -- unique site table with covariates
+##   clesso_build_alpha_splines()    -- P-spline basis + penalty for alpha
+##   clesso_build_turnover_X()       -- pairwise |env_i - env_j| matrix
+##   clesso_prepare_model_data()     -- main orchestrator -> TMB data list
 ##
 ##############################################################################
 
@@ -344,7 +344,7 @@ clesso_build_turnover_X <- function(pairs_dt,
     var_names <- env_cols
 
   } else {
-    ## No env data — use geographic distance only
+    ## No env data -- use geographic distance only
     if (!geo_distance) {
       stop("Must provide env_data, env_site_table, or set geo_distance=TRUE")
     }
@@ -462,6 +462,11 @@ clesso_build_turnover_X <- function(pairs_dt,
 #   alpha_n_knots      - number of interior knots per alpha covariate spline
 #   alpha_spline_deg   - B-spline degree for alpha smooths (default 3)
 #   alpha_pen_order    - difference penalty order (default 2)
+#   site_obs_richness  - (optional) data.table with site_id + S_obs (observed
+#                        species count per site). Used for informative init of
+#                        u_site and as soft lower bound in TMB.
+#   alpha_lower_bound_lambda - penalty weight for soft alpha >= S_obs constraint
+#                        (default 0 = disabled)
 #
 # Returns:
 #   list with:
@@ -485,7 +490,9 @@ clesso_prepare_model_data <- function(pairs_dt,
                                       alpha_n_knots      = 10,
                                       alpha_spline_deg   = 3,
                                       alpha_pen_order    = 2,
-                                      alpha_knot_positions = NULL) {
+                                      alpha_knot_positions = NULL,
+                                      site_obs_richness  = NULL,
+                                      alpha_lower_bound_lambda = 0) {
   require(data.table)
   pairs_dt <- as.data.table(copy(pairs_dt))
 
@@ -586,6 +593,23 @@ clesso_prepare_model_data <- function(pairs_dt,
     use_alpha_splines = as.integer(use_alpha_splines)
   )
 
+  ## ---- Observed richness lower bound ----
+  ## Merge S_obs (observed species count) onto site table; used for:
+  ##   (a) informative initialisation of u_site
+  ##   (b) soft one-sided penalty in TMB (alpha >= S_obs)
+  S_obs_vec <- rep(0.0, nSites)
+  if (!is.null(site_obs_richness)) {
+    site_obs_richness <- as.data.table(site_obs_richness)
+    stopifnot(all(c("site_id", "S_obs") %in% names(site_obs_richness)))
+    m <- match(site_table$site_id, site_obs_richness$site_id)
+    matched <- !is.na(m)
+    S_obs_vec[matched] <- as.numeric(site_obs_richness$S_obs[m[matched]])
+    cat(sprintf("  Observed richness: %d / %d sites matched, mean S_obs = %.1f\n",
+                sum(matched), nSites, mean(S_obs_vec[matched])))
+  }
+  data_list$S_obs              <- S_obs_vec
+  data_list$lambda_lower_bound <- as.numeric(alpha_lower_bound_lambda)
+
   ## -----------------------------------------------------------------------
   ## 6. Initial parameter values
   ## -----------------------------------------------------------------------
@@ -599,6 +623,17 @@ clesso_prepare_model_data <- function(pairs_dt,
     u_site          = rep(0, nSites),
     log_sigma_u     = log(0.5)
   )
+
+  ## Informative initialisation of u_site when observed richness is available.
+  ## alpha = exp(alpha0 + Z*theta + u) + 1, with theta starting at 0:
+  ##   u ≈ log(target_alpha - 1) - alpha0
+  ## Use S_obs * 1.2 as target (assume ~20% unobserved) clamped above alpha_init.
+  if (!is.null(site_obs_richness) && any(S_obs_vec > 0)) {
+    target_alpha <- pmax(S_obs_vec * 1.2, alpha_init)
+    parameters$u_site <- log(target_alpha - 1) - parameters$alpha0
+    cat(sprintf("  u_site initialised from observed richness (target alpha mean = %.1f)\n",
+                mean(target_alpha[S_obs_vec > 0])))
+  }
 
   ## -----------------------------------------------------------------------
   ## 7. Summary
@@ -616,6 +651,10 @@ clesso_prepare_model_data <- function(pairs_dt,
                 n_lambda_blocks))
   } else {
     cat("  Alpha splines: disabled (linear model only)\n")
+  }
+  if (alpha_lower_bound_lambda > 0 && any(S_obs_vec > 0)) {
+    cat(sprintf("  Lower bound: lambda=%.1f, %d sites with S_obs > 0\n",
+                alpha_lower_bound_lambda, sum(S_obs_vec > 0)))
   }
 
   list(

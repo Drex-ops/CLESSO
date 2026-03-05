@@ -1,6 +1,6 @@
 ##############################################################################
 ##
-## clesso_sampler.R — Observation-Pair Sampler for CLESSO v2
+## clesso_sampler.R -- Observation-Pair Sampler for CLESSO v2
 ##
 ## Samples both WITHIN-site and BETWEEN-site observation pairs to
 ## support joint estimation of alpha (richness) and beta (turnover).
@@ -11,9 +11,9 @@
 ## modulated by alpha at each site.
 ##
 ## Functions:
-##   clesso_sample_within_pairs()  — within-site pair sampling
-##   clesso_sample_between_pairs() — between-site pair sampling
-##   clesso_sampler()              — main orchestrator
+##   clesso_sample_within_pairs()  -- within-site pair sampling
+##   clesso_sample_between_pairs() -- between-site pair sampling
+##   clesso_sampler()              -- main orchestrator
 ##
 ## See main.tex for the full mathematical description.
 ##
@@ -242,7 +242,7 @@ clesso_sample_between_pairs <- function(obs_dt,
   }
 
   ## -----------------------------------------------------------------------
-  ## Phase 1: Random pairs — fills mismatches (most random pairs mismatch)
+  ## Phase 1: Random pairs -- fills mismatches (most random pairs mismatch)
   ## -----------------------------------------------------------------------
   cat("  Between-site sampling Phase 1: random pairs for mismatches\n")
 
@@ -421,7 +421,7 @@ clesso_sample_between_pairs <- function(obs_dt,
 
 
 # ---------------------------------------------------------------------------
-# clesso_sampler — Main entry point
+# clesso_sampler -- Main entry point
 #
 # Orchestrates both within-site and between-site sampling, combining
 # results into a single paired dataset ready for clesso_prepare_model_data().

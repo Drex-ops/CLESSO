@@ -1,12 +1,12 @@
 ##############################################################################
 ##
-## test_splineData.R  —  Performance & accuracy comparison:
+## test_splineData.R  --  Performance & accuracy comparison:
 ##                        splineData() vs splineData_fast()
 ##
 ## Tests:
-##   1. Accuracy   — verify identical output on small, medium, and full data
-##   2. Performance — benchmark both functions at 1K, 10K, 100K, full dataset
-##   3. Memory      — report peak memory usage
+##   1. Accuracy   -- verify identical output on small, medium, and full data
+##   2. Performance -- benchmark both functions at 1K, 10K, 100K, full dataset
+##   3. Memory      -- report peak memory usage
 ##
 ## Usage:
 ##   source("test_splineData.R")
@@ -65,7 +65,7 @@ if (length(env_file) > 0) {
 
   ## Create synthetic env columns (site1 and site2 halves, must be even)
   n   <- nrow(obsPairs_out)
-  nc2 <- 30  # 30 predictors → 60 columns (site1 + site2)
+  nc2 <- 30  # 30 predictors -> 60 columns (site1 + site2)
   set.seed(42)
   full_data <- as.data.frame(matrix(rnorm(n * nc2 * 2), nrow = n, ncol = nc2 * 2))
   colnames(full_data) <- c(paste0("env_", 1:nc2, "_1"), paste0("env_", 1:nc2, "_2"))
@@ -81,7 +81,7 @@ cat(sprintf("  Predictors: %d  |  Spline bases: %d per predictor = %d total colu
 
 
 # ===========================================================================
-# TEST 1: ACCURACY — verify identical results
+# TEST 1: ACCURACY -- verify identical results
 # ===========================================================================
 cat("\n=====================================================\n")
 cat("TEST 1: Accuracy comparison\n")
@@ -103,7 +103,7 @@ for (sz in test_sizes) {
   ## Check column names
   names_match <- identical(colnames(out_old), colnames(out_fast))
 
-  ## Check values — allow tiny floating-point tolerance
+  ## Check values -- allow tiny floating-point tolerance
   max_diff <- max(abs(out_old - out_fast), na.rm = TRUE)
   mean_diff <- mean(abs(out_old - out_fast), na.rm = TRUE)
   values_match <- max_diff < 1e-12
@@ -134,7 +134,7 @@ for (sz in test_sizes) {
 
 
 # ===========================================================================
-# TEST 2: PERFORMANCE — benchmark at increasing sizes
+# TEST 2: PERFORMANCE -- benchmark at increasing sizes
 # ===========================================================================
 cat("\n=====================================================\n")
 cat("TEST 2: Performance benchmark\n")

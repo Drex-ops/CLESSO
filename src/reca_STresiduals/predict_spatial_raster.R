@@ -7,7 +7,7 @@
 ## For each pixel, the spatial+substrate environmental variables are
 ## transformed through the model's I-spline basis and weighted by
 ## coefficients. PCA on the transformed space produces 3 components
-## mapped to R, G, B channels — pixels with similar colour = similar
+## mapped to R, G, B channels -- pixels with similar colour = similar
 ## predicted biological community.
 ##
 ## Outputs:
@@ -18,7 +18,7 @@
 ##
 ##############################################################################
 
-cat("=== Spatial GDM → RGB Biological Turnover Map ===\n\n")
+cat("=== Spatial GDM -> RGB Biological Turnover Map ===\n\n")
 
 # ---------------------------------------------------------------------------
 # 0. Source config and set parameters
@@ -88,6 +88,8 @@ result <- predict_spatial_rgb(
   pyper_script = pyper_script,
   ref_year     = ref_year,
   ref_month    = ref_month,
+  modis_dir    = if (isTRUE(fit$add_modis)) config$modis_dir else NULL,
+  modis_resolution = config$modis_resolution,
   pca_method   = pca_method,
   n_components = n_components,
   stretch      = stretch,
@@ -99,15 +101,20 @@ result <- predict_spatial_rgb(
 # ---------------------------------------------------------------------------
 cat("\n--- Saving outputs ---\n")
 
-tif_file <- file.path(out_dir, sprintf("%s_%dyr_ref%d_spatial_RGB.tif",
-                                        fit$species_group, fit$climate_window, ref_year))
+## MODIS suffix for output filenames (derived from fit metadata)
+modis_tag <- if (isTRUE(fit$add_modis)) "_MODIS" else ""
+
+tif_file <- file.path(out_dir, sprintf("%s_%dyr_ref%d%s_spatial_RGB.tif",
+                                        fit$species_group, fit$climate_window, ref_year,
+                                        modis_tag))
 writeRaster(result$rgb_stack, tif_file, format = "GTiff",
             options = c("COMPRESS=LZW"), overwrite = TRUE, datatype = "INT1U")
 cat(sprintf("  Saved: %s\n", basename(tif_file)))
 
 ## Save RDS with full results
-rds_file <- file.path(out_dir, sprintf("%s_%dyr_ref%d_spatial_prediction.rds",
-                                        fit$species_group, fit$climate_window, ref_year))
+rds_file <- file.path(out_dir, sprintf("%s_%dyr_ref%d%s_spatial_prediction.rds",
+                                        fit$species_group, fit$climate_window, ref_year,
+                                        modis_tag))
 saveRDS(list(
   pca_scores         = result$pca_scores,
   variance_explained = result$variance_explained,
@@ -130,8 +137,9 @@ cat(sprintf("  Saved: %s\n", basename(rds_file)))
 # ---------------------------------------------------------------------------
 cat("\n--- Generating plots ---\n")
 
-pdf_rgb <- file.path(out_dir, sprintf("%s_%dyr_ref%d_spatial_RGB_map.pdf",
-                                       fit$species_group, fit$climate_window, ref_year))
+pdf_rgb <- file.path(out_dir, sprintf("%s_%dyr_ref%d%s_spatial_RGB_map.pdf",
+                                       fit$species_group, fit$climate_window, ref_year,
+                                       modis_tag))
 pdf(pdf_rgb, width = 14, height = 10)
 
 par(mar = c(2, 2, 4, 1))
@@ -165,8 +173,9 @@ cat(sprintf("  Saved: %s\n", basename(pdf_rgb)))
 # ---------------------------------------------------------------------------
 # 6. Plot 2: Individual PC maps
 # ---------------------------------------------------------------------------
-pdf_pcs <- file.path(out_dir, sprintf("%s_%dyr_ref%d_spatial_PC_maps.pdf",
-                                       fit$species_group, fit$climate_window, ref_year))
+pdf_pcs <- file.path(out_dir, sprintf("%s_%dyr_ref%d%s_spatial_PC_maps.pdf",
+                                       fit$species_group, fit$climate_window, ref_year,
+                                       modis_tag))
 pdf(pdf_pcs, width = 16, height = 14)
 
 par(mfrow = c(2, 2), mar = c(3, 3, 4, 5))
@@ -219,8 +228,9 @@ cat(sprintf("  Saved: %s\n", basename(pdf_pcs)))
 # ---------------------------------------------------------------------------
 # 7. Plot 3: Predictor contribution barplot
 # ---------------------------------------------------------------------------
-pdf_contrib <- file.path(out_dir, sprintf("%s_%dyr_ref%d_spatial_predictor_contributions.pdf",
-                                           fit$species_group, fit$climate_window, ref_year))
+pdf_contrib <- file.path(out_dir, sprintf("%s_%dyr_ref%d%s_spatial_predictor_contributions.pdf",
+                                           fit$species_group, fit$climate_window, ref_year,
+                                           modis_tag))
 pdf(pdf_contrib, width = 12, height = 8)
 
 pred_info <- attr(result$transformed, "predictor_info")
@@ -242,7 +252,7 @@ if (nrow(active_preds) > 0) {
                 names.arg = rev(active_preds$predictor),
                 col = rev(bar_cols), border = NA,
                 xlab = "Coefficient Sum (biological importance)",
-                main = sprintf("Spatial Predictor Importance — %s | %d yr",
+                main = sprintf("Spatial Predictor Importance -- %s | %d yr",
                                fit$species_group, fit$climate_window),
                 cex.names = 0.7)
 
@@ -259,8 +269,9 @@ cat(sprintf("  Saved: %s\n", basename(pdf_contrib)))
 # 8. Plot 4: PCA loading structure (which predictors drive each PC)
 # ---------------------------------------------------------------------------
 if (!is.null(result$pca)) {
-  pdf_loadings <- file.path(out_dir, sprintf("%s_%dyr_ref%d_spatial_PCA_loadings.pdf",
-                                              fit$species_group, fit$climate_window, ref_year))
+  pdf_loadings <- file.path(out_dir, sprintf("%s_%dyr_ref%d%s_spatial_PCA_loadings.pdf",
+                                              fit$species_group, fit$climate_window, ref_year,
+                                              modis_tag))
   pdf(pdf_loadings, width = 14, height = 10)
 
   loadings <- result$pca$rotation[, 1:3]
@@ -294,7 +305,7 @@ if (!is.null(result$pca)) {
           col = c("red", "green", "blue"),
           las = 1, cex.names = 0.65,
           xlab = "Sum of |PCA Loadings|",
-          main = sprintf("Predictor Contributions to PC1-3 — %s",
+          main = sprintf("Predictor Contributions to PC1-3 -- %s",
                          fit$species_group))
 
   legend("bottomright",

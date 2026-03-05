@@ -31,6 +31,16 @@ Type objective_function<Type>::operator() ()
   // use_alpha_splines: flag (1 = use spline basis, 0 = linear only)
   DATA_INTEGER(use_alpha_splines);
 
+  // ---- Observed richness lower bound ----
+  // S_obs: observed species count per site (hard lower bound on true alpha).
+  // lambda_lower_bound: penalty weight for soft constraint alpha >= S_obs.
+  // When lambda_lower_bound > 0, a smooth one-sided hinge penalty is added:
+  //   pen = lambda * sum_s softplus(S_obs_s - alpha_s)^2
+  // This keeps the model estimating TOTAL richness (not excess), so
+  // predictions at new sites (S_obs = 0) remain unbiased.
+  DATA_VECTOR(S_obs);
+  DATA_SCALAR(lambda_lower_bound);
+
   const int P = y.size();
   const int Kbeta  = X.cols();
   const int nSites = Z.rows();
@@ -139,6 +149,23 @@ Type objective_function<Type>::operator() ()
   }
 
   const Type eps = Type(1e-10);
+  // ---- Soft lower-bound penalty: discourage alpha < S_obs ----
+  // Uses a smooth hinge (softplus) so the penalty is differentiable:
+  //   softplus(x) = log(1 + exp(k*x)) / k   (k controls sharpness)
+  // Then pen = lambda * sum_s softplus(S_obs_s - alpha_s)^2
+  // When alpha >= S_obs the penalty is negligible; when alpha < S_obs
+  // it grows quadratically.
+  if (lambda_lower_bound > Type(0.0)) {
+    Type pen_lb = Type(0.0);
+    Type k = Type(10.0);  // sharpness of the hinge
+    for (int s = 0; s < nSites; s++) {
+      Type shortfall = S_obs(s) - alpha_site(s);
+      // softplus approximation of max(0, shortfall)
+      Type soft_pos = log(Type(1.0) + exp(k * shortfall)) / k;
+      pen_lb += soft_pos * soft_pos;
+    }
+    nll += lambda_lower_bound * pen_lb;
+  }
 
   for(int p=0; p<P; p++){
     int i = site_i(p);

@@ -31,7 +31,7 @@ config$project_root <- env_or_default(
 ## Shared R module directory
 config$r_dir <- file.path(config$project_root, "src", "shared", "R")
 
-## Python executable (for gen_windows → pyper.py calls)
+## Python executable (for gen_windows -> pyper.py calls)
 ## Default to the project venv Python so pyarrow/geonpy are available
 config$python_exe <- env_or_default(
   "RECA_PYTHON_EXE",

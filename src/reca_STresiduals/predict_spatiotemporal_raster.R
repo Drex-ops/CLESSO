@@ -7,20 +7,20 @@
 ##
 ## Four mapping modes are available (controlled by `mode` parameter):
 ##
-##   Mode 1: "raw"   — Simple concatenation of spatial position + absolute
-##                      temporal |I(yr1) - I(yr2)| → PCA → RGB.
+##   Mode 1: "raw"   -- Simple concatenation of spatial position + absolute
+##                      temporal |I(yr1) - I(yr2)| -> PCA -> RGB.
 ##                      (Original behaviour for backward compatibility.)
 ##
-##   Mode 2: "signed" — Same as raw, but uses SIGNED temporal differences
+##   Mode 2: "signed" -- Same as raw, but uses SIGNED temporal differences
 ##                      I(yr2) - I(yr1) to preserve direction of change.
 ##
-##   Mode 3: "alpha"  — Normalised blocks + α-weighted mixing.
+##   Mode 3: "alpha"  -- Normalised blocks + α-weighted mixing.
 ##                      Both spatial and temporal blocks are standardised
 ##                      to unit column variance, then weighted by
-##                      sqrt(1-α) and sqrt(α). PCA → RGB.
-##                      α = 0 → spatial only; α = 1 → temporal only.
+##                      sqrt(1-α) and sqrt(α). PCA -> RGB.
+##                      α = 0 -> spatial only; α = 1 -> temporal only.
 ##
-##   Mode 4: "hsl"    — Two-stage HSL bivariate map:
+##   Mode 4: "hsl"    -- Two-stage HSL bivariate map:
 ##                      Hue ← spatial community type (atan2 of PC1, PC2)
 ##                      Saturation ← spatial distinctiveness
 ##                      Lightness ← temporal change magnitude
@@ -33,7 +33,7 @@
 ##
 ##############################################################################
 
-cat("=== Spatio-temporal GDM → RGB Biological Turnover Map ===\n\n")
+cat("=== Spatio-temporal GDM -> RGB Biological Turnover Map ===\n\n")
 
 # ---------------------------------------------------------------------------
 # 0.  Source config and set parameters
@@ -107,8 +107,9 @@ cat(sprintf("  Predictors: %d total (%d spatial, %d substrate, %d temporal)\n",
                            c(grep("^spat_", fit$predictors),
                              grep("^temp_", fit$predictors)))),
             length(grep("^temp_", fit$predictors))))
-cat(sprintf("  Year pair: %d → %d\n\n", year1, year2))
-
+cat(sprintf("  Year pair: %d -> %d\n\n", year1, year2))
+## MODIS suffix for output filenames (derived from fit metadata)
+modis_tag <- if (isTRUE(fit$add_modis)) "_MODIS" else ""
 # ---------------------------------------------------------------------------
 # Helper:  plot an RGB result (shared by modes 1–3)
 # ---------------------------------------------------------------------------
@@ -119,7 +120,7 @@ cat(sprintf("  Year pair: %d → %d\n\n", year1, year2))
 
   plotRGB(result$rgb_stack, r = 1, g = 2, b = 3, stretch = "none",
           main = sprintf(
-            "%s\n%s | %d yr | %d → %d",
+            "%s\n%s | %d yr | %d -> %d",
             mode_label, fit$species_group, fit$climate_window, year1, year2),
           axes = TRUE)
 
@@ -165,7 +166,7 @@ cat(sprintf("  Year pair: %d → %d\n\n", year1, year2))
     ve_str <- if (!is.null(result$variance_explained))
       sprintf(" (%.1f%%)", result$variance_explained[k]) else ""
     plot(score_ras, col = pc_pals[[k]],
-         main = sprintf("%s%s — %d → %d", pc_names[k], ve_str, year1, year2),
+         main = sprintf("%s%s -- %d -> %d", pc_names[k], ve_str, year1, year2),
          cex.main = 1.0)
   }
 
@@ -194,7 +195,7 @@ cat(sprintf("  Year pair: %d → %d\n\n", year1, year2))
 }
 
 # ===========================================================================
-# MODE 1: Raw (original) — absolute temporal diffs, unweighted concatenation
+# MODE 1: Raw (original) -- absolute temporal diffs, unweighted concatenation
 # ===========================================================================
 if (run_raw) {
   cat("\n\n######  MODE 1: Raw (absolute diffs, unweighted)  ######\n\n")
@@ -202,12 +203,14 @@ if (run_raw) {
     fit = fit, ref_raster = ref_raster, subs_raster = subs_raster,
     npy_src = npy_src, python_exe = python_exe, pyper_script = pyper_script,
     year1 = year1, year2 = year2, ref_year = ref_year, ref_month = ref_month,
+    modis_dir = if (isTRUE(fit$add_modis)) config$modis_dir else NULL,
+    modis_resolution = config$modis_resolution,
     signed_temporal = FALSE, alpha = NULL,
     pca_method = pca_method, n_components = n_components, stretch = stretch,
     verbose = TRUE)
 
-  tag_raw <- sprintf("%s_%dyr_%d_to_%d_ST_raw",
-                     fit$species_group, fit$climate_window, year1, year2)
+  tag_raw <- sprintf("%s_%dyr_%d_to_%d%s_ST_raw",
+                     fit$species_group, fit$climate_window, year1, year2, modis_tag)
   .save_rgb_tif(result_raw, tag_raw)
   .plot_rgb_composite(result_raw, tag_raw,
                       "Spatio-temporal PCA (raw absolute diffs, unweighted)")
@@ -215,7 +218,7 @@ if (run_raw) {
 }
 
 # ===========================================================================
-# MODE 2: Signed — signed temporal diffs, unweighted concatenation
+# MODE 2: Signed -- signed temporal diffs, unweighted concatenation
 # ===========================================================================
 if (run_signed) {
   cat("\n\n######  MODE 2: Signed temporal diffs  ######\n\n")
@@ -223,12 +226,14 @@ if (run_signed) {
     fit = fit, ref_raster = ref_raster, subs_raster = subs_raster,
     npy_src = npy_src, python_exe = python_exe, pyper_script = pyper_script,
     year1 = year1, year2 = year2, ref_year = ref_year, ref_month = ref_month,
+    modis_dir = if (isTRUE(fit$add_modis)) config$modis_dir else NULL,
+    modis_resolution = config$modis_resolution,
     signed_temporal = TRUE, alpha = NULL,
     pca_method = pca_method, n_components = n_components, stretch = stretch,
     verbose = TRUE)
 
-  tag_signed <- sprintf("%s_%dyr_%d_to_%d_ST_signed",
-                        fit$species_group, fit$climate_window, year1, year2)
+  tag_signed <- sprintf("%s_%dyr_%d_to_%d%s_ST_signed",
+                        fit$species_group, fit$climate_window, year1, year2, modis_tag)
   .save_rgb_tif(result_signed, tag_signed)
   .plot_rgb_composite(result_signed, tag_signed,
                       "Spatio-temporal PCA (signed diffs, unweighted)")
@@ -236,7 +241,7 @@ if (run_signed) {
 }
 
 # ===========================================================================
-# MODE 3: Alpha-weighted — normalised blocks with mixing parameter
+# MODE 3: Alpha-weighted -- normalised blocks with mixing parameter
 # ===========================================================================
 if (run_alpha) {
   for (a in alpha_values) {
@@ -245,12 +250,14 @@ if (run_alpha) {
       fit = fit, ref_raster = ref_raster, subs_raster = subs_raster,
       npy_src = npy_src, python_exe = python_exe, pyper_script = pyper_script,
       year1 = year1, year2 = year2, ref_year = ref_year, ref_month = ref_month,
+      modis_dir = if (isTRUE(fit$add_modis)) config$modis_dir else NULL,
+      modis_resolution = config$modis_resolution,
       signed_temporal = TRUE, alpha = a, normalise_blocks = TRUE,
       pca_method = pca_method, n_components = n_components, stretch = stretch,
       verbose = TRUE)
 
-    tag_a <- sprintf("%s_%dyr_%d_to_%d_ST_alpha%.0f",
-                     fit$species_group, fit$climate_window, year1, year2, a * 100)
+    tag_a <- sprintf("%s_%dyr_%d_to_%d%s_ST_alpha%.0f",
+                     fit$species_group, fit$climate_window, year1, year2, modis_tag, a * 100)
     .save_rgb_tif(result_a, tag_a)
     .plot_rgb_composite(result_a, tag_a,
                         sprintf("Spatio-temporal PCA (alpha=%.2f, signed, normalised)", a))
@@ -274,14 +281,16 @@ if (run_hsl) {
     fit = fit, ref_raster = ref_raster, subs_raster = subs_raster,
     npy_src = npy_src, python_exe = python_exe, pyper_script = pyper_script,
     year1 = year1, year2 = year2, ref_year = ref_year, ref_month = ref_month,
+    modis_dir = if (isTRUE(fit$add_modis)) config$modis_dir else NULL,
+    modis_resolution = config$modis_resolution,
     trans_spatial = pre_spat, trans_temporal = pre_temp, coords = pre_coords,
     signed_temporal = FALSE,
     sat_fixed = sat_fixed, light_range = light_range,
     light_invert = light_invert, stretch = stretch,
     verbose = TRUE)
 
-  tag_hsl <- sprintf("%s_%dyr_%d_to_%d_ST_HSL",
-                     fit$species_group, fit$climate_window, year1, year2)
+  tag_hsl <- sprintf("%s_%dyr_%d_to_%d%s_ST_HSL",
+                     fit$species_group, fit$climate_window, year1, year2, modis_tag)
 
   ## Save RGB GeoTIFF
   .save_rgb_tif(result_hsl, tag_hsl)
@@ -300,7 +309,7 @@ if (run_hsl) {
   plotRGB(result_hsl$rgb_stack, r = 1, g = 2, b = 3, stretch = "none",
           main = sprintf(
             paste0("HSL Bivariate Map: Hue = community type, Lightness = temporal change\n",
-                   "%s | %d yr | %d → %d"),
+                   "%s | %d yr | %d -> %d"),
             fit$species_group, fit$climate_window, year1, year2),
           axes = TRUE)
 
@@ -368,8 +377,8 @@ if (run_hsl) {
 # ---------------------------------------------------------------------------
 cat("\n\n--- Predictor contributions ---\n")
 
-tag_base <- sprintf("%s_%dyr_%d_to_%d_spatiotemporal",
-                    fit$species_group, fit$climate_window, year1, year2)
+tag_base <- sprintf("%s_%dyr_%d_to_%d%s_spatiotemporal",
+                    fit$species_group, fit$climate_window, year1, year2, modis_tag)
 pdf_contrib <- file.path(out_dir, paste0(tag_base, "_predictor_contributions.pdf"))
 pdf(pdf_contrib, width = 14, height = 10)
 
@@ -395,7 +404,7 @@ if (nrow(pred_df) > 0) {
           names.arg = rev(pred_df$predictor),
           col = rev(bar_cols), border = NA,
           xlab = "Coefficient Sum (biological importance)",
-          main = sprintf("Predictor Importance — %s | %d yr | %d → %d",
+          main = sprintf("Predictor Importance -- %s | %d yr | %d -> %d",
                          fit$species_group, fit$climate_window, year1, year2),
           cex.names = 0.65)
   legend("bottomright",
@@ -419,7 +428,7 @@ if (run_alpha) {
     var_name <- sprintf("result_a")  # last one in loop
   }
   # The alpha results are saved per-iteration; for comparison we re-run the last one
-  # (or reference result_a from the loop — it holds the final alpha value)
+  # (or reference result_a from the loop -- it holds the final alpha value)
   if (exists("result_a"))
     results_list[[sprintf("Mode 3: alpha=%.2f", alpha_values[length(alpha_values)])]] <- result_a
 }
@@ -434,11 +443,11 @@ if (length(results_list) >= 2) {
   for (nm in names(results_list)) {
     res <- results_list[[nm]]
     plotRGB(res$rgb_stack, r = 1, g = 2, b = 3, stretch = "none",
-            main = sprintf("%s\n%d → %d", nm, year1, year2),
+            main = sprintf("%s\n%d -> %d", nm, year1, year2),
             axes = TRUE)
   }
   dev.off()
   cat(sprintf("  Saved: %s\n", basename(pdf_compare)))
 }
 
-cat(sprintf("\n=== All spatio-temporal predictions complete (%d → %d) ===\n", year1, year2))
+cat(sprintf("\n=== All spatio-temporal predictions complete (%d -> %d) ===\n", year1, year2))

@@ -18,7 +18,7 @@
 # ---------------------------------------------------------------------------
 # Helper: compute shared species count for pairs, in memory-safe chunks.
 #
-# Old approach: m1[s1, ] + m1[s2, ] == 2  → dense logical 1M × 20K = 20 GB
+# Old approach: m1[s1, ] + m1[s2, ] == 2  -> dense logical 1M × 20K = 20 GB
 # New approach: rowSums(m1[s1, ] * m1[s2, ]) in chunks of 50K rows.
 #   Element-wise * of two sparse binary matrices stays sparse (intersection),
 #   so peak memory per chunk is ~100 MB instead of 20 GB.

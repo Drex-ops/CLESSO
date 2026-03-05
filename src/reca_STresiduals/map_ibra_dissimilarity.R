@@ -20,8 +20,10 @@ year1 <- 1950L
 year2 <- 2017L
 
 ## Dissimilarity TIF produced by predict_temporal_raster.R
-dissim_prefix <- sprintf("%s_%dyr_%d_to_%d",
-                         config$species_group, config$climate_window, year1, year2)
+modis_tag <- if (isTRUE(config$add_modis)) "_MODIS" else ""
+dissim_prefix <- sprintf("%s_%dyr_%d_to_%d%s",
+                         config$species_group, config$climate_window, year1, year2,
+                         modis_tag)
 dissim_tif <- file.path(config$output_dir,
                         paste0(dissim_prefix, "_temporal_dissimilarity.tif"))
 ibra_shp   <- file.path(config$data_dir, "ibra51_reg", "ibra51_regions.shp")
@@ -29,7 +31,7 @@ out_dir    <- config$output_dir
 if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
 
 ## Label used in plot titles
-map_label <- sprintf("%s | %d → %d | %d yr climate window",
+map_label <- sprintf("%s | %d -> %d | %d yr climate window",
                      config$species_group, year1, year2, config$climate_window)
 
 # ---------------------------------------------------------------------------
@@ -122,11 +124,11 @@ ibra_stats <- ibra_dissolved %>%
   left_join(stats, by = "REG_NAME")
 
 ## Save as CSV and GeoPackage
-csv_file <- file.path(out_dir, "ibra_dissimilarity_stats.csv")
+csv_file <- file.path(out_dir, paste0("ibra_dissimilarity_stats", modis_tag, ".csv"))
 write.csv(st_drop_geometry(ibra_stats), csv_file, row.names = FALSE)
 cat(sprintf("\n  Saved: %s\n", basename(csv_file)))
 
-gpkg_file <- file.path(out_dir, "ibra_dissimilarity_stats.gpkg")
+gpkg_file <- file.path(out_dir, paste0("ibra_dissimilarity_stats", modis_tag, ".gpkg"))
 st_write(ibra_stats, gpkg_file, delete_dsn = TRUE, quiet = TRUE)
 cat(sprintf("  Saved: %s\n", basename(gpkg_file)))
 
@@ -135,7 +137,7 @@ cat(sprintf("  Saved: %s\n", basename(gpkg_file)))
 # ---------------------------------------------------------------------------
 cat("\n--- Generating maps ---\n")
 
-## Diverging palette (cool → warm)
+## Diverging palette (cool -> warm)
 make_pal <- function(n = 100) {
   colorRampPalette(c("#2166AC", "#67A9CF", "#D1E5F0", "#F7F7F7",
                       "#FDDBC7", "#EF8A62", "#B2182B"))(n)
@@ -191,7 +193,7 @@ plot_ibra_map(
   title = paste0("Mean Temporal Dissimilarity by IBRA Region\n", map_label),
   legend_title = "Mean Dissimilarity",
   pal = pal100,
-  out_pdf = file.path(out_dir, "ibra_map_mean_dissim.pdf")
+  out_pdf = file.path(out_dir, paste0("ibra_map_mean_dissim", modis_tag, ".pdf"))
 )
 
 ## Map 2: SD dissimilarity
@@ -200,7 +202,7 @@ plot_ibra_map(
   title = paste0("SD of Temporal Dissimilarity by IBRA Region\n", map_label),
   legend_title = "SD Dissimilarity",
   pal = pal100,
-  out_pdf = file.path(out_dir, "ibra_map_sd_dissim.pdf")
+  out_pdf = file.path(out_dir, paste0("ibra_map_sd_dissim", modis_tag, ".pdf"))
 )
 
 ## Map 3: Max dissimilarity
@@ -209,7 +211,7 @@ plot_ibra_map(
   title = paste0("Max Temporal Dissimilarity by IBRA Region\n", map_label),
   legend_title = "Max Dissimilarity",
   pal = pal100,
-  out_pdf = file.path(out_dir, "ibra_map_max_dissim.pdf")
+  out_pdf = file.path(out_dir, paste0("ibra_map_max_dissim", modis_tag, ".pdf"))
 )
 
 ## Map 4: Median dissimilarity
@@ -218,7 +220,7 @@ plot_ibra_map(
   title = paste0("Median Temporal Dissimilarity by IBRA Region\n", map_label),
   legend_title = "Median Dissimilarity",
   pal = pal100,
-  out_pdf = file.path(out_dir, "ibra_map_median_dissim.pdf")
+  out_pdf = file.path(out_dir, paste0("ibra_map_median_dissim", modis_tag, ".pdf"))
 )
 
 # ---------------------------------------------------------------------------
@@ -226,7 +228,7 @@ plot_ibra_map(
 # ---------------------------------------------------------------------------
 cat("\n--- Generating combined 4-panel map ---\n")
 
-pdf_combined <- file.path(out_dir, "ibra_map_combined_4panel.pdf")
+pdf_combined <- file.path(out_dir, paste0("ibra_map_combined_4panel", modis_tag, ".pdf"))
 pdf(pdf_combined, width = 18, height = 14)
 
 par(mfrow = c(2, 2), mar = c(2, 2, 3, 5), oma = c(0, 0, 3, 0))
@@ -259,7 +261,7 @@ for (stat_col in c("mean_dissim", "sd_dissim", "max_dissim", "median_dissim")) {
   }
 }
 
-mtext(paste0("Temporal Dissimilarity by IBRA Region — ", map_label),
+mtext(paste0("Temporal Dissimilarity by IBRA Region -- ", map_label),
       outer = TRUE, cex = 1.1, font = 2)
 
 dev.off()

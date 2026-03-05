@@ -1,6 +1,6 @@
 ##############################################################################
 ##
-## test_gen_windows_full.R  —  Full-scale env extraction test (~2M rows)
+## test_gen_windows_full.R  --  Full-scale env extraction test (~2M rows)
 ##
 ## Runs the complete Step 6a environmental data extraction on the full
 ## obsPairs table (all rows after temporal filter) using the same parallel

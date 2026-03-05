@@ -1,9 +1,9 @@
 ##############################################################################
 ##
-## test_step6_full.R  —  Full Step 6 pipeline benchmark (single iteration)
+## test_step6_full.R  --  Full Step 6 pipeline benchmark (single iteration)
 ##
 ## Runs all sub-steps of Step 6 once (first climate/weather window combo)
-## with per-step performance metrics. No climate/weather loop — just a
+## with per-step performance metrics. No climate/weather loop -- just a
 ## single pass to measure each sub-step's cost.
 ##
 ## Sub-steps:
@@ -355,7 +355,7 @@ fit$ecological <- obsGDM_1$linear.predictors
 save(fit, file = paste0(out_prefix, "fittedGDM.RData"))
 
 ## Diagnostic plots
-## w is needed for obs.gdm.plot — estimate a default if not available
+## w is needed for obs.gdm.plot -- estimate a default if not available
 if (!exists("w")) {
   w <- 1  # placeholder; in full pipeline this comes from step 2
   cat("  Note: 'w' not available from step 2, using placeholder w=1 for plot\n")

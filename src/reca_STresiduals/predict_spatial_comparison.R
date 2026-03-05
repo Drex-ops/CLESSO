@@ -4,8 +4,8 @@
 ##
 ## Compare three spatial prediction approaches from a fitted STresiduals GDM:
 ##
-##   A. Transform → PCA → RGB   (predict_spatial_rgb)
-##   B. Landmark MDS → RGB      (predict_spatial_lmds)
+##   A. Transform -> PCA -> RGB   (predict_spatial_rgb)
+##   B. Landmark MDS -> RGB      (predict_spatial_lmds)
 ##   C. Dissimilarity from ref  (spatial_dissimilarity_from_ref)
 ##
 ## A is the standard fast approach (no pairwise calibration).
@@ -86,10 +86,13 @@ load(fit_path)
 cat(sprintf("  Model: %s | climate window = %d yr | %d predictors\n",
             fit$species_group, fit$climate_window, length(fit$predictors)))
 
+## MODIS suffix for output filenames (derived from fit metadata)
+modis_tag <- if (isTRUE(fit$add_modis)) "_MODIS" else ""
+
 # ===========================================================================
-# A.  Transform → PCA → RGB
+# A.  Transform -> PCA -> RGB
 # ===========================================================================
-cat("\n\n######  APPROACH A: Transform → PCA → RGB  ######\n\n")
+cat("\n\n######  APPROACH A: Transform -> PCA -> RGB  ######\n\n")
 
 result_pca <- predict_spatial_rgb(
   fit          = fit,
@@ -100,6 +103,8 @@ result_pca <- predict_spatial_rgb(
   pyper_script = pyper_script,
   ref_year     = ref_year,
   ref_month    = ref_month,
+  modis_dir    = if (isTRUE(fit$add_modis)) config$modis_dir else NULL,
+  modis_resolution = config$modis_resolution,
   pca_method   = pca_method,
   n_components = n_components,
   stretch      = stretch,
@@ -107,7 +112,7 @@ result_pca <- predict_spatial_rgb(
 )
 
 ## Save RGB GeoTIFF
-tag_a <- sprintf("%s_%dyr_ref%d_PCA", fit$species_group, fit$climate_window, ref_year)
+tag_a <- sprintf("%s_%dyr_ref%d%s_PCA", fit$species_group, fit$climate_window, ref_year, modis_tag)
 writeRaster(result_pca$rgb_stack,
             file.path(out_dir, paste0(tag_a, "_RGB.tif")),
             format = "GTiff", options = "COMPRESS=LZW",
@@ -115,9 +120,9 @@ writeRaster(result_pca$rgb_stack,
 cat(sprintf("  Saved: %s_RGB.tif\n", tag_a))
 
 # ===========================================================================
-# B.  Landmark MDS → RGB  (reuses pre-computed transform from A)
+# B.  Landmark MDS -> RGB  (reuses pre-computed transform from A)
 # ===========================================================================
-cat("\n\n######  APPROACH B: Landmark MDS → RGB  ######\n\n")
+cat("\n\n######  APPROACH B: Landmark MDS -> RGB  ######\n\n")
 
 result_lmds <- predict_spatial_lmds(
   fit               = fit,
@@ -134,9 +139,9 @@ result_lmds <- predict_spatial_lmds(
 
 ## Save RGB GeoTIFF
 dissim_tag <- if (use_dissimilarity) "dissim" else "ecodist"
-tag_b <- sprintf("%s_%dyr_ref%d_LMDS_%dk_%s",
+tag_b <- sprintf("%s_%dyr_ref%d%s_LMDS_%dk_%s",
                  fit$species_group, fit$climate_window, ref_year,
-                 n_landmarks, dissim_tag)
+                 modis_tag, n_landmarks, dissim_tag)
 writeRaster(result_lmds$rgb_stack,
             file.path(out_dir, paste0(tag_b, "_RGB.tif")),
             format = "GTiff", options = "COMPRESS=LZW",
@@ -158,8 +163,8 @@ result_ref <- spatial_dissimilarity_from_ref(
 )
 
 ## Save dissimilarity rasters
-tag_c <- sprintf("%s_%dyr_ref%d_dissim_from_ref",
-                 fit$species_group, fit$climate_window, ref_year)
+tag_c <- sprintf("%s_%dyr_ref%d%s_dissim_from_ref",
+                 fit$species_group, fit$climate_window, ref_year, modis_tag)
 writeRaster(result_ref$dissim_stack,
             file.path(out_dir, paste0(tag_c, ".tif")),
             format = "GTiff", options = "COMPRESS=LZW",
@@ -174,15 +179,16 @@ cat("\n\n--- Generating comparison plots ---\n")
 # ---------------------------------------------------------------------------
 # Plot 1: Side-by-side A vs B
 # ---------------------------------------------------------------------------
-pdf_compare <- file.path(out_dir, sprintf("%s_%dyr_ref%d_PCA_vs_LMDS.pdf",
-                                           fit$species_group, fit$climate_window, ref_year))
+pdf_compare <- file.path(out_dir, sprintf("%s_%dyr_ref%d%s_PCA_vs_LMDS.pdf",
+                                           fit$species_group, fit$climate_window, ref_year,
+                                           modis_tag))
 pdf(pdf_compare, width = 18, height = 10)
 
 par(mfrow = c(1, 2), mar = c(2, 2, 4, 1))
 
 ## A: PCA
 plotRGB(result_pca$rgb_stack, r = 1, g = 2, b = 3, stretch = "none",
-        main = sprintf("A: Transform → PCA → RGB\n%s | %d yr | ref %d",
+        main = sprintf("A: Transform -> PCA -> RGB\n%s | %d yr | ref %d",
                        fit$species_group, fit$climate_window, ref_year),
         axes = TRUE)
 if (!is.null(result_pca$variance_explained)) {
@@ -198,7 +204,7 @@ if (!is.null(result_pca$variance_explained)) {
 
 ## B: LMDS
 plotRGB(result_lmds$rgb_stack, r = 1, g = 2, b = 3, stretch = "none",
-        main = sprintf("B: Landmark MDS → RGB (%d landmarks, %s)\n%s | %d yr | ref %d",
+        main = sprintf("B: Landmark MDS -> RGB (%d landmarks, %s)\n%s | %d yr | ref %d",
                        n_landmarks, dissim_tag,
                        fit$species_group, fit$climate_window, ref_year),
         axes = TRUE)
@@ -222,8 +228,9 @@ cat(sprintf("  Saved: %s\n", basename(pdf_compare)))
 # ---------------------------------------------------------------------------
 # Plot 2: Reference site dissimilarity maps
 # ---------------------------------------------------------------------------
-pdf_ref <- file.path(out_dir, sprintf("%s_%dyr_ref%d_dissim_from_ref_maps.pdf",
-                                       fit$species_group, fit$climate_window, ref_year))
+pdf_ref <- file.path(out_dir, sprintf("%s_%dyr_ref%d%s_dissim_from_ref_maps.pdf",
+                                       fit$species_group, fit$climate_window, ref_year,
+                                       modis_tag))
 
 n_refs <- nlayers(result_ref$dissim_stack)
 n_cols <- min(n_refs, 3)
@@ -257,8 +264,9 @@ cat(sprintf("  Saved: %s\n", basename(pdf_ref)))
 # ---------------------------------------------------------------------------
 # Plot 3: Eigenvalue spectrum from LMDS + summary stats
 # ---------------------------------------------------------------------------
-pdf_summary <- file.path(out_dir, sprintf("%s_%dyr_ref%d_prediction_summary.pdf",
-                                           fit$species_group, fit$climate_window, ref_year))
+pdf_summary <- file.path(out_dir, sprintf("%s_%dyr_ref%d%s_prediction_summary.pdf",
+                                           fit$species_group, fit$climate_window, ref_year,
+                                           modis_tag))
 pdf(pdf_summary, width = 14, height = 10)
 
 par(mfrow = c(2, 2), mar = c(4, 4, 4, 2))
@@ -291,7 +299,7 @@ plot(raster(ref_raster),
 lm_coords <- result_lmds$landmark_coords
 points(lm_coords$lon, lm_coords$lat, pch = 20, col = "#D62728", cex = 0.5)
 
-## Panel 3: Comparison histogram — ecological distances from landmarks
+## Panel 3: Comparison histogram -- ecological distances from landmarks
 ## (shows distribution of pairwise distances in the landmark set)
 d_tri <- result_lmds$D_LL[upper.tri(result_lmds$D_LL)]
 if (use_dissimilarity) {

@@ -99,7 +99,7 @@ all_pts   <- st_as_sf(data.frame(lon = all_xy[, 1], lat = all_xy[, 2]),
 cat(sprintf("  Total non-NA cells: %d\n", length(all_cells)))
 
 ## Spatial join: assign each cell to an IBRA region
-cat("  Performing spatial join (cells → regions) ...\n")
+cat("  Performing spatial join (cells -> regions) ...\n")
 join_t0 <- proc.time()
 cell_region <- st_join(all_pts, ibra_dissolved["REG_NAME"], left = FALSE)
 join_time <- (proc.time() - join_t0)["elapsed"]
@@ -118,7 +118,7 @@ for (reg in region_names) {
   reg_pts <- cell_region[cell_region$REG_NAME == reg, , drop = FALSE]
   n_avail <- nrow(reg_pts)
   if (n_avail == 0) {
-    cat(sprintf("  [SKIP] %s — no non-NA pixels\n", reg))
+    cat(sprintf("  [SKIP] %s -- no non-NA pixels\n", reg))
     next
   }
   n_samp <- min(n_avail, pixels_per_reg)
@@ -136,7 +136,7 @@ cat(sprintf("\n  Active regions with samples: %d / %d\n", n_active, n_regions))
 # 5. Run time-series predictions per region
 # ---------------------------------------------------------------------------
 n_years <- length(target_years)
-cat(sprintf("\n--- Running time-series predictions: %d baseline → {%d..%d} ---\n",
+cat(sprintf("\n--- Running time-series predictions: %d baseline -> {%d..%d} ---\n",
             baseline_year, min(target_years), max(target_years)))
 cat(sprintf("    %d regions × up to %d pixels × %d years\n",
             n_active, pixels_per_reg, n_years))
@@ -225,7 +225,10 @@ cat(sprintf("\n--- All regions complete: %.1f min total ---\n", total_time / 60)
 # ---------------------------------------------------------------------------
 # 6. Save results
 # ---------------------------------------------------------------------------
-rds_file <- file.path(out_dir, paste0(fit$species_group, "_ibra_timeseries_results.rds"))
+## MODIS suffix for output filenames (derived from fit metadata)
+modis_tag <- if (isTRUE(fit$add_modis)) "_MODIS" else ""
+
+rds_file <- file.path(out_dir, paste0(fit$species_group, modis_tag, "_ibra_timeseries_results.rds"))
 saveRDS(list(
   baseline_year  = baseline_year,
   target_years   = target_years,
@@ -245,7 +248,7 @@ cat(sprintf("  Saved results: %s\n", basename(rds_file)))
 # ---------------------------------------------------------------------------
 cat("\n--- Generating per-region ribbon plots ---\n")
 
-pdf_ribbon <- file.path(out_dir, paste0(fit$species_group, "_ibra_timeseries_ribbon_per_region.pdf"))
+pdf_ribbon <- file.path(out_dir, paste0(fit$species_group, modis_tag, "_ibra_timeseries_ribbon_per_region.pdf"))
 pdf(pdf_ribbon, width = 12, height = 7)
 
 for (reg in active_regions) {
@@ -336,7 +339,7 @@ change_pal <- colorRampPalette(c("#2166AC", "#67A9CF", "#D1E5F0",
 reg_colours <- setNames(change_pal, region_medians$region)
 
 ## --- Plot A: All median trajectories overlaid ---
-pdf_all <- file.path(out_dir, paste0(fit$species_group, "_ibra_timeseries_all_regions.pdf"))
+pdf_all <- file.path(out_dir, paste0(fit$species_group, modis_tag, "_ibra_timeseries_all_regions.pdf"))
 pdf(pdf_all, width = 14, height = 9)
 
 par(mar = c(5, 5, 4, 2))
@@ -346,7 +349,7 @@ y_all <- y_all + c(-pad, pad)
 
 plot(NA, xlim = range(target_years), ylim = y_all,
      xlab = "Year", ylab = "Median Temporal Dissimilarity",
-     main = sprintf("IBRA Region Comparison — Median Temporal Dissimilarity (%d baseline)\n%s | %d regions",
+     main = sprintf("IBRA Region Comparison -- Median Temporal Dissimilarity (%d baseline)\n%s | %d regions",
                     baseline_year, fit$species_group, n_plotted),
      cex.main = 1.0)
 
@@ -374,7 +377,7 @@ dev.off()
 cat(sprintf("  Saved: %s\n", basename(pdf_all)))
 
 ## --- Plot B: Bar chart of final-year median dissimilarity by region ---
-pdf_bar <- file.path(out_dir, paste0(fit$species_group, "_ibra_timeseries_final_dissim_barplot.pdf"))
+pdf_bar <- file.path(out_dir, paste0(fit$species_group, modis_tag, "_ibra_timeseries_final_dissim_barplot.pdf"))
 pdf(pdf_bar, width = 14, height = max(8, n_plotted * 0.22))
 
 par(mar = c(5, 14, 4, 2))
@@ -383,9 +386,9 @@ bp <- barplot(rev(region_medians$final_dissim),
               names.arg = rev(region_medians$region),
               col = rev(reg_colours[region_medians$region]),
               border = NA,
-              xlab = sprintf("Median Temporal Dissimilarity (%d → %d)",
+              xlab = sprintf("Median Temporal Dissimilarity (%d -> %d)",
                              baseline_year, max(target_years)),
-              main = sprintf("IBRA Region Ranking — %s | %d yr climate window",
+              main = sprintf("IBRA Region Ranking -- %s | %d yr climate window",
                              fit$species_group, fit$climate_window),
               cex.names = 0.55, cex.main = 1.0)
 
@@ -397,7 +400,7 @@ cat(sprintf("  Saved: %s\n", basename(pdf_bar)))
 # ---------------------------------------------------------------------------
 cat("\n--- Generating small-multiple ribbon grid ---\n")
 
-pdf_grid <- file.path(out_dir, paste0(fit$species_group, "_ibra_timeseries_ribbon_grid.pdf"))
+pdf_grid <- file.path(out_dir, paste0(fit$species_group, modis_tag, "_ibra_timeseries_ribbon_grid.pdf"))
 pdf(pdf_grid, width = 16, height = 11)
 
 ## Use the ranked order (highest change first)
@@ -451,7 +454,7 @@ for (page in seq_len(n_pages)) {
   remaining <- panels_per_page - length(page_regs)
   if (remaining > 0) for (k in seq_len(remaining)) plot.new()
 
-  mtext(sprintf("IBRA Temporal Dissimilarity — %s (%d baseline) — page %d/%d",
+  mtext(sprintf("IBRA Temporal Dissimilarity -- %s (%d baseline) -- page %d/%d",
                 fit$species_group, baseline_year, page, n_pages),
         outer = TRUE, cex = 0.9)
 }

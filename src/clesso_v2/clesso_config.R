@@ -1,6 +1,6 @@
 ##############################################################################
 ##
-## clesso_config.R — Configuration for CLESSO v2 runs
+## clesso_config.R -- Configuration for CLESSO v2 runs
 ##
 ## Follows the same pattern as src/reca_STresiduals/config.R but adds
 ## parameters specific to the joint alpha-beta sampling and modelling.
@@ -153,7 +153,7 @@ clesso_config$alpha_init <- as.numeric(env_or_default("CLESSO_ALPHA_INIT", "20")
 clesso_config$use_alpha_splines <- as.logical(env_or_default("CLESSO_USE_ALPHA_SPLINES", "TRUE"))
 
 ## Spline type: "penalised" (P-spline, default) or "regression" (fixed knots,
-## no smoothness penalty — coefficients estimated as fixed effects).
+## no smoothness penalty -- coefficients estimated as fixed effects).
 ## For regression splines the knot number/positions fully determine the
 ## flexibility; for P-splines the penalty parameter lambda is estimated.
 clesso_config$alpha_spline_type <- tolower(env_or_default("CLESSO_ALPHA_SPLINE_TYPE", "regression"))
@@ -172,12 +172,22 @@ clesso_config$alpha_pen_order <- as.integer(env_or_default("CLESSO_ALPHA_PEN_ORD
 ## User-specified interior knot positions (optional).
 ## When NULL (default), knots are placed at equally-spaced quantiles of the
 ## covariate values. To set custom positions, provide a list of numeric
-## vectors — one per alpha covariate — via the R environment or by
+## vectors -- one per alpha covariate -- via the R environment or by
 ## assigning directly after sourcing this config:
 ##   clesso_config$alpha_knot_positions <- list(c(10,20,30), c(0.1,0.5,0.9))
 ## When set, alpha_n_knots is ignored and the number of knots is determined
 ## by the length of each vector.
 clesso_config$alpha_knot_positions <- NULL
+
+## --- Alpha lower bound (observed richness penalty) ---
+## Penalty weight for soft lower bound on alpha: discourages alpha < S_obs
+## (observed species count). Uses a smooth one-sided hinge so the model
+## still estimates *total* richness from covariates (no offset), and
+## predictions at new sites (where S_obs is unknown) remain unbiased.
+## Set to 0 to disable. Recommended range: 1-100.
+clesso_config$alpha_lower_bound_lambda <- as.numeric(
+  env_or_default("CLESSO_ALPHA_LB_LAMBDA", "10")
+)
 
 ## Climate window size in years (for env extraction)
 clesso_config$climate_window <- as.integer(env_or_default("CLESSO_CLIMATE_WINDOW", "30"))
@@ -190,6 +200,25 @@ clesso_config$geonpy_start_year <- as.integer(env_or_default("CLESSO_GEONPY_STAR
 # ---------------------------------------------------------------------------
 clesso_config$tmb_eval_max <- as.integer(env_or_default("CLESSO_TMB_EVAL_MAX", "4000"))
 clesso_config$tmb_iter_max <- as.integer(env_or_default("CLESSO_TMB_ITER_MAX", "4000"))
+
+# ---------------------------------------------------------------------------
+# Iterative (alternating alpha/beta) fitting
+# ---------------------------------------------------------------------------
+## When TRUE, use block-coordinate descent instead of joint optimisation.
+## This alternates between fixing alpha and fitting beta, then fixing beta
+## and fitting alpha, which avoids the full joint Hessian and is faster
+## when the model has many spline coefficients.
+clesso_config$iterative_fitting <- as.logical(
+  env_or_default("CLESSO_ITERATIVE_FITTING", "FALSE")
+)
+## Maximum number of full alpha/beta cycles
+clesso_config$iterative_max_iter <- as.integer(
+  env_or_default("CLESSO_ITERATIVE_MAX_ITER", "20")
+)
+## Convergence tolerance on relative change in negative log-likelihood
+clesso_config$iterative_tol <- as.numeric(
+  env_or_default("CLESSO_ITERATIVE_TOL", "1e-4")
+)
 
 # ---------------------------------------------------------------------------
 # Parallel settings
@@ -223,13 +252,41 @@ clesso_config$env_params <- list(
 )
 
 # ---------------------------------------------------------------------------
-# Create output directory
+# Run identifier
 # ---------------------------------------------------------------------------
+## Unique run_id stamped on every output file. Default format:
+##   <species_group>_<YYYYMMDD_HHMMSS>
+## Override with CLESSO_RUN_ID env var for reproducible naming.
+clesso_config$run_id <- env_or_default(
+  "CLESSO_RUN_ID",
+  paste0(clesso_config$species_group, "_", format(Sys.time(), "%Y%m%d_%H%M%S"))
+)
+
+# ---------------------------------------------------------------------------
+# Create output directory (run-specific sub-folder)
+# ---------------------------------------------------------------------------
+clesso_config$output_dir <- file.path(clesso_config$output_dir,
+                                       clesso_config$run_id)
 if (!dir.exists(clesso_config$output_dir)) {
   dir.create(clesso_config$output_dir, recursive = TRUE)
 }
 
+# ---------------------------------------------------------------------------
+# Config snapshot helper
+# ---------------------------------------------------------------------------
+## Returns a plain list (no functions/environments) that can be serialised
+## alongside model results so every output file records how it was produced.
+clesso_snapshot_config <- function(cfg = clesso_config) {
+  snap <- cfg
+  ## Strip items that don't serialise cleanly
+  snap$alpha_knot_positions <- if (is.null(cfg$alpha_knot_positions)) "auto" else cfg$alpha_knot_positions
+  snap$snapshot_time <- Sys.time()
+  snap$R_version     <- paste0(R.version$major, ".", R.version$minor)
+  snap
+}
+
 cat("\n=== CLESSO v2 config loaded ===\n")
+cat("  Run ID          :", clesso_config$run_id, "\n")
 cat("  Species group   :", clesso_config$species_group, "\n")
 cat("  Data dir        :", clesso_config$data_dir, "\n")
 cat("  Output dir      :", clesso_config$output_dir, "\n")
@@ -247,6 +304,7 @@ cat("  alpha pen order :", clesso_config$alpha_pen_order,
     ifelse(clesso_config$alpha_spline_type == "regression", "(unused)", ""), "\n")
 cat("  alpha knot pos  :", if (is.null(clesso_config$alpha_knot_positions)) "auto (quantile)"
                            else "user-specified", "\n")
+cat("  alpha lb lambda :", clesso_config$alpha_lower_bound_lambda, "\n")
 cat("  climate_window  :", clesso_config$climate_window, "years\n")
 cat("  cores           :", clesso_config$cores, "\n")
 cat("  seed            :", clesso_config$seed, "\n")

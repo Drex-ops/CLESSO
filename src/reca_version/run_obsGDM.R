@@ -1,6 +1,6 @@
 ##############################################################################
 ##
-## run_obsGDM.R  —  Single parameterised entry point for RECA obsGDM
+## run_obsGDM.R  --  Single parameterised entry point for RECA obsGDM
 ##
 ## This replaces the 13 duplicated run_obsGDM_*.r scripts from OLD_RECA.
 ## All variant behaviour (AVES/PLANTS/VAS, biAverage, v2/v3 decomposition,
@@ -11,9 +11,9 @@
 ##   2. source("run_obsGDM.R")
 ##
 ## Pipeline:
-##   Load data → siteAggregator → date filter → site.richness.extractor →
-##   obsPairSampler → gen_windows (env extraction) → anomalies →
-##   substrate extraction → splineData → fitGDM → diagnostics → save
+##   Load data -> siteAggregator -> date filter -> site.richness.extractor ->
+##   obsPairSampler -> gen_windows (env extraction) -> anomalies ->
+##   substrate extraction -> splineData -> fitGDM -> diagnostics -> save
 ##
 ##############################################################################
 

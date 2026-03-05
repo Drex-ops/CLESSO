@@ -1,6 +1,6 @@
 ##############################################################################
 ##
-## run_obsGDM.R  —  Single parameterised entry point for RECA obsGDM
+## run_obsGDM.R  --  Single parameterised entry point for RECA obsGDM
 ##
 ## This replaces the 13 duplicated run_obsGDM_*.r scripts from OLD_RECA.
 ## All variant behaviour (AVES/PLANTS/VAS, biAverage, v2/v3 decomposition,
@@ -11,9 +11,9 @@
 ##   2. source("run_obsGDM.R")
 ##
 ## Pipeline:
-##   Load data → siteAggregator → date filter → site.richness.extractor →
-##   obsPairSampler → gen_windows (env extraction) → anomalies →
-##   substrate extraction → splineData → fitGDM → diagnostics → save
+##   Load data -> siteAggregator -> date filter -> site.richness.extractor ->
+##   obsPairSampler -> gen_windows (env extraction) -> anomalies ->
+##   substrate extraction -> splineData -> fitGDM -> diagnostics -> save
 ##
 ##############################################################################
 
@@ -190,11 +190,57 @@ cat("\n--- Step 6: Environmental variable extraction (ST residuals) ---\n")
 biol_group <- config$species_group
 c_yr       <- config$climate_window
 
+## ---------------------------------------------------------------------------
+## MODIS validation (early exit if misconfigured)
+## ---------------------------------------------------------------------------
+if (config$add_modis) {
+  cat("  MODIS land cover extraction enabled.\n")
+  cat(sprintf("  MODIS directory: %s\n", config$modis_dir))
+  if (!dir.exists(config$modis_dir)) {
+    stop(paste("MODIS directory not found:", config$modis_dir))
+  }
+  ## Check that the date range of the model is within MODIS coverage
+  model_min_year <- as.integer(format(
+    config$min_date %m+% years(config$date_offset_years), "%Y"))
+  model_max_year <- as.integer(format(config$max_date, "%Y"))
+  if (model_min_year < config$modis_start_year) {
+    stop(sprintf(
+      paste0("ADD_MODIS requires data from %d onwards, but config$min_date + offset gives %d. ",
+             "Set min_date/date_offset_years so the earliest model year >= %d, or disable ADD_MODIS."),
+      config$modis_start_year, model_min_year, config$modis_start_year
+    ))
+  }
+  if (model_max_year > config$modis_end_year) {
+    warning(sprintf(
+      paste0("config$max_date (%s) exceeds MODIS end year (%d). ",
+             "Pairs with years > %d will be clamped to %d for MODIS extraction."),
+      config$max_date, config$modis_end_year,
+      config$modis_end_year, config$modis_end_year
+    ))
+  }
+  cat(sprintf("  Model year range: %d\u2013%d  |  MODIS coverage: %d\u2013%d\n",
+              model_min_year, model_max_year,
+              config$modis_start_year, config$modis_end_year))
+}
+
 ## Apply temporal filter: ensure earliest_year - climate_window >= geonpy_start_year
 obsPairs_out      <- obsPairs_orig
 earliest_year_all <- pmin(obsPairs_out$year1, obsPairs_out$year2)
 tst <- (earliest_year_all - c_yr) >= config$geonpy_start_year
 obsPairs_out <- obsPairs_out[tst, ]
+
+## Additional MODIS temporal filter: both years must be >= modis_start_year
+if (config$add_modis) {
+  modis_tst <- obsPairs_out$year1 >= config$modis_start_year &
+               obsPairs_out$year2 >= config$modis_start_year
+  n_removed <- sum(!modis_tst)
+  if (n_removed > 0) {
+    cat(sprintf("  MODIS filter: removing %d pairs with years before %d\n",
+                n_removed, config$modis_start_year))
+  }
+  obsPairs_out <- obsPairs_out[modis_tst, ]
+}
+
 ext_data     <- obsPairs_out[, 2:9]
 cat(sprintf("  Pairs after temporal filter: %d\n", nrow(obsPairs_out)))
 
@@ -203,6 +249,7 @@ save_prefix <- paste0(config$species_group, "_",
                       c_yr, "climWin_STresid_")
 if (config$biAverage)              save_prefix <- paste0(save_prefix, "biAverage_")
 if (config$decomposition != "none") save_prefix <- paste0(config$decomposition, "_", save_prefix)
+if (config$add_modis)              save_prefix <- paste0(save_prefix, config$modis_suffix)
 
 env_file <- file.path(config$output_dir, paste0(save_prefix, "ObsEnvTable.RData"))
 
@@ -302,19 +349,153 @@ if (get_env) {
   colnames(env1_subs) <- paste0(colnames(env1_subs), "_1")
   colnames(env2_subs) <- paste0(colnames(env2_subs), "_2")
 
+  ## ------------------------------------------------------------------
+  ## STEP 6a-MODIS: Extract MODIS as spatial + temporal predictors
+  ##
+  ## MODIS land cover is treated the same way as climate variables:
+  ##   Spatial component -- both sites at the earliest year
+  ##     spat_modis_{var}_1 = MODIS(site1, earliest_year)
+  ##     spat_modis_{var}_2 = MODIS(site2, earliest_year)
+  ##   Temporal component -- site 2 at baseline vs observation year
+  ##     temp_modis_{var}_1 = MODIS(site2, earliest_year)
+  ##     temp_modis_{var}_2 = MODIS(site2, year2)
+  ##
+  ## File pattern: modis_{year}_{variable}_{resolution}_COG.tif
+  ## Years outside MODIS range are clamped to boundary year.
+  ## ------------------------------------------------------------------
+  modis_spat_1 <- NULL; modis_spat_2 <- NULL
+  modis_temp_1 <- NULL; modis_temp_2 <- NULL
+
+  if (config$add_modis) {
+    cat("  Extracting MODIS land cover (spatial + temporal)...\n")
+
+    ## Helper: load MODIS raster for a given variable and year
+    load_modis_raster <- function(varname, year) {
+      yr_clamped <- min(max(year, config$modis_start_year), config$modis_end_year)
+      fname <- file.path(config$modis_dir,
+                         paste0("modis_", yr_clamped, "_", varname, "_",
+                                config$modis_resolution, "_COG.tif"))
+      if (!file.exists(fname)) stop(sprintf("MODIS raster not found: %s", fname))
+      raster(fname)
+    }
+
+    ## Clamp years to MODIS range
+    earliest_year_clamped <- pmin(pmax(earliest_year,
+                                       config$modis_start_year), config$modis_end_year)
+    year2_clamped <- pmin(pmax(ext_data[, 7],
+                               config$modis_start_year), config$modis_end_year)
+    all_modis_years <- sort(unique(c(earliest_year_clamped, year2_clamped)))
+
+    ## Pre-load MODIS rasters (var × year)
+    cat(sprintf("  Pre-loading MODIS rasters for %d years × %d variables...\n",
+                length(all_modis_years), length(config$modis_variables)))
+    modis_cache <- list()
+    for (mv in config$modis_variables) {
+      for (yr in all_modis_years) {
+        key <- paste0(mv, "_", yr)
+        modis_cache[[key]] <- load_modis_raster(mv, yr)
+      }
+    }
+
+    n_pairs <- nrow(ext_data)
+    n_vars  <- length(config$modis_variables)
+    modis_pnt1 <- SpatialPoints(data.frame(ext_data[, 1], ext_data[, 2]))
+    modis_pnt2 <- SpatialPoints(data.frame(ext_data[, 5], ext_data[, 6]))
+
+    ## --- SPATIAL MODIS ---
+    ## Site 1 at earliest_year -> spat_modis_{var}_1
+    ## Site 2 at earliest_year -> spat_modis_{var}_2
+    ms1_fwd <- matrix(NA_real_, nrow = n_pairs, ncol = n_vars)
+    ms2_fwd <- matrix(NA_real_, nrow = n_pairs, ncol = n_vars)
+    colnames(ms1_fwd) <- paste0("spat_modis_", config$modis_variables, "_1")
+    colnames(ms2_fwd) <- paste0("spat_modis_", config$modis_variables, "_2")
+
+    for (vi in seq_along(config$modis_variables)) {
+      mv <- config$modis_variables[vi]
+      cat(sprintf("    Spatial %s...\n", mv))
+      for (yr in sort(unique(earliest_year_clamped))) {
+        idx <- which(earliest_year_clamped == yr)
+        ras <- modis_cache[[paste0(mv, "_", yr)]]
+        ms1_fwd[idx, vi] <- extract(ras, modis_pnt1[idx])
+        ms2_fwd[idx, vi] <- extract(ras, modis_pnt2[idx])
+      }
+    }
+
+    if (config$biAverage) {
+      cat("  Computing bidirectional average (MODIS spatial)...\n")
+      ms1_rev <- matrix(NA_real_, nrow = n_pairs, ncol = n_vars)
+      ms2_rev <- matrix(NA_real_, nrow = n_pairs, ncol = n_vars)
+      for (vi in seq_along(config$modis_variables)) {
+        mv <- config$modis_variables[vi]
+        for (yr in sort(unique(earliest_year_clamped))) {
+          idx <- which(earliest_year_clamped == yr)
+          ras <- modis_cache[[paste0(mv, "_", yr)]]
+          ms1_rev[idx, vi] <- extract(ras, modis_pnt2[idx])  # site2 -> _1
+          ms2_rev[idx, vi] <- extract(ras, modis_pnt1[idx])  # site1 -> _2
+        }
+      }
+      ms1_fwd <- (ms1_fwd + ms1_rev) / 2
+      ms2_fwd <- (ms2_fwd + ms2_rev) / 2
+      colnames(ms1_fwd) <- paste0("spat_modis_", config$modis_variables, "_1")
+      colnames(ms2_fwd) <- paste0("spat_modis_", config$modis_variables, "_2")
+    }
+
+    modis_spat_1 <- as.data.frame(ms1_fwd)
+    modis_spat_2 <- as.data.frame(ms2_fwd)
+
+    ## --- TEMPORAL MODIS ---
+    ## Site 2 at earliest_year -> temp_modis_{var}_1 (baseline)
+    ## Site 2 at obs year2     -> temp_modis_{var}_2 (target)
+    mt1 <- matrix(NA_real_, nrow = n_pairs, ncol = n_vars)
+    mt2 <- matrix(NA_real_, nrow = n_pairs, ncol = n_vars)
+    colnames(mt1) <- paste0("temp_modis_", config$modis_variables, "_1")
+    colnames(mt2) <- paste0("temp_modis_", config$modis_variables, "_2")
+
+    for (vi in seq_along(config$modis_variables)) {
+      mv <- config$modis_variables[vi]
+      cat(sprintf("    Temporal %s...\n", mv))
+
+      ## Baseline (site2 at earliest_year)
+      for (yr in sort(unique(earliest_year_clamped))) {
+        idx <- which(earliest_year_clamped == yr)
+        ras <- modis_cache[[paste0(mv, "_", yr)]]
+        mt1[idx, vi] <- extract(ras, modis_pnt2[idx])
+      }
+
+      ## Target (site2 at obs year2)
+      for (yr in sort(unique(year2_clamped))) {
+        idx <- which(year2_clamped == yr)
+        ras <- modis_cache[[paste0(mv, "_", yr)]]
+        mt2[idx, vi] <- extract(ras, modis_pnt2[idx])
+      }
+    }
+
+    modis_temp_1 <- as.data.frame(mt1)
+    modis_temp_2 <- as.data.frame(mt2)
+
+    cat(sprintf("  MODIS extraction complete: %d spatial + %d temporal covariates per site\n",
+                n_vars, n_vars))
+
+    rm(modis_cache, ms1_fwd, ms2_fwd, mt1, mt2, modis_pnt1, modis_pnt2)
+    if (exists("ms1_rev")) rm(ms1_rev, ms2_rev)
+    gc()
+  }
+
   ## Combine: obsPairs metadata + ALL site-1/baseline cols + ALL site-2/obs cols
   ## IMPORTANT: splineData_fast splits at the midpoint, so all _1 columns must
   ## come first and all _2 columns second, in matching order.
   parts <- list(obsPairs_out,
-                env_spat1, env1_subs, env_temp1,
-                env_spat2, env2_subs, env_temp2)
+                env_spat1, modis_spat_1, env1_subs, env_temp1, modis_temp_1,
+                env_spat2, modis_spat_2, env2_subs, env_temp2, modis_temp_2)
   parts <- parts[!sapply(parts, is.null)]
   obsPairs_out <- do.call(cbind, parts)
 
-  ## Clean up
+  ## Clean up climate/substrate/MODIS env objects
   rm(env_spatial, env_spatA, env_spat1, env_spat2,
      env_temporal, env_temp1, env_temp2, env1_subs, env2_subs)
   if (exists("env_spatB")) rm(env_spatB)
+  if (exists("modis_spat_1")) rm(modis_spat_1, modis_spat_2,
+                                  modis_temp_1, modis_temp_2)
   gc()
 
   ## Save
@@ -361,8 +542,6 @@ if (config$decomposition == "v3") {
 # ------------------------------------------------------------------
 cat("  Computing I-spline basis (fast)...\n")
 toSpline <- obsPairs_out[, env_cols]
-## Remove substrate-only columns if present (handled separately in some variants)
-## This preserves the structure from the original scripts
 splined  <- splineData_fast(toSpline)
 
 if (config$decomposition == "v3") {
@@ -372,18 +551,53 @@ if (config$decomposition == "v3") {
 }
 
 # ------------------------------------------------------------------
-# STEP 6e: Fit GDM
+# STEP 6d2: Pre-compute metadata & free memory before fitting
 # ------------------------------------------------------------------
-cat("  Fitting GDM...\n")
+## Quantiles (needed for fit object; compute now so we can free toSpline)
+nc  <- ncol(toSpline)
+nc2 <- nc / 2
+X1  <- toSpline[, 1:nc2]
+X2  <- toSpline[, (nc2 + 1):nc]
+nms <- names(X1); names(X2) <- nms
+XX  <- rbind(X1, X2)
+sp_quant      <- unlist(lapply(1:ncol(XX), function(x) quantile(XX[, x], c(0, 0.5, 1))))
+n_spline_vars <- ncol(XX)
+rm(X1, X2, XX, nms)
+
+## Predictor names (from spline column names)
+predictors_vec <- gsub("191101-201712_", "",
+                        gsub("_spl1", "", colnames(splined)[grep("_spl1", colnames(splined))]))
+
+## Total pair count (before v3 filter)
+n_pairs_total <- nrow(obsPairs_out)
+
+## Build mod_ready before freeing source objects
 match_response <- if (config$decomposition == "v3") {
   obsPairs_out$Match[keep]
 } else {
   obsPairs_out$Match
 }
-
 mod_ready <- cbind(Match = match_response, as.data.frame(splined_new))
 colnames(mod_ready) <- gsub("191101-201712_", "", colnames(mod_ready))
 
+## FREE large intermediate objects to reclaim memory for GLM fitting
+cat("  Freeing intermediate objects to reduce memory...\n")
+rm(obsPairs_out, toSpline, splined, splined_new, match_response)
+if (exists("keep") && is.logical(keep)) rm(keep)
+invisible(gc())
+
+# ------------------------------------------------------------------
+# STEP 6e: Fit GDM (with optional subsampling for very large datasets)
+# ------------------------------------------------------------------
+if (!is.null(config$max_fit_pairs) && nrow(mod_ready) > config$max_fit_pairs) {
+  cat(sprintf("  Subsampling %d -> %d pairs for fitting\n",
+              nrow(mod_ready), config$max_fit_pairs))
+  idx <- sample.int(nrow(mod_ready), config$max_fit_pairs)
+  mod_ready <- mod_ready[idx, ]
+  rm(idx)
+}
+
+cat(sprintf("  Fitting GDM on %d pairs...\n", nrow(mod_ready)))
 f1      <- paste(colnames(mod_ready)[-1], collapse = "+")
 formula <- as.formula(paste(colnames(mod_ready)[1], "~", f1, sep = ""))
 obsGDM_1 <- fitGDM(formula = formula, data = mod_ready)
@@ -410,23 +624,13 @@ save(coefs, file = paste0(out_prefix, "coefficients.RData"))
     fit <- list()
     fit$intercept    <- coef(obsGDM_1)[1]
     fit$sample       <- nrow(mod_ready)
-    fit$predictors   <- gsub("191101-201712_", "",
-                              gsub("_spl1", "", colnames(splined)[grep("_spl1", colnames(splined))]))
+    fit$predictors   <- predictors_vec
     fit$coefficients <- coef(obsGDM_1)[-1]
     fit$coefficients[is.na(fit$coefficients)] <- 0
-
-    ## Compute quantiles from the data
-    nc  <- ncol(toSpline)
-    nc2 <- nc / 2
-    X1  <- toSpline[, 1:nc2]
-    X2  <- toSpline[, (nc2 + 1):nc]
-    nms <- names(X1); names(X2) <- nms
-    sv  <- c(rep(1, nrow(X1)), rep(2, nrow(X2)))
-    XX  <- rbind(X1, X2)
-    fit$quantiles  <- unlist(lapply(1:ncol(XX), function(x) quantile(XX[, x], c(0, 0.5, 1))))
-    fit$splines    <- rep(3, ncol(XX))
-    fit$predicted  <- fitted(obsGDM_1)
-    fit$ecological <- obsGDM_1$linear.predictors
+    fit$quantiles    <- sp_quant
+    fit$splines      <- rep(3, n_spline_vars)
+    fit$predicted    <- fitted(obsGDM_1)
+    fit$ecological   <- obsGDM_1$linear.predictors
 
     ## ---- Run metadata ----
     fit$species_group   <- config$species_group
@@ -438,7 +642,7 @@ save(coefs, file = paste0(out_prefix, "coefficients.RData"))
     fit$date_range      <- c(as.character(config$min_date), as.character(config$max_date))
     fit$date_offset_yrs <- config$date_offset_years
     fit$obs_csv         <- config$obs_csv
-    fit$n_pairs         <- nrow(obsPairs_out)
+    fit$n_pairs         <- n_pairs_total
     fit$D2              <- D2
     fit$nagelkerke_r2   <- gdm_dev$Nagelkerke
     fit$env_params      <- config$env_params
@@ -446,6 +650,11 @@ save(coefs, file = paste0(out_prefix, "coefficients.RData"))
     fit$reference_raster <- basename(config$reference_raster)
     fit$grid_resolution  <- config$grid_resolution
     fit$geonpy_start_year <- config$geonpy_start_year
+    fit$add_modis        <- config$add_modis
+    if (config$add_modis) {
+      fit$modis_variables  <- config$modis_variables
+      fit$modis_year_range <- c(config$modis_start_year, config$modis_end_year)
+    }
     fit$run_timestamp   <- Sys.time()
 save(fit, file = paste0(out_prefix, "fittedGDM.RData"))
 

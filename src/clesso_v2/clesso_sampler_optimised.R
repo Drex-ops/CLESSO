@@ -1,6 +1,6 @@
 ##############################################################################
 ##
-## clesso_sampler_optimised.R — Performance-optimised sampler for CLESSO v2
+## clesso_sampler_optimised.R -- Performance-optimised sampler for CLESSO v2
 ##
 ## Drop-in replacement for clesso_sampler.R with the same public API
 ## but significantly faster internals. Key optimisations:

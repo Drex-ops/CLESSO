@@ -6,7 +6,7 @@
 ## biodiversity change accumulating from a 1950 baseline to each
 ## successive year (1951, 1952, ..., 2017).
 ##
-## For each year pair 1950 → Y, the script:
+## For each year pair 1950 -> Y, the script:
 ##   1. Computes temporal dissimilarity at every pixel via the fitted
 ##      STresiduals GDM (same pipeline as predict_temporal_raster.R).
 ##   2. Renders a map frame (PNG) with a FIXED colour scale [0, global_max]
@@ -24,7 +24,7 @@
 ##
 ##############################################################################
 
-cat("=== Animated Temporal Biodiversity Change: 1950 → 2017 ===\n\n")
+cat("=== Animated Temporal Biodiversity Change: 1950 -> 2017 ===\n\n")
 
 # ---------------------------------------------------------------------------
 # 0.  Paths and parameters
@@ -109,7 +109,7 @@ make_raster <- function(values, template, cell_indices) {
 cat(sprintf("\n--- Pass 1: Computing temporal dissimilarity for %d year-pairs ---\n",
             length(year2_seq)))
 cat(sprintf("  Baseline year: %d\n", year1))
-cat(sprintf("  Target years:  %d → %d\n", min(year2_seq), max(year2_seq)))
+cat(sprintf("  Target years:  %d -> %d\n", min(year2_seq), max(year2_seq)))
 cat(sprintf("  Chunk size:    %s pixels\n\n", format(chunk_size, big.mark = ",")))
 
 ## Storage for per-year results
@@ -122,7 +122,7 @@ for (yi in seq_along(year2_seq)) {
   yr2 <- year2_seq[yi]
   t0_yr <- proc.time()
 
-  cat(sprintf("[%s] Year %d → %d (%d/%d)...\n",
+  cat(sprintf("[%s] Year %d -> %d (%d/%d)...\n",
               format(Sys.time(), "%H:%M:%S"), year1, yr2, yi, length(year2_seq)))
   flush.console()
 
@@ -215,7 +215,7 @@ cat(sprintf("  Saved: %s\n", basename(stats_csv)))
 # ---------------------------------------------------------------------------
 cat(sprintf("\n--- Pass 2: Rendering %d map frames ---\n", length(year2_seq)))
 
-## Colour palette: white → yellow → orange → red → dark red
+## Colour palette: white -> yellow -> orange -> red -> dark red
 dissim_pal <- colorRampPalette(c(
   "#F7F7F7", "#FEF0D9", "#FDD49E", "#FDBB84",
   "#FC8D59", "#EF6548", "#D7301F", "#B30000", "#7F0000"
@@ -239,7 +239,7 @@ for (yi in seq_along(year2_seq)) {
 
   plot(ras_frame, col = dissim_pal, zlim = c(0, zlim_max),
        axes = TRUE, box = TRUE,
-       main = sprintf("Temporal Biodiversity Change: %d → %d\n%s | %d yr climate window",
+       main = sprintf("Temporal Biodiversity Change: %d -> %d\n%s | %d yr climate window",
                       year1, yr2, fit$species_group, fit$climate_window),
        cex.main = 1.1,
        legend.args = list(text = "Dissimilarity", side = 4, line = 2.5, cex = 0.9))
@@ -261,7 +261,7 @@ for (yi in seq_along(year2_seq)) {
   dev.off()
 
   if (yi %% 10 == 0 || yi == length(year2_seq))
-    cat(sprintf("  Rendered frame %d/%d (%d → %d)\n", yi, length(year2_seq), year1, yr2))
+    cat(sprintf("  Rendered frame %d/%d (%d -> %d)\n", yi, length(year2_seq), year1, yr2))
 }
 
 cat(sprintf("  All %d frames saved to: %s\n", length(year2_seq), basename(frame_dir)))
@@ -285,7 +285,7 @@ frames <- image_read(frame_files)
 
 ## --- Compression & optimisation ---
 ## 1. Quantise to 256 colours (GIF's native maximum palette depth).
-##    This is the single biggest file-size reducer — from 24-bit RGB
+##    This is the single biggest file-size reducer -- from 24-bit RGB
 ##    down to an 8-bit indexed palette per frame.
 cat("  Quantising to 256 colours...\n")
 frames <- image_quantize(frames, max = 256, dither = TRUE)

@@ -1,13 +1,13 @@
 ##############################################################################
 ##
-## run_clesso_alpha.R — Alpha-only (richness) pipeline for CLESSO
+## run_clesso_alpha.R -- Alpha-only (richness) pipeline for CLESSO
 ##
 ## Simplified pipeline that uses ONLY within-site observation pairs to
-## estimate species richness (alpha) per site — no turnover model.
+## estimate species richness (alpha) per site -- no turnover model.
 ##
 ## Pipeline:
-##   1. Load data → siteAggregator
-##   2. Date filter → format for CLESSO sampler
+##   1. Load data -> siteAggregator
+##   2. Date filter -> format for CLESSO sampler
 ##   3. Sample within-site observation pairs only
 ##   4. Extract site-level environmental covariates
 ##   5. Prepare alpha-only TMB model data
@@ -132,9 +132,18 @@ pairs_dt <- within_pairs
 
 ## Save pairs
 pairs_file <- file.path(clesso_config$output_dir,
-  paste0("clesso_alpha_pairs_", clesso_config$species_group, ".rds"))
+  paste0("clesso_alpha_pairs_", clesso_config$run_id, ".rds"))
 saveRDS(pairs_dt, file = pairs_file)
 cat(sprintf("  Within-site pairs saved to %s\n", pairs_file))
+
+## Compute observed species richness per site (lower bound for alpha)
+cat("  Computing observed richness per site (lower bound)...\n")
+site_obs_richness <- obs_dt[, .(S_obs = uniqueN(species)), by = .(site_id)]
+cat(sprintf("  Observed richness: mean = %.1f, range = [%d, %d] across %d sites\n",
+            mean(site_obs_richness$S_obs),
+            min(site_obs_richness$S_obs),
+            max(site_obs_richness$S_obs),
+            nrow(site_obs_richness)))
 
 
 # ===========================================================================
@@ -248,6 +257,18 @@ data_list <- list(
   use_alpha_splines = as.integer(use_splines)
 )
 
+## ---- Observed richness lower bound ----
+S_obs_vec <- rep(0.0, nSites)
+if (!is.null(site_obs_richness)) {
+  m <- match(site_table$site_id, site_obs_richness$site_id)
+  matched <- !is.na(m)
+  S_obs_vec[matched] <- as.numeric(site_obs_richness$S_obs[m[matched]])
+  cat(sprintf("  Observed richness: %d / %d sites matched, mean S_obs = %.1f\n",
+              sum(matched), nSites, mean(S_obs_vec[matched])))
+}
+data_list$S_obs              <- S_obs_vec
+data_list$lambda_lower_bound <- as.numeric(clesso_config$alpha_lower_bound_lambda)
+
 ## Initial parameter values
 parameters <- list(
   alpha0           = log(clesso_config$alpha_init - 1),
@@ -257,6 +278,14 @@ parameters <- list(
   u_site           = rep(0, nSites),
   log_sigma_u      = log(0.5)
 )
+
+## Informative initialisation of u_site from observed richness
+if (any(S_obs_vec > 0)) {
+  target_alpha <- pmax(S_obs_vec * 1.2, clesso_config$alpha_init)
+  parameters$u_site <- log(target_alpha - 1) - parameters$alpha0
+  cat(sprintf("  u_site initialised from observed richness (target alpha mean = %.1f)\n",
+              mean(target_alpha[S_obs_vec > 0])))
+}
 
 ## Store model data for prediction later
 model_data <- list(
@@ -276,7 +305,7 @@ model_data <- list(
 
 ## Save model data
 model_data_file <- file.path(clesso_config$output_dir,
-  paste0("clesso_alpha_model_data_", clesso_config$species_group, ".rds"))
+  paste0("clesso_alpha_model_data_", clesso_config$run_id, ".rds"))
 saveRDS(model_data, file = model_data_file)
 cat(sprintf("  Model data saved to %s\n", model_data_file))
 
@@ -291,6 +320,10 @@ if (use_splines) {
   cat(sprintf("  Smoothing blocks: %d\n", n_lambda_blocks))
 } else {
   cat("  Alpha splines: disabled (linear model only)\n")
+}
+if (clesso_config$alpha_lower_bound_lambda > 0 && any(S_obs_vec > 0)) {
+  cat(sprintf("  Lower bound: lambda=%.1f, %d sites with S_obs > 0\n",
+              clesso_config$alpha_lower_bound_lambda, sum(S_obs_vec > 0)))
 }
 
 
@@ -387,6 +420,7 @@ alpha_estimates <- data.table(
   site_index    = site_table$site_index,
   lon           = site_table$lon,
   lat           = site_table$lat,
+  S_obs         = S_obs_vec,
   alpha_est     = rpt$alpha_site,
   log_alpha_est = rpt$log_alpha_site
 )
@@ -395,6 +429,17 @@ cat(sprintf("  Alpha estimates: mean = %.1f, range = [%.1f, %.1f]\n",
             mean(alpha_estimates$alpha_est),
             min(alpha_estimates$alpha_est),
             max(alpha_estimates$alpha_est)))
+
+## Check lower bound violations
+if (any(S_obs_vec > 0)) {
+  n_violations <- sum(alpha_estimates$alpha_est < alpha_estimates$S_obs - 0.5)
+  if (n_violations > 0) {
+    cat(sprintf("  WARNING: %d sites have alpha_est < S_obs (lower bound violations)\n",
+                n_violations))
+  } else {
+    cat("  All alpha estimates >= observed richness (lower bound satisfied)\n")
+  }
+}
 
 ## Alpha regression coefficients (linear terms)
 theta_rows <- grep("^theta_alpha", rownames(est))
@@ -447,11 +492,13 @@ results <- list(
   alpha_estimates = alpha_estimates,
   theta_est       = if (length(theta_rows) > 0) est[theta_rows, , drop = FALSE] else NULL,
   model_data      = model_data,
-  config          = clesso_config
+  config          = clesso_config,
+  config_snapshot = clesso_snapshot_config(),
+  run_id          = clesso_config$run_id
 )
 
 results_file <- file.path(clesso_config$output_dir,
-  paste0("clesso_alpha_results_", clesso_config$species_group, ".rds"))
+  paste0("clesso_alpha_results_", clesso_config$run_id, ".rds"))
 saveRDS(results, file = results_file)
 
 cat(sprintf("\n=== CLESSO alpha-only pipeline complete ===\n"))

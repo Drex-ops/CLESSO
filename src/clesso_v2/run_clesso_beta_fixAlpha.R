@@ -1,6 +1,6 @@
 ##############################################################################
 ##
-## run_clesso_beta_fixAlpha.R — Beta-only (turnover) pipeline with fixed alpha
+## run_clesso_beta_fixAlpha.R -- Beta-only (turnover) pipeline with fixed alpha
 ##
 ## Two-stage workflow:
 ##   Stage 1: Run run_clesso_alpha.R to estimate alpha per site
@@ -8,8 +8,8 @@
 ##            turnover (beta) from between-site pairs only
 ##
 ## Pipeline:
-##   1. Load data → siteAggregator
-##   2. Date filter → format for CLESSO sampler
+##   1. Load data -> siteAggregator
+##   2. Date filter -> format for CLESSO sampler
 ##   3. Load fixed alpha estimates (from prior clesso_alpha run)
 ##   4. Sample between-site observation pairs only
 ##   5. Extract pairwise environmental covariates (turnover X matrix)
@@ -109,8 +109,21 @@ obs_dt <- clesso_format_aggregated_data(datRED)
 cat("\n--- Step 3: Load fixed alpha estimates ---\n")
 
 ## Look for alpha results file
+## First try run_id-based path, then fall back to glob search in output dir
 alpha_results_file <- file.path(clesso_config$output_dir,
-  paste0("clesso_alpha_results_", clesso_config$species_group, ".rds"))
+  paste0("clesso_alpha_results_", clesso_config$run_id, ".rds"))
+
+if (!file.exists(alpha_results_file)) {
+  ## Fall back: find the most recent alpha results file in output dir
+  parent_dir <- dirname(clesso_config$output_dir)
+  candidates <- list.files(parent_dir, pattern = "^clesso_alpha_results_.*\\.rds$",
+                           recursive = TRUE, full.names = TRUE)
+  if (length(candidates) > 0) {
+    ## Pick the most recently modified
+    alpha_results_file <- candidates[which.max(file.mtime(candidates))]
+    cat(sprintf("  Using most recent alpha results: %s\n", alpha_results_file))
+  }
+}
 
 ## Allow override via environment variable
 alpha_results_file <- Sys.getenv("CLESSO_ALPHA_RESULTS",
@@ -165,7 +178,7 @@ pairs_dt <- between_pairs
 
 ## Save pairs
 pairs_file <- file.path(clesso_config$output_dir,
-  paste0("clesso_beta_fixAlpha_pairs_", clesso_config$species_group, ".rds"))
+  paste0("clesso_beta_fixAlpha_pairs_", clesso_config$run_id, ".rds"))
 saveRDS(pairs_dt, file = pairs_file)
 cat(sprintf("  Between-site pairs saved to %s\n", pairs_file))
 
@@ -294,7 +307,7 @@ model_data <- list(
 
 ## Save model data
 model_data_file <- file.path(clesso_config$output_dir,
-  paste0("clesso_beta_fixAlpha_model_data_", clesso_config$species_group, ".rds"))
+  paste0("clesso_beta_fixAlpha_model_data_", clesso_config$run_id, ".rds"))
 saveRDS(model_data, file = model_data_file)
 cat(sprintf("  Model data saved to %s\n", model_data_file))
 
@@ -325,7 +338,7 @@ if (!file.exists(dll_path)) {
 dyn.load(dynlib(file.path(clesso_config$clesso_dir, cpp_basename)))
 
 ## Build TMB objective function
-## No random effects in this model — purely fixed-effect optimisation
+## No random effects in this model -- purely fixed-effect optimisation
 obj <- MakeADFun(
   data       = data_list,
   parameters = parameters,
@@ -398,11 +411,13 @@ results <- list(
   eta0_est       = if (length(eta0_rows) > 0) est[eta0_rows, , drop = FALSE] else NULL,
   model_data     = model_data,
   config         = clesso_config,
+  config_snapshot = clesso_snapshot_config(),
+  run_id         = clesso_config$run_id,
   alpha_source   = alpha_results_file
 )
 
 results_file <- file.path(clesso_config$output_dir,
-  paste0("clesso_beta_fixAlpha_results_", clesso_config$species_group, ".rds"))
+  paste0("clesso_beta_fixAlpha_results_", clesso_config$run_id, ".rds"))
 saveRDS(results, file = results_file)
 
 cat(sprintf("\n=== CLESSO beta-only (fixed alpha) pipeline complete ===\n"))

@@ -58,7 +58,7 @@ cat(sprintf("  Sampled %d points (extent: lon [%.2f, %.2f], lat [%.2f, %.2f])\n"
             min(samp$lon), max(samp$lon),
             min(samp$lat), max(samp$lat)))
 
-## Build prediction points: same locations, 1950 → 2017
+## Build prediction points: same locations, 1950 -> 2017
 pts <- data.frame(
   lon   = samp$lon,
   lat   = samp$lat,
@@ -69,7 +69,7 @@ pts <- data.frame(
 # ---------------------------------------------------------------------------
 # 4. Run temporal prediction
 # ---------------------------------------------------------------------------
-cat("\n--- Running temporal prediction (1950 → 2017) ---\n")
+cat("\n--- Running temporal prediction (1950 -> 2017) ---\n")
 result <- predict_temporal_gdm(
   fit          = fit,
   points       = pts,
@@ -90,7 +90,7 @@ cat("\n--- Generating plots ---\n")
 out_dir <- config$output_dir
 if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
 
-## Colour palette: blue (low change) → red (high change)
+## Colour palette: blue (low change) -> red (high change)
 n_cols  <- 100
 pal     <- colorRampPalette(c("#2166AC", "#67A9CF", "#D1E5F0",
                                "#FDDBC7", "#EF8A62", "#B2182B"))(n_cols)
@@ -107,7 +107,7 @@ pdf_map <- file.path(out_dir, paste0(fit$species_group, "_temporal_dissimilarity
 pdf(pdf_map, width = 10, height = 8)
 
 plot(ras, col = grey(0.9), legend = FALSE, axes = TRUE,
-     main = sprintf("Temporal Biodiversity Dissimilarity (1950 → 2017)\n%s | climate window = %d yr",
+     main = sprintf("Temporal Biodiversity Dissimilarity (1950 -> 2017)\n%s | climate window = %d yr",
                     fit$species_group, fit$climate_window),
      xlab = "Longitude", ylab = "Latitude")
 points(result$lon, result$lat, pch = 19, cex = 1.5, col = pt_cols)
@@ -135,7 +135,7 @@ par(mfrow = c(2, 2), mar = c(4.5, 4.5, 3, 1))
 ## Panel A: Histogram of temporal ecological distance
 hist(result$temporal_distance, breaks = 20, col = "#67A9CF", border = "white",
      main = "Temporal Ecological Distance",
-     xlab = "Distance (1950 → 2017)", ylab = "Frequency")
+     xlab = "Distance (1950 -> 2017)", ylab = "Frequency")
 abline(v = mean(result$temporal_distance, na.rm = TRUE), col = "red", lwd = 2, lty = 2)
 legend("topright", legend = sprintf("mean = %.4f", mean(result$temporal_distance, na.rm = TRUE)),
        col = "red", lty = 2, lwd = 2, cex = 0.8)
@@ -143,7 +143,7 @@ legend("topright", legend = sprintf("mean = %.4f", mean(result$temporal_distance
 ## Panel B: Histogram of dissimilarity
 hist(result$dissimilarity, breaks = 20, col = "#EF8A62", border = "white",
      main = "Temporal Dissimilarity",
-     xlab = "Dissimilarity (1950 → 2017)", ylab = "Frequency")
+     xlab = "Dissimilarity (1950 -> 2017)", ylab = "Frequency")
 abline(v = mean(result$dissimilarity, na.rm = TRUE), col = "red", lwd = 2, lty = 2)
 legend("topright", legend = sprintf("mean = %.4f", mean(result$dissimilarity, na.rm = TRUE)),
        col = "red", lty = 2, lwd = 2, cex = 0.8)
@@ -189,7 +189,7 @@ pdf(pdf_bubble, width = 10, height = 8)
 sz <- 1 + 3 * (diss - diss_range[1]) / max(diff(diss_range), 1e-10)
 
 plot(ras, col = grey(seq(0.95, 0.85, length = 10)), legend = FALSE, axes = TRUE,
-     main = sprintf("Temporal Change Magnitude (1950 → 2017)\n%s | bubble size ∝ dissimilarity",
+     main = sprintf("Temporal Change Magnitude (1950 -> 2017)\n%s | bubble size ∝ dissimilarity",
                     fit$species_group),
      xlab = "Longitude", ylab = "Latitude")
 points(result$lon, result$lat, pch = 21, cex = sz, bg = pt_cols, col = "grey30", lwd = 0.5)

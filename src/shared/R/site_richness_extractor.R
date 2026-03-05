@@ -7,8 +7,8 @@
 ## subsetting without materialising the full record × species matrix.
 ##
 ## The proxy stores:
-##   site_sp  — n_sites × n_species sparse binary matrix (~100 MB)
-##   site_map — record → site index vector (~25 MB)
+##   site_sp  -- n_sites × n_species sparse binary matrix (~100 MB)
+##   site_map -- record -> site index vector (~25 MB)
 ##
 ## When the sampler requests m1[samp, ], the proxy returns
 ## site_sp[site_map[samp], ], which is a real sparse matrix.
@@ -35,7 +35,7 @@ site_species_proxy <- function(site_sp, record_site_map) {
   obj
 }
 
-#' Subset operator: m1[i, ] → site_sp[site_map[i], ]
+#' Subset operator: m1[i, ] -> site_sp[site_map[i], ]
 `[.site_species_proxy` <- function(x, i, j, ..., drop = FALSE) {
   if (missing(j)) {
     x$site_sp[x$site_map[i], , drop = drop]
@@ -78,7 +78,7 @@ site.richness.extractor.bigData <- function(frog.auGrid,
   ## Build compact site × species presence matrix
   ## ------------------------------------------------------------------
 
-  ## 1. Record → species indicator (exactly nr nonzeros)
+  ## 1. Record -> species indicator (exactly nr nonzeros)
   cat("  Step 1/3: record-species indicator\n")
   m_rec <- sparseMatrix(
     i = seq_len(nr),
@@ -87,7 +87,7 @@ site.richness.extractor.bigData <- function(frog.auGrid,
     dims = c(nr, nc)
   )
 
-  ## 2. Record → site indicator (exactly nr nonzeros)
+  ## 2. Record -> site indicator (exactly nr nonzeros)
   cat("  Step 2/3: record-site indicator\n")
   site_fac <- as.factor(frog.auGrid$ID)
   site_ids <- as.integer(site_fac)
@@ -103,7 +103,7 @@ site.richness.extractor.bigData <- function(frog.auGrid,
   cat(sprintf("  Step 3/3: site-level presence (%d sites × %d species)\n",
               n_sites, nc))
   site_sp <- crossprod(m_site, m_rec)       # = t(M_site) %*% M_rec
-  site_sp@x <- rep(1, length(site_sp@x))   # counts → binary presence
+  site_sp@x <- rep(1, length(site_sp@x))   # counts -> binary presence
   rm(m_rec, m_site); gc()
 
   cat(sprintf("  Done. site_sp: %d × %d, %s nonzeros (proxy avoids %s-row expansion)\n",
@@ -111,7 +111,7 @@ site.richness.extractor.bigData <- function(frog.auGrid,
               format(length(site_sp@x), big.mark = ","),
               format(nr, big.mark = ",")))
 
-  ## Build proxy: record → site → species
+  ## Build proxy: record -> site -> species
   m1 <- site_species_proxy(site_sp, site_ids)
 
   ## Attach site-level richness

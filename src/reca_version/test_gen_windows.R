@@ -1,6 +1,6 @@
 ##############################################################################
 ##
-## test_gen_windows.R  —  Performance benchmarks for Step 6a env extraction
+## test_gen_windows.R  --  Performance benchmarks for Step 6a env extraction
 ##
 ## Tests:
 ##   1) Sequential (non-parallel) gen_windows for 100 / 1,000 / 10,000 rows
@@ -172,7 +172,7 @@ run_parallel_test <- function(n_rows, ext_data_full, init_params) {
 }
 
 # ===========================================================================
-# TEST 1: Sequential extraction — 100, 1000, 10000 records
+# TEST 1: Sequential extraction -- 100, 1000, 10000 records
 # ===========================================================================
 cat("=====================================================\n")
 cat("TEST 1: Sequential gen_windows (single env-param)\n")
@@ -239,7 +239,7 @@ for (n in seq_all_sizes) {
 }
 
 # ===========================================================================
-# TEST 3: Parallel foreach loop — 100, 1000 and 10000 records per chunk
+# TEST 3: Parallel foreach loop -- 100, 1000 and 10000 records per chunk
 # ===========================================================================
 cat("\n=====================================================\n")
 cat("TEST 3: Parallel foreach (all env-params)\n")

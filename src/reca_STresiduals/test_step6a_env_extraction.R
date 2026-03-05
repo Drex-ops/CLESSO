@@ -1,6 +1,6 @@
 ##############################################################################
 ##
-## test_step6a_env_extraction.R  —  Smoke-test environmental data extraction
+## test_step6a_env_extraction.R  --  Smoke-test environmental data extraction
 ##
 ## Tests step 6a (spatial + temporal env extraction via run_chunked_env)
 ## on small subsets (1000 rows each) before running the full dataset.
@@ -11,7 +11,7 @@
 ##   Phase 1: 1000 spatial rows only
 ##   Phase 2: 1000 temporal rows only
 ##   Phase 3: Full dataset (spatial + temporal + biAverage)
-##            — only runs if phases 1 & 2 succeed and user opts in
+##            -- only runs if phases 1 & 2 succeed and user opts in
 ##
 ## Usage:
 ##   source("test_step6a_env_extraction.R")
@@ -81,7 +81,7 @@ ext_data     <- obsPairs_out[, 2:9]
 cat(sprintf("After temporal filter: %d rows\n\n", nrow(obsPairs_out)))
 
 if (nrow(obsPairs_out) < N_TEST_ROWS) {
-  stop(sprintf("Only %d rows after temporal filter — fewer than the %d test rows requested.",
+  stop(sprintf("Only %d rows after temporal filter -- fewer than the %d test rows requested.",
                nrow(obsPairs_out), N_TEST_ROWS))
 }
 
@@ -274,7 +274,7 @@ if (all_pass) {
   }
   cat(sprintf("    TOTAL:     %.1f min (~%.1f hours)\n\n", est_total_min, est_total_min / 60))
 } else {
-  cat("\n  One or more phases FAILED — fix errors before running full extraction.\n\n")
+  cat("\n  One or more phases FAILED -- fix errors before running full extraction.\n\n")
 }
 
 # ===========================================================================
@@ -340,6 +340,7 @@ if (all_pass && RUN_FULL_ENV) {
                         c_yr, "climWin_STresid_")
   if (config$biAverage) save_prefix <- paste0(save_prefix, "biAverage_")
   if (config$decomposition != "none") save_prefix <- paste0(config$decomposition, "_", save_prefix)
+  if (config$add_modis) save_prefix <- paste0(save_prefix, config$modis_suffix)
 
   parts <- list(obsPairs_out,
                 env_spat1, env1_subs,

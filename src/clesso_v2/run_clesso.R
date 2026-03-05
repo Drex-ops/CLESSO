@@ -1,10 +1,10 @@
 ##############################################################################
 ##
-## run_clesso.R — End-to-end pipeline for CLESSO v2
+## run_clesso.R -- End-to-end pipeline for CLESSO v2
 ##
 ## Pipeline:
-##   1. Load data → siteAggregator
-##   2. Date filter → format for CLESSO sampler
+##   1. Load data -> siteAggregator
+##   2. Date filter -> format for CLESSO sampler
 ##   3. Sample within-site + between-site observation pairs
 ##   4. Extract environmental covariates (site-level for alpha, pair-level
 ##      for turnover)
@@ -49,6 +49,7 @@ source(file.path(clesso_config$r_dir, "gen_windows.R"))
 source(file.path(clesso_config$clesso_dir, "clesso_sampler_optimised.R"))
 source(file.path(clesso_config$clesso_dir, "clesso_prepare_data.R"))
 source(file.path(clesso_config$clesso_dir, "clesso_predict.R"))
+source(file.path(clesso_config$clesso_dir, "clesso_iterative.R"))
 
 # ---------------------------------------------------------------------------
 # Load packages
@@ -118,9 +119,18 @@ pairs_dt <- clesso_sampler(
 
 ## Save pairs
 pairs_file <- file.path(clesso_config$output_dir,
-  paste0("clesso_pairs_", clesso_config$species_group, ".rds"))
+  paste0("clesso_pairs_", clesso_config$run_id, ".rds"))
 saveRDS(pairs_dt, file = pairs_file)
 cat(sprintf("  Pairs saved to %s\n", pairs_file))
+
+## Compute observed species richness per site (lower bound for alpha)
+cat("  Computing observed richness per site (lower bound)...\n")
+site_obs_richness <- obs_dt[, .(S_obs = uniqueN(species)), by = .(site_id)]
+cat(sprintf("  Observed richness: mean = %.1f, range = [%d, %d] across %d sites\n",
+            mean(site_obs_richness$S_obs),
+            min(site_obs_richness$S_obs),
+            max(site_obs_richness$S_obs),
+            nrow(site_obs_richness)))
 
 
 # ===========================================================================
@@ -303,12 +313,14 @@ model_data <- clesso_prepare_model_data(
   alpha_n_knots         = clesso_config$alpha_n_knots,
   alpha_spline_deg      = clesso_config$alpha_spline_deg,
   alpha_pen_order       = clesso_config$alpha_pen_order,
-  alpha_knot_positions  = clesso_config$alpha_knot_positions
+  alpha_knot_positions  = clesso_config$alpha_knot_positions,
+  site_obs_richness     = site_obs_richness,
+  alpha_lower_bound_lambda = clesso_config$alpha_lower_bound_lambda
 )
 
 ## Save model data
 model_data_file <- file.path(clesso_config$output_dir,
-  paste0("clesso_model_data_", clesso_config$species_group, ".rds"))
+  paste0("clesso_model_data_", clesso_config$run_id, ".rds"))
 saveRDS(model_data, file = model_data_file)
 cat(sprintf("  Model data saved to %s\n", model_data_file))
 
@@ -320,76 +332,110 @@ cat("\n--- Step 6: Compile and fit TMB model ---\n")
 
 library(TMB)
 
-cpp_file <- file.path(clesso_config$clesso_dir, "clesso_v2.cpp")
-cpp_basename <- tools::file_path_sans_ext(basename(cpp_file))
+use_iterative <- isTRUE(clesso_config$iterative_fitting)
 
-## Compile (only if needed)
-dll_path <- file.path(clesso_config$clesso_dir,
-                       paste0(cpp_basename, .Platform$dynlib.ext))
-if (!file.exists(dll_path)) {
-  cat("  Compiling TMB model...\n")
-  compile(cpp_file)
-} else {
-  cat("  TMB model already compiled.\n")
-}
+if (use_iterative) {
+  ## ---- Strategy 2: Alternating block-coordinate descent ----
+  cat("  Using ITERATIVE (alternating alpha/beta) fitting strategy\n")
 
-## Load the DLL
-dyn.load(dynlib(file.path(clesso_config$clesso_dir, cpp_basename)))
-
-## Build TMB objective function
-## u_site is always a random effect. When alpha splines are enabled,
-## b_alpha coefficients are also random (penalised via lambda * b'Sb).
-## When splines are disabled, we map b_alpha and log_lambda_alpha to NA
-## so TMB holds them fixed at their initial values (zeros/dummy).
-##
-## Regression spline mode (alpha_spline_type = "regression"):
-## Spline basis is used but without the smoothness penalty — b_alpha are
-## estimated as fixed effects and log_lambda_alpha is mapped to NA.
-random_effects <- "u_site"
-tmb_map <- list()
-
-if (!clesso_config$use_alpha_splines) {
-  ## Fix dummy spline parameters so they are not estimated
-  K_dummy <- length(model_data$parameters$b_alpha)
-  n_lam   <- length(model_data$parameters$log_lambda_alpha)
-  tmb_map$b_alpha          <- factor(rep(NA, K_dummy))
-  tmb_map$log_lambda_alpha <- factor(rep(NA, n_lam))
-} else if (clesso_config$alpha_spline_type == "regression") {
-  ## Regression splines: b_alpha stays as fixed effects (not in random),
-  ## and the smoothness penalty is disabled by mapping log_lambda_alpha to NA.
-  n_lam <- length(model_data$parameters$log_lambda_alpha)
-  tmb_map$log_lambda_alpha <- factor(rep(NA, n_lam))
-  cat("  Regression spline mode: b_alpha as fixed effects, no smoothness penalty\n")
-}
-
-obj <- MakeADFun(
-  data       = model_data$data_list,
-  parameters = model_data$parameters,
-  random     = random_effects,
-  map        = tmb_map,
-  DLL        = cpp_basename,
-  silent     = TRUE
-)
-
-## Optimise
-cat("  Fitting model...\n")
-fit <- nlminb(
-  start     = obj$par,
-  objective = obj$fn,
-  gradient  = obj$gr,
-  control   = list(
-    eval.max = clesso_config$tmb_eval_max,
-    iter.max = clesso_config$tmb_iter_max
+  iter_result <- clesso_fit_iterative(
+    model_data     = model_data,
+    config         = clesso_config,
+    max_iter       = clesso_config$iterative_max_iter %||% 20L,
+    tol            = clesso_config$iterative_tol %||% 1e-4,
+    verbose        = TRUE
   )
-)
 
-cat(sprintf("  Convergence: %d (message: %s)\n", fit$convergence, fit$message))
-cat(sprintf("  Final objective: %.4f\n", fit$objective))
+  ## Unpack into the same variables used downstream
+  obj <- iter_result$obj
+  fit <- list(
+    par         = iter_result$par,
+    objective   = iter_result$objective,
+    convergence = iter_result$convergence,
+    message     = sprintf("iterative %d cycles, %s",
+                          iter_result$iterations,
+                          if (iter_result$convergence == 0) "converged" else "max_iter")
+  )
+  rep <- iter_result$sdreport
 
-## Standard errors
-## getReportCovariance = FALSE avoids building the dense covariance matrix
-## of all ADREPORT'd quantities, which can exceed memory limits.
-rep <- sdreport(obj, getReportCovariance = FALSE)
+  cat(sprintf("  Convergence: %d (message: %s)\n", fit$convergence, fit$message))
+  cat(sprintf("  Final objective: %.4f\n", fit$objective))
+
+} else {
+  ## ---- Standard joint optimisation ----
+  cat("  Using JOINT optimisation strategy\n")
+
+  cpp_file <- file.path(clesso_config$clesso_dir, "clesso_v2.cpp")
+  cpp_basename <- tools::file_path_sans_ext(basename(cpp_file))
+
+  ## Compile (only if needed)
+  dll_path <- file.path(clesso_config$clesso_dir,
+                         paste0(cpp_basename, .Platform$dynlib.ext))
+  if (!file.exists(dll_path)) {
+    cat("  Compiling TMB model...\n")
+    compile(cpp_file)
+  } else {
+    cat("  TMB model already compiled.\n")
+  }
+
+  ## Load the DLL
+  dyn.load(dynlib(file.path(clesso_config$clesso_dir, cpp_basename)))
+
+  ## Build TMB objective function
+  ## u_site is always a random effect. When alpha splines are enabled,
+  ## b_alpha coefficients are also random (penalised via lambda * b'Sb).
+  ## When splines are disabled, we map b_alpha and log_lambda_alpha to NA
+  ## so TMB holds them fixed at their initial values (zeros/dummy).
+  ##
+  ## Regression spline mode (alpha_spline_type = "regression"):
+  ## Spline basis is used but without the smoothness penalty -- b_alpha are
+  ## estimated as fixed effects and log_lambda_alpha is mapped to NA.
+  random_effects <- "u_site"
+  tmb_map <- list()
+
+  if (!clesso_config$use_alpha_splines) {
+    ## Fix dummy spline parameters so they are not estimated
+    K_dummy <- length(model_data$parameters$b_alpha)
+    n_lam   <- length(model_data$parameters$log_lambda_alpha)
+    tmb_map$b_alpha          <- factor(rep(NA, K_dummy))
+    tmb_map$log_lambda_alpha <- factor(rep(NA, n_lam))
+  } else if (clesso_config$alpha_spline_type == "regression") {
+    ## Regression splines: b_alpha stays as fixed effects (not in random),
+    ## and the smoothness penalty is disabled by mapping log_lambda_alpha to NA.
+    n_lam <- length(model_data$parameters$log_lambda_alpha)
+    tmb_map$log_lambda_alpha <- factor(rep(NA, n_lam))
+    cat("  Regression spline mode: b_alpha as fixed effects, no smoothness penalty\n")
+  }
+
+  obj <- MakeADFun(
+    data       = model_data$data_list,
+    parameters = model_data$parameters,
+    random     = random_effects,
+    map        = tmb_map,
+    DLL        = cpp_basename,
+    silent     = TRUE
+  )
+
+  ## Optimise
+  cat("  Fitting model...\n")
+  fit <- nlminb(
+    start     = obj$par,
+    objective = obj$fn,
+    gradient  = obj$gr,
+    control   = list(
+      eval.max = clesso_config$tmb_eval_max,
+      iter.max = clesso_config$tmb_iter_max
+    )
+  )
+
+  cat(sprintf("  Convergence: %d (message: %s)\n", fit$convergence, fit$message))
+  cat(sprintf("  Final objective: %.4f\n", fit$objective))
+
+  ## Standard errors
+  ## getReportCovariance = FALSE avoids building the dense covariance matrix
+  ## of all ADREPORT'd quantities, which can exceed memory limits.
+  rep <- sdreport(obj, getReportCovariance = FALSE)
+}
 
 
 # ===========================================================================
@@ -409,6 +455,7 @@ alpha_estimates <- data.table(
   site_index    = model_data$site_info$site_table$site_index,
   lon           = model_data$site_info$site_table$lon,
   lat           = model_data$site_info$site_table$lat,
+  S_obs         = model_data$data_list$S_obs,
   alpha_est     = rpt$alpha_site,
   log_alpha_est = rpt$log_alpha_site
 )
@@ -417,6 +464,17 @@ cat(sprintf("  Alpha estimates: mean = %.1f, range = [%.1f, %.1f]\n",
             mean(alpha_estimates$alpha_est),
             min(alpha_estimates$alpha_est),
             max(alpha_estimates$alpha_est)))
+
+## Check lower bound violations
+if (any(alpha_estimates$S_obs > 0)) {
+  n_violations <- sum(alpha_estimates$alpha_est < alpha_estimates$S_obs - 0.5)
+  if (n_violations > 0) {
+    cat(sprintf("  WARNING: %d sites have alpha_est < S_obs (lower bound violations)\n",
+                n_violations))
+  } else {
+    cat("  All alpha estimates >= observed richness (lower bound satisfied)\n")
+  }
+}
 
 ## Beta (turnover) coefficients
 beta_rows <- grep("^beta$", rownames(est))
@@ -474,11 +532,13 @@ results <- list(
   eta0_est        = if (length(eta0_rows) > 0) est[eta0_rows, , drop = FALSE] else NULL,
   theta_est       = if (length(theta_rows) > 0) est[theta_rows, , drop = FALSE] else NULL,
   model_data      = model_data,
-  config          = clesso_config
+  config          = clesso_config,
+  config_snapshot = clesso_snapshot_config(),
+  run_id          = clesso_config$run_id
 )
 
 results_file <- file.path(clesso_config$output_dir,
-  paste0("clesso_results_", clesso_config$species_group, ".rds"))
+  paste0("clesso_results_", clesso_config$run_id, ".rds"))
 saveRDS(results, file = results_file)
 
 cat(sprintf("\n=== CLESSO v2 pipeline complete ===\n"))

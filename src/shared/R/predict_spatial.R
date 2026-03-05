@@ -1,6 +1,6 @@
 ##############################################################################
 ##
-## predict_spatial.R — Spatial GDM prediction & biological-space RGB mapping
+## predict_spatial.R -- Spatial GDM prediction & biological-space RGB mapping
 ##
 ## Purpose:
 ##   Given a fitted STresiduals GDM and environmental rasters, transform
@@ -9,26 +9,26 @@
 ##
 ## Three prediction approaches are provided:
 ##
-##   A. Transform → PCA → RGB  [predict_spatial_rgb / predict_spatiotemporal_rgb]
-##      Standard approach (same as gdm::gdm.transform → PCA):
+##   A. Transform -> PCA -> RGB  [predict_spatial_rgb / predict_spatiotemporal_rgb]
+##      Standard approach (same as gdm::gdm.transform -> PCA):
 ##      Transform each pixel independently through fitted I-splines weighted
-##      by coefficients.  PCA on the transformed n × p matrix → 3 PCs → RGB.
+##      by coefficients.  PCA on the transformed n x p matrix -> 3 PCs -> RGB.
 ##      Pixels with similar colour = similar predicted biological community.
 ##      Complexity: O(n · p) for transform + O(n · p²) for PCA ≈ seconds.
-##      Caveat: skips the nonlinear calibration (intercept → logit → ObsTrans).
+##      Caveat: skips the nonlinear calibration (intercept -> logit -> ObsTrans).
 ##
-##   B. Landmark MDS → RGB  [predict_spatial_lmds]
+##   B. Landmark MDS -> RGB  [predict_spatial_lmds]
 ##      Select k landmark pixels (~500).  Compute true GDM dissimilarity
-##      (ecological distance → logit → ObsTrans) between all landmark pairs
+##      (ecological distance -> logit -> ObsTrans) between all landmark pairs
 ##      (k × k) and from every pixel to each landmark (n × k).
 ##      Classical MDS on the k × k matrix + Nyström extension embeds all
-##      pixels into ordination space → 3 dims → RGB.
+##      pixels into ordination space -> 3 dims -> RGB.
 ##      Preserves the full nonlinear calibration.
 ##      Complexity: O(n · k · p) ≈ minutes for n=275k, k=500.
 ##
 ##   C. Dissimilarity from reference  [spatial_dissimilarity_from_ref]
 ##      Pick one or more reference pixels.  For each, compute calibrated
-##      GDM dissimilarity to every other pixel → continuous raster [0, 1].
+##      GDM dissimilarity to every other pixel -> continuous raster [0, 1].
 ##      Answers: "How different is each pixel from this location?"
 ##      Complexity: O(n · p) per reference pixel ≈ sub-second.
 ##
@@ -41,7 +41,7 @@
 ##   Because β ≥ 0 (NNLS), the β-weighted transform is monotone, so:
 ##     d(i,j) = Σ |t_ik − t_jk|   where t = β · I_spline(env)
 ##
-##   This means each pixel can be transformed independently → O(n · p),
+##   This means each pixel can be transformed independently -> O(n . p),
 ##   and pairwise distances are just L1 norms in the transformed space.
 ##
 ## Prerequisites:
@@ -49,20 +49,88 @@
 ##   utils.R            (inv.logit, ObsTrans)
 ##
 ## Functions:
-##   transform_spatial_gdm()         — I-spline transform all pixels (core)
-##   transform_temporal_change_gdm() — temporal change (signed or absolute)
-##   predict_spatial_rgb()           — [A] Transform → PCA → RGB
-##   predict_spatiotemporal_rgb()    — [A] Spatio-temporal → PCA → RGB
+##   transform_spatial_gdm()         -- I-spline transform all pixels (core)
+##   transform_temporal_change_gdm() -- temporal change (signed or absolute)
+##   predict_spatial_rgb()           -- [A] Transform -> PCA -> RGB
+##   predict_spatiotemporal_rgb()    -- [A] Spatio-temporal -> PCA -> RGB
 ##                                      Options: signed diffs, α-weighted mixing
-##   predict_spatiotemporal_hsl()    — [D] HSL bivariate map:
+##   predict_spatiotemporal_hsl()    -- [D] HSL bivariate map:
 ##                                      Hue = community type (spatial PCA)
 ##                                      Lightness = temporal change magnitude
-##   .hsl_to_rgb_vec()              — (internal) HSL → RGB conversion
-##   predict_spatial_lmds()          — [B] Landmark MDS → RGB
-##   spatial_dissimilarity_from_ref()— [C] Dissimilarity from ref pixel(s)
-##   spatial_dissimilarity()         — Pairwise dissimilarity (env1 vs env2)
+##   .hsl_to_rgb_vec()              -- (internal) HSL -> RGB conversion
+##   predict_spatial_lmds()          -- [B] Landmark MDS -> RGB
+##   spatial_dissimilarity_from_ref()-- [C] Dissimilarity from ref pixel(s)
+##   spatial_dissimilarity()         -- Pairwise dissimilarity (env1 vs env2)
 ##
 ##############################################################################
+
+
+# ---------------------------------------------------------------------------
+# .extract_modis_columns  (internal helper)
+#
+# Extract MODIS land cover values at pixel locations for a given year.
+# Returns a data.frame with columns named "{col_prefix}_{var}{col_suffix}".
+#
+# Used by the predict_*() functions when the fitted model includes MODIS
+# covariates (fit$add_modis == TRUE).
+#
+# Parameters:
+#   fit            - fitted GDM list (must contain modis_variables,
+#                    modis_year_range)
+#   xy             - matrix [n × 2] of lon/lat coordinates
+#   year           - the prediction year (will be clamped to MODIS range)
+#   modis_dir      - path to directory containing MODIS COG TIFs
+#   modis_resolution - resolution string for filename (e.g. "1km")
+#   col_prefix     - column name prefix, e.g. "spat_modis" or "temp_modis"
+#   col_suffix     - column name suffix, e.g. "_1" or "_2"
+#   verbose        - print progress
+#
+# Returns:
+#   A data.frame with columns named "{col_prefix}_{var}{col_suffix}"
+#   (one per MODIS variable).
+# ---------------------------------------------------------------------------
+.extract_modis_columns <- function(
+    fit,
+    xy,
+    year,
+    modis_dir,
+    modis_resolution = "1km",
+    col_prefix       = "spat_modis",
+    col_suffix       = "_1",
+    verbose          = TRUE
+) {
+  modis_vars   <- fit$modis_variables
+  modis_range  <- fit$modis_year_range  # c(start, end)
+  yr_clamped   <- min(max(as.integer(year), modis_range[1]), modis_range[2])
+
+  n_pixels <- nrow(xy)
+  result   <- data.frame(matrix(NA_real_, nrow = n_pixels,
+                                 ncol = length(modis_vars)))
+  colnames(result) <- paste0(col_prefix, "_", modis_vars, col_suffix)
+
+  if (verbose) cat(sprintf("  Extracting MODIS (%s, year = %d -> clamped %d)...\n",
+                            col_prefix, as.integer(year), yr_clamped))
+
+  pts <- sp::SpatialPoints(as.data.frame(xy))
+
+  for (vi in seq_along(modis_vars)) {
+    mv    <- modis_vars[vi]
+    fname <- file.path(modis_dir,
+                       paste0("modis_", yr_clamped, "_", mv, "_",
+                              modis_resolution, "_COG.tif"))
+    if (!file.exists(fname)) {
+      warning(sprintf("MODIS raster not found: %s -- filling with NA", fname))
+      next
+    }
+    ras <- raster::raster(fname)
+    result[, vi] <- raster::extract(ras, pts)
+    if (verbose) cat(sprintf("    %s_%s%s: %d non-NA values\n",
+                              col_prefix, mv, col_suffix,
+                              sum(!is.na(result[, vi]))))
+  }
+
+  result
+}
 
 
 # ---------------------------------------------------------------------------
@@ -202,8 +270,8 @@ transform_spatial_gdm <- function(
 # ---------------------------------------------------------------------------
 # predict_spatial_rgb
 #
-# Full pipeline: extract environmental data per pixel → I-spline transform
-# → PCA → assign RGB colours → return rasters.
+# Full pipeline: extract environmental data per pixel -> I-spline transform
+# -> PCA -> assign RGB colours -> return rasters.
 #
 # Parameters:
 #   fit          - fitted GDM list object
@@ -220,7 +288,7 @@ transform_spatial_gdm <- function(
 #   pca_method   - "prcomp" (standard PCA, default), "robust" (robust PCA via
 #                  MASS::cov.mcd), or "none" (return raw transformed values)
 #   n_components - number of PCA components (default: 3 for RGB)
-#   stretch      - percentile stretch for RGB: linearly map [p, 100-p] → [0,1]
+#   stretch      - percentile stretch for RGB: linearly map [p, 100-p] -> [0,1]
 #                  (default: 2 = 2nd/98th percentile stretch)
 #   chunk_size   - pixels per chunk for climate extraction (default: 50000)
 #   verbose      - print progress
@@ -239,20 +307,22 @@ predict_spatial_rgb <- function(
     fit,
     ref_raster,
     subs_raster,
-    env_spatial    = NULL,
-    npy_src        = NULL,
-    python_exe     = NULL,
-    pyper_script   = NULL,
-    ref_year       = 1975L,
-    ref_month      = 6L,
-    pca_method     = "prcomp",
-    n_components   = 3L,
-    stretch        = 2,
-    chunk_size     = 50000L,
-    verbose        = TRUE
+    env_spatial      = NULL,
+    npy_src          = NULL,
+    python_exe       = NULL,
+    pyper_script     = NULL,
+    ref_year         = 1975L,
+    ref_month        = 6L,
+    modis_dir        = NULL,
+    modis_resolution = "1km",
+    pca_method       = "prcomp",
+    n_components     = 3L,
+    stretch          = 2,
+    chunk_size       = 50000L,
+    verbose          = TRUE
 ) {
 
-  cat("=== Spatial GDM Prediction → RGB ===\n\n")
+  cat("=== Spatial GDM Prediction -> RGB ===\n\n")
   t0 <- proc.time()
 
   ## ---- 1. Load rasters ------------------------------------------------
@@ -285,7 +355,7 @@ predict_spatial_rgb <- function(
 
   if (is.null(env_spatial)) {
     if (is.null(npy_src) || is.null(python_exe) || is.null(pyper_script))
-      stop("env_spatial is NULL — must provide npy_src, python_exe, pyper_script for climate extraction.")
+      stop("env_spatial is NULL -- must provide npy_src, python_exe, pyper_script for climate extraction.")
 
     if (verbose) cat(sprintf("\n--- 3. Extracting spatial climate (ref year = %d) ---\n", ref_year))
     require(arrow)
@@ -361,9 +431,40 @@ predict_spatial_rgb <- function(
     cat(sprintf("  Spatial climate: %d columns × %d pixels\n", ncol(env_spatial), nrow(env_spatial)))
   }
 
+  ## ---- 3b. Extract MODIS land cover (spatial component) ----------------
+  modis_spat_vals <- NULL
+  if (isTRUE(fit$add_modis)) {
+    if (is.null(modis_dir)) {
+      ## Try to pick up from config in the calling environment
+      if (exists("config", envir = parent.frame()) &&
+          !is.null(parent.frame()$config$modis_dir)) {
+        modis_dir        <- parent.frame()$config$modis_dir
+        modis_resolution <- parent.frame()$config$modis_resolution
+      } else {
+        warning("fit$add_modis is TRUE but modis_dir not provided -- MODIS predictors will be skipped")
+      }
+    }
+    if (!is.null(modis_dir)) {
+      if (verbose) cat(sprintf("\n--- 3b. Extracting MODIS spatial (year = %d) ---\n", ref_year))
+      modis_spat_vals <- .extract_modis_columns(
+        fit              = fit,
+        xy               = xy,
+        year             = ref_year,
+        modis_dir        = modis_dir,
+        modis_resolution = modis_resolution,
+        col_prefix       = "spat_modis",
+        col_suffix       = "_1",
+        verbose          = verbose
+      )
+      cat(sprintf("  MODIS spatial: %d columns × %d pixels\n",
+                  ncol(modis_spat_vals), nrow(modis_spat_vals)))
+    }
+  }
+
   ## ---- 4. Combine env data --------------------------------------------
   if (verbose) cat("\n--- 4. Combining environmental data ---\n")
   env_df <- cbind(env_spatial, as.data.frame(subs_vals))
+  if (!is.null(modis_spat_vals)) env_df <- cbind(env_df, modis_spat_vals)
 
   ## Remove pixels with NA environment
   na_rows <- is.na(rowSums(env_df))
@@ -593,7 +694,7 @@ transform_temporal_change_gdm <- function(
 # predict_spatiotemporal_rgb
 #
 # Full spatio-temporal prediction: combine spatial "biological position" with
-# temporal "biological change" into a single transformed space, then PCA → RGB.
+# temporal "biological change" into a single transformed space, then PCA -> RGB.
 #
 # For each pixel we build a vector comprising:
 #   [spatial I-spline positions (weighted)] + [substrate I-spline positions] +
@@ -619,7 +720,7 @@ transform_temporal_change_gdm <- function(
 #                  Preserves direction of change (default: FALSE).
 #   alpha    - mixing weight for spatial vs temporal, in [0, 1].
 #              0 = spatial only, 1 = temporal only. Default: NULL (no
-#              normalisation — original behaviour, simple concatenation).
+#              normalisation -- original behaviour, simple concatenation).
 #              When set, both blocks are normalised to unit column
 #              variance before weighting by sqrt(1-alpha) and sqrt(alpha).
 #   normalise_blocks - if TRUE AND alpha is not NULL, normalise each block
@@ -661,6 +762,8 @@ predict_spatiotemporal_rgb <- function(
     env_spatial       = NULL,
     env_temporal_yr1  = NULL,
     env_temporal_yr2  = NULL,
+    modis_dir        = NULL,
+    modis_resolution = "1km",
     signed_temporal  = FALSE,
     alpha            = NULL,
     normalise_blocks = TRUE,
@@ -671,7 +774,7 @@ predict_spatiotemporal_rgb <- function(
     verbose          = TRUE
 ) {
 
-  cat(sprintf("=== Spatio-temporal GDM Prediction → RGB (%d → %d) ===\n\n", year1, year2))
+  cat(sprintf("=== Spatio-temporal GDM Prediction -> RGB (%d -> %d) ===\n\n", year1, year2))
   t0 <- proc.time()
 
   ## ---- 1. Load rasters ------------------------------------------------
@@ -776,6 +879,46 @@ predict_spatiotemporal_rgb <- function(
     cat(sprintf("  Temporal yr2: %d cols × %d pixels\n", ncol(env_temporal_yr2), nrow(env_temporal_yr2)))
   }
 
+  ## ---- 4c. Extract MODIS land cover (spatial + temporal) ---------------
+  modis_spat_vals <- NULL
+  modis_temp_yr1  <- NULL
+  modis_temp_yr2  <- NULL
+  if (isTRUE(fit$add_modis)) {
+    if (is.null(modis_dir)) {
+      if (exists("config", envir = parent.frame()) &&
+          !is.null(parent.frame()$config$modis_dir)) {
+        modis_dir        <- parent.frame()$config$modis_dir
+        modis_resolution <- parent.frame()$config$modis_resolution
+      } else {
+        warning("fit$add_modis is TRUE but modis_dir not provided -- MODIS predictors will be skipped")
+      }
+    }
+    if (!is.null(modis_dir)) {
+      if (verbose) cat(sprintf("\n--- 4c. Extracting MODIS (spatial @ %d, temporal %d -> %d) ---\n",
+                                ref_year, year1, year2))
+      ## Spatial MODIS at ref_year
+      modis_spat_vals <- .extract_modis_columns(
+        fit = fit, xy = xy, year = ref_year,
+        modis_dir = modis_dir, modis_resolution = modis_resolution,
+        col_prefix = "spat_modis", col_suffix = "_1", verbose = verbose
+      )
+      ## Temporal MODIS at year1 (baseline -- uses _1 suffix)
+      modis_temp_yr1 <- .extract_modis_columns(
+        fit = fit, xy = xy, year = year1,
+        modis_dir = modis_dir, modis_resolution = modis_resolution,
+        col_prefix = "temp_modis", col_suffix = "_1", verbose = verbose
+      )
+      ## Temporal MODIS at year2 (target -- uses _1 suffix for matching convention)
+      modis_temp_yr2 <- .extract_modis_columns(
+        fit = fit, xy = xy, year = year2,
+        modis_dir = modis_dir, modis_resolution = modis_resolution,
+        col_prefix = "temp_modis", col_suffix = "_1", verbose = verbose
+      )
+      cat(sprintf("  MODIS: %d spatial + %d×2 temporal columns\n",
+                  ncol(modis_spat_vals), ncol(modis_temp_yr1)))
+    }
+  }
+
   ## ---- 5. Clean NAs and sentinels across all env ----------------------
   if (verbose) cat("\n--- 5. Cleaning data ---\n")
   env_spatial_df   <- as.data.frame(env_spatial)
@@ -784,6 +927,9 @@ predict_spatiotemporal_rgb <- function(
   env_tmpyr2_df    <- as.data.frame(env_temporal_yr2)
 
   all_env <- cbind(env_spatial_df, env_subs_df, env_tmpyr1_df, env_tmpyr2_df)
+  if (!is.null(modis_spat_vals))  all_env <- cbind(all_env, modis_spat_vals)
+  if (!is.null(modis_temp_yr1))   all_env <- cbind(all_env, modis_temp_yr1)
+  if (!is.null(modis_temp_yr2))   all_env <- cbind(all_env, modis_temp_yr2)
   na_rows <- is.na(rowSums(all_env))
   sentinel_rows <- apply(all_env, 1, function(r) any(r == -9999, na.rm = TRUE))
   bad_rows <- na_rows | sentinel_rows
@@ -795,6 +941,9 @@ predict_spatiotemporal_rgb <- function(
     env_subs_df    <- env_subs_df[!bad_rows, , drop = FALSE]
     env_tmpyr1_df  <- env_tmpyr1_df[!bad_rows, , drop = FALSE]
     env_tmpyr2_df  <- env_tmpyr2_df[!bad_rows, , drop = FALSE]
+    if (!is.null(modis_spat_vals)) modis_spat_vals <- modis_spat_vals[!bad_rows, , drop = FALSE]
+    if (!is.null(modis_temp_yr1))  modis_temp_yr1  <- modis_temp_yr1[!bad_rows, , drop = FALSE]
+    if (!is.null(modis_temp_yr2))  modis_temp_yr2  <- modis_temp_yr2[!bad_rows, , drop = FALSE]
     coords         <- coords[!bad_rows, , drop = FALSE]
     n_pixels       <- nrow(coords)
   }
@@ -802,6 +951,7 @@ predict_spatiotemporal_rgb <- function(
   ## ---- 6. I-spline transforms -----------------------------------------
   if (verbose) cat("\n--- 6a. Spatial+substrate I-spline transform ---\n")
   env_spat_combined <- cbind(env_spatial_df, env_subs_df)
+  if (!is.null(modis_spat_vals)) env_spat_combined <- cbind(env_spat_combined, modis_spat_vals)
   trans_spatial <- transform_spatial_gdm(
     fit = fit, env_df = env_spat_combined,
     weight_by_coef = TRUE, spatial_only = TRUE, verbose = verbose
@@ -809,6 +959,9 @@ predict_spatiotemporal_rgb <- function(
 
   if (verbose) cat(sprintf("\n--- 6b. Temporal change I-spline transform (%s) ---\n",
                             if (signed_temporal) "signed" else "absolute"))
+  ## Add MODIS temporal columns to the temporal env data frames
+  if (!is.null(modis_temp_yr1)) env_tmpyr1_df <- cbind(env_tmpyr1_df, modis_temp_yr1)
+  if (!is.null(modis_temp_yr2)) env_tmpyr2_df <- cbind(env_tmpyr2_df, modis_temp_yr2)
   trans_temporal <- transform_temporal_change_gdm(
     fit = fit, env_yr1 = env_tmpyr1_df, env_yr2 = env_tmpyr2_df,
     weight_by_coef = TRUE, signed = signed_temporal, verbose = verbose
@@ -1015,8 +1168,8 @@ predict_spatiotemporal_rgb <- function(
 #                    Set NULL to derive saturation from spatial distance to centroid.
 #   light_range    - c(min, max) lightness range (default: c(0.25, 0.90)).
 #                    Low L = dark = more change.
-#   light_invert   - if TRUE (default), high change → dark (low L).
-#                    Set FALSE for high change → bright.
+#   light_invert   - if TRUE (default), high change -> dark (low L).
+#                    Set FALSE for high change -> bright.
 #   stretch        - percentile stretch for lightness (default: 2)
 #   chunk_size     - pixels per chunk (default: 50000)
 #   verbose        - print progress
@@ -1044,6 +1197,8 @@ predict_spatiotemporal_hsl <- function(
     env_spatial      = NULL,
     env_temporal_yr1 = NULL,
     env_temporal_yr2 = NULL,
+    modis_dir        = NULL,
+    modis_resolution = "1km",
     trans_spatial     = NULL,
     trans_temporal    = NULL,
     coords           = NULL,
@@ -1056,7 +1211,7 @@ predict_spatiotemporal_hsl <- function(
     verbose          = TRUE
 ) {
 
-  cat(sprintf("=== Spatio-temporal HSL Map (%s → %s) ===\n\n",
+  cat(sprintf("=== Spatio-temporal HSL Map (%s -> %s) ===\n\n",
               if (!is.null(year1)) year1 else "?",
               if (!is.null(year2)) year2 else "?"))
   t0 <- proc.time()
@@ -1138,9 +1293,46 @@ predict_spatiotemporal_hsl <- function(
     if (is.null(env_temporal_yr2))
       env_temporal_yr2 <- .extract_chunked(xy, year2, ref_month, temporal_params, "Temp-yr2")
 
+    ## MODIS extraction (spatial + temporal, if model includes MODIS)
+    modis_spat_vals <- NULL
+    modis_temp_yr1  <- NULL
+    modis_temp_yr2  <- NULL
+    if (isTRUE(fit$add_modis)) {
+      if (is.null(modis_dir)) {
+        if (exists("config", envir = parent.frame()) &&
+            !is.null(parent.frame()$config$modis_dir)) {
+          modis_dir        <- parent.frame()$config$modis_dir
+          modis_resolution <- parent.frame()$config$modis_resolution
+        } else {
+          warning("fit$add_modis is TRUE but modis_dir not provided -- MODIS predictors will be skipped")
+        }
+      }
+      if (!is.null(modis_dir)) {
+        if (verbose) cat("  Extracting MODIS (spatial + temporal)...\n")
+        modis_spat_vals <- .extract_modis_columns(
+          fit = fit, xy = xy, year = ref_year,
+          modis_dir = modis_dir, modis_resolution = modis_resolution,
+          col_prefix = "spat_modis", col_suffix = "_1", verbose = verbose
+        )
+        modis_temp_yr1 <- .extract_modis_columns(
+          fit = fit, xy = xy, year = year1,
+          modis_dir = modis_dir, modis_resolution = modis_resolution,
+          col_prefix = "temp_modis", col_suffix = "_1", verbose = verbose
+        )
+        modis_temp_yr2 <- .extract_modis_columns(
+          fit = fit, xy = xy, year = year2,
+          modis_dir = modis_dir, modis_resolution = modis_resolution,
+          col_prefix = "temp_modis", col_suffix = "_1", verbose = verbose
+        )
+      }
+    }
+
     ## Clean
     env_all <- cbind(as.data.frame(env_spatial), as.data.frame(subs_vals),
                      as.data.frame(env_temporal_yr1), as.data.frame(env_temporal_yr2))
+    if (!is.null(modis_spat_vals)) env_all <- cbind(env_all, as.data.frame(modis_spat_vals))
+    if (!is.null(modis_temp_yr1))  env_all <- cbind(env_all, as.data.frame(modis_temp_yr1))
+    if (!is.null(modis_temp_yr2))  env_all <- cbind(env_all, as.data.frame(modis_temp_yr2))
     bad <- is.na(rowSums(env_all)) |
       apply(env_all, 1, function(r) any(r == -9999, na.rm = TRUE))
     if (any(bad)) {
@@ -1148,16 +1340,25 @@ predict_spatiotemporal_hsl <- function(
       subs_vals        <- as.data.frame(subs_vals)[!bad, , drop = FALSE]
       env_temporal_yr1 <- as.data.frame(env_temporal_yr1)[!bad, , drop = FALSE]
       env_temporal_yr2 <- as.data.frame(env_temporal_yr2)[!bad, , drop = FALSE]
+      if (!is.null(modis_spat_vals)) modis_spat_vals <- as.data.frame(modis_spat_vals)[!bad, , drop = FALSE]
+      if (!is.null(modis_temp_yr1))  modis_temp_yr1  <- as.data.frame(modis_temp_yr1)[!bad, , drop = FALSE]
+      if (!is.null(modis_temp_yr2))  modis_temp_yr2  <- as.data.frame(modis_temp_yr2)[!bad, , drop = FALSE]
       coords           <- coords[!bad, , drop = FALSE]
     }
 
+    env_spat_subs <- cbind(as.data.frame(env_spatial), as.data.frame(subs_vals))
+    if (!is.null(modis_spat_vals)) env_spat_subs <- cbind(env_spat_subs, as.data.frame(modis_spat_vals))
     trans_spatial <- transform_spatial_gdm(
-      fit = fit, env_df = cbind(as.data.frame(env_spatial), as.data.frame(subs_vals)),
+      fit = fit, env_df = env_spat_subs,
       weight_by_coef = TRUE, spatial_only = TRUE, verbose = verbose)
 
+    ## Add MODIS temporal columns before temporal transform
+    env_yr1_df <- as.data.frame(env_temporal_yr1)
+    env_yr2_df <- as.data.frame(env_temporal_yr2)
+    if (!is.null(modis_temp_yr1)) env_yr1_df <- cbind(env_yr1_df, modis_temp_yr1)
+    if (!is.null(modis_temp_yr2)) env_yr2_df <- cbind(env_yr2_df, modis_temp_yr2)
     trans_temporal <- transform_temporal_change_gdm(
-      fit = fit, env_yr1 = as.data.frame(env_temporal_yr1),
-      env_yr2 = as.data.frame(env_temporal_yr2),
+      fit = fit, env_yr1 = env_yr1_df, env_yr2 = env_yr2_df,
       weight_by_coef = TRUE, signed = signed_temporal, verbose = verbose)
 
   } else {
@@ -1168,7 +1369,7 @@ predict_spatiotemporal_hsl <- function(
   n_pixels <- nrow(trans_spatial)
 
   ## ==================================================================
-  ## 2.  Spatial PCA → Hue + Saturation
+  ## 2.  Spatial PCA -> Hue + Saturation
   ## ==================================================================
   if (verbose) cat("\n--- 2. Spatial PCA for hue ---\n")
 
@@ -1200,7 +1401,7 @@ predict_spatiotemporal_hsl <- function(
   if (verbose) cat(sprintf("  Spatial PC1=%.1f%%, PC2=%.1f%%\n", ve_spat[1], ve_spat[2]))
 
   ## ==================================================================
-  ## 3.  Temporal magnitude → Lightness
+  ## 3.  Temporal magnitude -> Lightness
   ## ==================================================================
   if (verbose) cat("\n--- 3. Temporal magnitude for lightness ---\n")
 
@@ -1219,7 +1420,7 @@ predict_spatiotemporal_hsl <- function(
 
   scaled_mag <- pmin(pmax((temp_magnitude - lo_t) / (hi_t - lo_t), 0), 1)
 
-  ## Map to lightness: high change → low L (dark) or high L depending on invert
+  ## Map to lightness: high change -> low L (dark) or high L depending on invert
   if (light_invert) {
     light <- light_range[2] - scaled_mag * (light_range[2] - light_range[1])
   } else {
@@ -1227,7 +1428,7 @@ predict_spatiotemporal_hsl <- function(
   }
 
   if (verbose) {
-    cat(sprintf("  Temporal magnitude — min: %.4f, median: %.4f, max: %.4f\n",
+    cat(sprintf("  Temporal magnitude -- min: %.4f, median: %.4f, max: %.4f\n",
                 min(temp_magnitude, na.rm = TRUE),
                 median(temp_magnitude, na.rm = TRUE),
                 max(temp_magnitude, na.rm = TRUE)))
@@ -1237,9 +1438,9 @@ predict_spatiotemporal_hsl <- function(
   }
 
   ## ==================================================================
-  ## 4.  HSL → RGB
+  ## 4.  HSL -> RGB
   ## ==================================================================
-  if (verbose) cat("\n--- 4. HSL → RGB conversion ---\n")
+  if (verbose) cat("\n--- 4. HSL -> RGB conversion ---\n")
   rgb_raw <- .hsl_to_rgb_vec(hue, sat, light)
   rgb_vals <- round(rgb_raw * 255)
 
@@ -1383,20 +1584,20 @@ spatial_dissimilarity <- function(fit, env1, env2) {
 #
 # Landmark MDS ordination using true GDM-calibrated dissimilarities.
 #
-# The transform→PCA approach (predict_spatial_rgb) maps each pixel into
+# The transform->PCA approach (predict_spatial_rgb) maps each pixel into
 # biological space independently and then ordinates via PCA. This preserves
 # relative positions but does NOT pass through the nonlinear calibration
-# (intercept → logit → ObsTrans).
+# (intercept -> logit -> ObsTrans).
 #
 # This function instead:
 #   1. Selects k landmark pixels (random, stratified, or custom)
-#   2. Computes the full calibrated dissimilarity (ecological distance →
-#      logit → ObsTrans) between all landmark pairs (k×k) and from every
+#   2. Computes the full calibrated dissimilarity (ecological distance ->
+#      logit -> ObsTrans) between all landmark pairs (k×k) and from every
 #      pixel to each landmark (n×k)
 #   3. Runs classical MDS (eigendecomposition of the double-centred
 #      squared-distance matrix) on the k×k landmark matrix
 #   4. Projects all n pixels into MDS space via Nyström extension
-#   5. Maps MDS dimensions → RGB
+#   5. Maps MDS dimensions -> RGB
 #
 # Complexity: O(k² · p) for D_LL + O(n · k · p) for D_NL + O(k³) for MDS
 # With k = 500, n = 275k, p ≈ 51: the n·k·p term ≈ 7 billion operations
@@ -1424,7 +1625,7 @@ spatial_dissimilarity <- function(fit, env1, env2) {
 #   n_components - MDS dimensions (default: 3 for RGB)
 #   stretch      - percentile stretch for RGB (default: 2)
 #   use_dissimilarity - if TRUE (default), apply the full nonlinear
-#                  calibration (logit → ObsTrans) before MDS. If FALSE,
+#                  calibration (logit -> ObsTrans) before MDS. If FALSE,
 #                  use raw ecological distance (Manhattan in transformed
 #                  space). The raw distance is already Manhattan and may
 #                  embed better with fewer negative eigenvalues.
@@ -1453,6 +1654,8 @@ predict_spatial_lmds <- function(
     pyper_script    = NULL,
     ref_year        = 1975L,
     ref_month       = 6L,
+    modis_dir       = NULL,
+    modis_resolution = "1km",
     transformed     = NULL,
     coords          = NULL,
     n_landmarks     = 500L,
@@ -1466,7 +1669,7 @@ predict_spatial_lmds <- function(
     verbose         = TRUE
 ) {
 
-  cat("=== Spatial GDM Prediction → Landmark MDS → RGB ===\n\n")
+  cat("=== Spatial GDM Prediction -> Landmark MDS -> RGB ===\n\n")
   t0 <- proc.time()
 
   ## ==================================================================
@@ -1536,7 +1739,30 @@ predict_spatial_lmds <- function(
       env_spatial <- do.call(rbind, env_parts)
     }
 
+    ## MODIS extraction (spatial component, if model includes MODIS)
+    modis_spat_vals <- NULL
+    if (isTRUE(fit$add_modis)) {
+      if (is.null(modis_dir)) {
+        if (exists("config", envir = parent.frame()) &&
+            !is.null(parent.frame()$config$modis_dir)) {
+          modis_dir        <- parent.frame()$config$modis_dir
+          modis_resolution <- parent.frame()$config$modis_resolution
+        } else {
+          warning("fit$add_modis is TRUE but modis_dir not provided -- MODIS predictors will be skipped")
+        }
+      }
+      if (!is.null(modis_dir)) {
+        if (verbose) cat("  Extracting MODIS spatial...\n")
+        modis_spat_vals <- .extract_modis_columns(
+          fit = fit, xy = xy, year = ref_year,
+          modis_dir = modis_dir, modis_resolution = modis_resolution,
+          col_prefix = "spat_modis", col_suffix = "_1", verbose = verbose
+        )
+      }
+    }
+
     env_df <- cbind(as.data.frame(env_spatial), as.data.frame(subs_vals))
+    if (!is.null(modis_spat_vals)) env_df <- cbind(env_df, modis_spat_vals)
     na_rows <- is.na(rowSums(env_df))
     sentinel <- apply(env_df, 1, function(r) any(r == -9999, na.rm = TRUE))
     bad <- na_rows | sentinel
@@ -1595,7 +1821,7 @@ predict_spatial_lmds <- function(
   ## ==================================================================
   ## 3.  Distance matrices
   ## ==================================================================
-  ## Helper: ecological distance → calibrated dissimilarity
+  ## Helper: ecological distance -> calibrated dissimilarity
   p0 <- inv.logit(fit$intercept)
 
   .eco_to_dissim <- function(d_vec) {
@@ -1652,7 +1878,7 @@ predict_spatial_lmds <- function(
   if (m < n_components) {
     if (verbose)
       cat(sprintf("  Note: only %d positive eigenvalues (requested %d)\n", n_pos, n_components))
-    if (m == 0) stop("No positive eigenvalues — distances may be degenerate")
+    if (m == 0) stop("No positive eigenvalues -- distances may be degenerate")
   }
 
   lambda_m <- eig$values[pos_ix[1:m]]
@@ -1750,13 +1976,13 @@ predict_spatial_lmds <- function(
 #
 # Uses the pre-computed β-weighted I-spline transform: ecological distance
 # is the Manhattan (L1) distance in transformed space (since all β ≥ 0
-# from NNLS), which is then passed through intercept → logit → ObsTrans
+# from NNLS), which is then passed through intercept -> logit -> ObsTrans
 # to give calibrated dissimilarity.
 #
 # Parameters:
 #   fit          - fitted GDM list
 #   ref_pixels   - reference pixels, specified as ONE of:
-#                  (a) data.frame with lon, lat — snapped to nearest pixel
+#                  (a) data.frame with lon, lat -- snapped to nearest pixel
 #                  (b) integer vector of ROW INDICES into `transformed`
 #   ref_raster   - reference raster (path or RasterLayer) for output grid
 #   transformed  - pre-computed β-weighted I-spline transform matrix
@@ -1789,6 +2015,8 @@ spatial_dissimilarity_from_ref <- function(
     pyper_script    = NULL,
     ref_year        = 1975L,
     ref_month       = 6L,
+    modis_dir       = NULL,
+    modis_resolution = "1km",
     chunk_size      = 50000L,
     verbose         = TRUE
 ) {
@@ -1859,7 +2087,28 @@ spatial_dissimilarity_from_ref <- function(
       env_spatial <- do.call(rbind, env_parts)
     }
 
+    ## MODIS extraction (spatial component, if model includes MODIS)
+    modis_spat_vals <- NULL
+    if (isTRUE(fit$add_modis)) {
+      if (is.null(modis_dir)) {
+        if (exists("config", envir = parent.frame()) &&
+            !is.null(parent.frame()$config$modis_dir)) {
+          modis_dir        <- parent.frame()$config$modis_dir
+          modis_resolution <- parent.frame()$config$modis_resolution
+        }
+      }
+      if (!is.null(modis_dir)) {
+        if (verbose) cat("  Extracting MODIS spatial...\n")
+        modis_spat_vals <- .extract_modis_columns(
+          fit = fit, xy = xy, year = ref_year,
+          modis_dir = modis_dir, modis_resolution = modis_resolution,
+          col_prefix = "spat_modis", col_suffix = "_1", verbose = verbose
+        )
+      }
+    }
+
     env_df <- cbind(as.data.frame(env_spatial), as.data.frame(subs_vals))
+    if (!is.null(modis_spat_vals)) env_df <- cbind(env_df, modis_spat_vals)
     na_rows <- is.na(rowSums(env_df))
     sentinel <- apply(env_df, 1, function(r) any(r == -9999, na.rm = TRUE))
     bad <- na_rows | sentinel

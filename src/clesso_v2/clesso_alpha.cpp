@@ -34,6 +34,10 @@ Type objective_function<Type>::operator() ()
   DATA_IVECTOR(alpha_block_sizes);  // basis functions per covariate block
   DATA_INTEGER(use_alpha_splines);  // 1 = use spline basis, 0 = linear only
 
+  // ---- Observed richness lower bound ----
+  DATA_VECTOR(S_obs);               // observed species count per site
+  DATA_SCALAR(lambda_lower_bound);  // penalty weight for soft alpha >= S_obs
+
   const int P      = y.size();
   const int nSites = Z.rows();
   const int Kalpha = Z.cols();
@@ -131,6 +135,18 @@ Type objective_function<Type>::operator() ()
   // ll_p = (1 - y_p) * log(p) + y_p * log(1 - p)
   //
   const Type eps = Type(1e-10);
+
+  // ---- Soft lower-bound penalty: discourage alpha < S_obs ----
+  if (lambda_lower_bound > Type(0.0)) {
+    Type pen_lb = Type(0.0);
+    Type k = Type(10.0);
+    for (int s = 0; s < nSites; s++) {
+      Type shortfall = S_obs(s) - alpha_site(s);
+      Type soft_pos = log(Type(1.0) + exp(k * shortfall)) / k;
+      pen_lb += soft_pos * soft_pos;
+    }
+    nll += lambda_lower_bound * pen_lb;
+  }
 
   for (int p = 0; p < P; p++) {
     int s = site_i(p);

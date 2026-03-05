@@ -1,6 +1,6 @@
 ##############################################################################
 ##
-## download_ala.R — Download observation records from Atlas of Living
+## download_ala.R -- Download observation records from Atlas of Living
 ##                  Australia (ALA) via the galah package
 ##
 ## Downloads all occurrence records for a specified taxonomic group,
@@ -26,18 +26,18 @@
 ##
 ## Supported species groups (set via CLESSO_SPECIES_GROUP or the
 ## `species_group` argument):
-##   AVES    — Birds (class Aves)
-##   VAS     — Vascular plants (kingdom Plantae, class Equisetopsida)
-##   PLANTAE — All plants (kingdom Plantae, incl. bryophytes)
-##   MAM     — Mammals (class Mammalia)
-##   REP     — Reptiles (class Reptilia)
-##   AMP     — Amphibians (class Amphibia)
-##   FISH    — Actinopterygii (ray-finned fishes)
-##   INSECT  — Insects (class Insecta)
-##   ARACH   — Arachnids (class Arachnida)
-##   INVERT  — Terrestrial/freshwater invertebrates (Arthropoda,
+##   AVES    -- Birds (class Aves)
+##   VAS     -- Vascular plants (kingdom Plantae, class Equisetopsida)
+##   PLANTAE -- All plants (kingdom Plantae, incl. bryophytes)
+##   MAM     -- Mammals (class Mammalia)
+##   REP     -- Reptiles (class Reptilia)
+##   AMP     -- Amphibians (class Amphibia)
+##   FISH    -- Actinopterygii (ray-finned fishes)
+##   INSECT  -- Insects (class Insecta)
+##   ARACH   -- Arachnids (class Arachnida)
+##   INVERT  -- Terrestrial/freshwater invertebrates (Arthropoda,
 ##             Mollusca, Annelida, Nematoda, Platyhelminthes,
-##             Onychophora, Tardigrada — excludes marine-only phyla)
+##             Onychophora, Tardigrada -- excludes marine-only phyla)
 ##
 ## You can also pass an arbitrary taxon name via the `taxon` argument.
 ##
@@ -56,17 +56,17 @@ library(galah)
 # Predefined taxonomic group mappings
 #
 # NOTE: ALA's Australian backbone taxonomy does not reliably resolve
-# "Tracheophyta" — it maps to a NZ concept (NZOR-6-33408) returning
+# "Tracheophyta" -- it maps to a NZ concept (NZOR-6-33408) returning
 # very few records. Instead, vascular plants are queried via
 # identify("Plantae") + filter(class == "Equisetopsida"), which is
 # ALA's classification for all vascular plants (~29.7M records).
 #
 # Each entry has:
-#   taxon  — name passed to galah::identify()
-#   rank   — taxonomic rank (informational)
-#   filter_class  — optional extra filter on the `class` field
+#   taxon  -- name passed to galah::identify()
+#   rank   -- taxonomic rank (informational)
+#   filter_class  -- optional extra filter on the `class` field
 #                   (used when identify() is at a higher rank)
-#   filter_phylum — optional character vector of phyla to INCLUDE
+#   filter_phylum -- optional character vector of phyla to INCLUDE
 #                   (used for broad groups like INVERT)
 # ---------------------------------------------------------------------------
 GROUP_TAXA <- list(
@@ -105,7 +105,7 @@ GROUP_TAXA <- list(
 #'
 #' @param species_group Character code from GROUP_TAXA (e.g. "AVES", "VAS").
 #'   Ignored if \code{taxon} is supplied.
-#' @param taxon  Optional character string — a taxon name to pass to
+#' @param taxon  Optional character string -- a taxon name to pass to
 #'   \code{galah::identify()} directly. Overrides \code{species_group}.
 #' @param email  ALA-registered email address. If NULL, reads from
 #'   \code{Sys.getenv("ALA_EMAIL")}.
@@ -297,7 +297,7 @@ download_ala_occurrences <- function(
   ## 5d. Filter by coordinate uncertainty
   if (!is.null(min_coord_uncertainty)) {
     ## Keep records where uncertainty is <= threshold OR is NA (many records
-    ## have no uncertainty value — these are typically fine)
+    ## have no uncertainty value -- these are typically fine)
     occ <- occ[is.na(occ$coordinateUncertaintyInMeters) |
                occ$coordinateUncertaintyInMeters <= min_coord_uncertainty, ]
     n_after_uncert <- nrow(occ)
@@ -325,7 +325,7 @@ download_ala_occurrences <- function(
                 n_before_bbox - nrow(occ)))
   }
 
-  ## 5f. Ensure coordinateUncertaintyInMeters is numeric (replace NA → NA_real_)
+  ## 5f. Ensure coordinateUncertaintyInMeters is numeric (replace NA -> NA_real_)
   occ$coordinateUncertaintyInMeters <- as.numeric(occ$coordinateUncertaintyInMeters)
 
   cat(sprintf("\n  Final record count: %s\n", format(nrow(occ), big.mark = ",")))
@@ -475,7 +475,7 @@ count_ala_occurrences <- function(
 
 
 # ===========================================================================
-# CLI entry point — run only when invoked via Rscript (not source())
+# CLI entry point -- run only when invoked via Rscript (not source())
 # ===========================================================================
 if (!interactive() && sys.nframe() == 0L) {
   ## Only auto-run if executed directly as a script

@@ -17,16 +17,31 @@ cat("=== Test: Temporal GDM Time-Series Prediction ===\n\n")
 this_dir <- tryCatch(dirname(sys.frame(1)$ofile), error = function(e) getwd())
 source(file.path(this_dir, "config.R"))
 
-project_root <- config$project_root
-fit_path     <- config$fit_path
-ref_raster   <- config$reference_raster
-npy_src      <- config$npy_src
-python_exe   <- config$python_exe
-pyper_script <- config$pyper_script
+project_root     <- config$project_root
+fit_path         <- config$fit_path
+ref_raster       <- config$reference_raster
+npy_src          <- config$npy_src
+python_exe       <- config$python_exe
+pyper_script     <- config$pyper_script
+modis_dir        <- if (isTRUE(config$add_modis)) config$modis_dir else NULL
+modis_resolution <- if (isTRUE(config$add_modis)) config$modis_resolution else "1km"
 
 ## Time-series parameters
-baseline_year <- 1950L
-target_years  <- 1951L:2017L
+## The climate .npy data has a fixed year range (geonpy_start_year to
+## geonpy_end_year).  When MODIS is enabled we also want to stay within
+## the MODIS year range.  Use the intersection of both constraints.
+climate_end <- config$geonpy_end_year      # e.g. 2017
+
+if (isTRUE(config$add_modis)) {
+  baseline_year <- config$modis_start_year
+  last_year     <- min(config$modis_end_year, climate_end)
+  target_years  <- (baseline_year + 1L):last_year
+  cat(sprintf("  MODIS enabled -> time-series %d–%d (capped by climate data end %d)\n",
+              baseline_year, last_year, climate_end))
+} else {
+  baseline_year <- 1950L
+  target_years  <- 1951L:climate_end
+}
 
 # ---------------------------------------------------------------------------
 # 1. Source dependencies
@@ -66,7 +81,7 @@ cat(sprintf("  Sampled %d points (lon [%.2f, %.2f], lat [%.2f, %.2f])\n",
 # 4. Run predictions for each target year
 # ---------------------------------------------------------------------------
 n_years <- length(target_years)
-cat(sprintf("\n--- Running time-series predictions: %d → {%d..%d} (%d steps, %d sites) ---\n",
+cat(sprintf("\n--- Running time-series predictions: %d -> {%d..%d} (%d steps, %d sites) ---\n",
             baseline_year, min(target_years), max(target_years), n_years, n_sites))
 
 ## Storage: matrix [n_sites x n_years] for each output variable
@@ -99,15 +114,17 @@ for (yi in seq_along(target_years)) {
 
   res <- tryCatch(
     predict_temporal_gdm(
-      fit          = fit,
-      points       = pts,
-      npy_src      = npy_src,
-      python_exe   = python_exe,
-      pyper_script = pyper_script,
-      verbose      = FALSE
+      fit              = fit,
+      points           = pts,
+      npy_src          = npy_src,
+      python_exe       = python_exe,
+      pyper_script     = pyper_script,
+      modis_dir        = modis_dir,
+      modis_resolution = modis_resolution,
+      verbose          = FALSE
     ),
     error = function(e) {
-      warning(sprintf("Year %d failed: %s", yr, conditionMessage(e)))
+      cat(sprintf("  *** Year %d FAILED: %s\n", yr, conditionMessage(e)))
       NULL
     }
   )
@@ -128,6 +145,14 @@ cat(sprintf("\n  Time-series complete: %d years x %d sites in %.1f min\n",
 # ---------------------------------------------------------------------------
 cat("\n--- Time-series summary ---\n")
 mean_dissim <- colMeans(mat_dissim, na.rm = TRUE)
+n_ok <- sum(is.finite(mean_dissim))
+cat(sprintf("  Valid year-columns: %d / %d\n", n_ok, n_years))
+if (n_ok == 0) {
+  cat("  WARNING: All predictions failed -- no valid results to plot.\n")
+  cat("  Re-run with verbose=TRUE in predict_temporal_gdm to diagnose.\n")
+  cat(sprintf("\n=== Time-series test complete (%.1f min) ===\n", total_time / 60))
+  q(save = "no")
+}
 cat(sprintf("  Mean dissimilarity range: [%.4f (%d), %.4f (%d)]\n",
             min(mean_dissim, na.rm = TRUE), target_years[which.min(mean_dissim)],
             max(mean_dissim, na.rm = TRUE), target_years[which.max(mean_dissim)]))
@@ -139,15 +164,18 @@ cat("\n--- Generating plots ---\n")
 out_dir <- config$output_dir
 if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
 
-## Colour palette for sites (by latitude, south=blue → north=red)
+## MODIS suffix for output filenames (derived from fit metadata)
+modis_tag <- if (isTRUE(fit$add_modis)) "_MODIS" else ""
+
+## Colour palette for sites (by latitude, south=blue -> north=red)
 lat_order  <- order(samp$lat)
 lat_pal    <- colorRampPalette(c("#2166AC", "#67A9CF", "#D1E5F0",
                                   "#FDDBC7", "#EF8A62", "#B2182B"))(n_sites)
 site_cols  <- character(n_sites)
 site_cols[lat_order] <- lat_pal
 
-## ============ Plot 1: Spaghetti plot — all sites =========================
-pdf_spag <- file.path(out_dir, paste0(fit$species_group, "_test_timeseries_spaghetti.pdf"))
+## ============ Plot 1: Spaghetti plot -- all sites =========================
+pdf_spag <- file.path(out_dir, paste0(fit$species_group, modis_tag, "_test_timeseries_spaghetti.pdf"))
 pdf(pdf_spag, width = 12, height = 7)
 
 par(mar = c(5, 5, 4, 2))
@@ -180,7 +208,7 @@ dev.off()
 cat(sprintf("  Saved: %s\n", basename(pdf_spag)))
 
 ## ============ Plot 2: Mean + quantile ribbon =============================
-pdf_ribbon <- file.path(out_dir, paste0(fit$species_group, "_test_timeseries_ribbon.pdf"))
+pdf_ribbon <- file.path(out_dir, paste0(fit$species_group, modis_tag, "_test_timeseries_ribbon.pdf"))
 pdf(pdf_ribbon, width = 12, height = 7)
 
 par(mar = c(5, 5, 4, 2))
@@ -220,7 +248,7 @@ dev.off()
 cat(sprintf("  Saved: %s\n", basename(pdf_ribbon)))
 
 ## ============ Plot 3: Heatmap (sites × years) ============================
-pdf_heat <- file.path(out_dir, paste0(fit$species_group, "_test_timeseries_heatmap.pdf"))
+pdf_heat <- file.path(out_dir, paste0(fit$species_group, modis_tag, "_test_timeseries_heatmap.pdf"))
 pdf(pdf_heat, width = 14, height = 8)
 
 par(mar = c(5, 5, 4, 6))
@@ -232,7 +260,7 @@ ord <- order(samp$lat)
 image(x = target_years, y = seq_len(n_sites),
       z = t(mat_dissim[ord, ]),
       col = heat_pal,
-      xlab = "Year", ylab = "Site (ordered by latitude, south → north)",
+      xlab = "Year", ylab = "Site (ordered by latitude, south -> north)",
       main = sprintf("Temporal Dissimilarity Heatmap (%d baseline)\n%s | %d yr climate window",
                      baseline_year, fit$species_group, fit$climate_window),
       cex.main = 1.1, axes = FALSE)
@@ -253,8 +281,8 @@ if (fields_available) {
 dev.off()
 cat(sprintf("  Saved: %s\n", basename(pdf_heat)))
 
-## ============ Plot 4: Multi-panel — ecological distance + dissimilarity + rate
-pdf_multi <- file.path(out_dir, paste0(fit$species_group, "_test_timeseries_multipanel.pdf"))
+## ============ Plot 4: Multi-panel -- ecological distance + dissimilarity + rate
+pdf_multi <- file.path(out_dir, paste0(fit$species_group, modis_tag, "_test_timeseries_multipanel.pdf"))
 pdf(pdf_multi, width = 12, height = 12)
 
 par(mfrow = c(3, 1), mar = c(4.5, 5, 3, 2))
@@ -299,7 +327,7 @@ dev.off()
 cat(sprintf("  Saved: %s\n", basename(pdf_multi)))
 
 ## ============ Plot 5: Selected site trajectories =========================
-pdf_sites <- file.path(out_dir, paste0(fit$species_group, "_test_timeseries_selected_sites.pdf"))
+pdf_sites <- file.path(out_dir, paste0(fit$species_group, modis_tag, "_test_timeseries_selected_sites.pdf"))
 pdf(pdf_sites, width = 12, height = 8)
 
 par(mar = c(5, 5, 4, 8), xpd = TRUE)
@@ -331,7 +359,7 @@ cat(sprintf("  Saved: %s\n", basename(pdf_sites)))
 # ---------------------------------------------------------------------------
 # 7. Save results
 # ---------------------------------------------------------------------------
-rds_file <- file.path(out_dir, paste0(fit$species_group, "_test_timeseries_results.rds"))
+rds_file <- file.path(out_dir, paste0(fit$species_group, modis_tag, "_test_timeseries_results.rds"))
 saveRDS(list(
   baseline_year  = baseline_year,
   target_years   = target_years,

@@ -20,13 +20,18 @@
 # Returns 0 below q1, 1 above q3, quadratic between.
 # ---------------------------------------------------------------------------
 I_spline <- function(predVal, q1, q2, q3) {
-  outVal <- rep(NA, length(predVal))
-  outVal[predVal <= q1] <- 0
-  outVal[predVal >= q3] <- 1
-  outVal[predVal > q1 & predVal <= q2] <-
-    ((predVal[predVal > q1 & predVal <= q2] - q1)^2) / ((q2 - q1) * (q3 - q1))
-  outVal[predVal > q2 & predVal < q3] <-
-    1 - ((q3 - predVal[predVal > q2 & predVal < q3])^2) / ((q3 - q2) * (q3 - q1))
+  outVal <- rep(NA_real_, length(predVal))
+  ## Guard: if predVal is NA, leave outVal as NA (avoids "NAs in subscript" error)
+  ok <- !is.na(predVal)
+  pv <- predVal[ok]
+  ov <- rep(NA_real_, length(pv))
+  ov[pv <= q1] <- 0
+  ov[pv >= q3] <- 1
+  ov[pv > q1 & pv <= q2] <-
+    ((pv[pv > q1 & pv <= q2] - q1)^2) / ((q2 - q1) * (q3 - q1))
+  ov[pv > q2 & pv < q3] <-
+    1 - ((q3 - pv[pv > q2 & pv < q3])^2) / ((q3 - q2) * (q3 - q1))
+  outVal[ok] <- ov
   outVal
 }
 
@@ -109,9 +114,9 @@ splineData <- function(X, splines = NULL, quantiles = NULL) {
 # Drop-in replacement for splineData(). Same inputs and outputs, but
 # avoids the three main bottlenecks of the original:
 #
-#   1. cbind() growth loop — replaced by pre-allocated result matrix
-#   2. rbind(X1, X2)       — sites processed separately (halves row count)
-#   3. End-of-function split — abs difference computed in-place
+#   1. cbind() growth loop -- replaced by pre-allocated result matrix
+#   2. rbind(X1, X2)       -- sites processed separately (halves row count)
+#   3. End-of-function split -- abs difference computed in-place
 #
 # Produces numerically identical results to splineData().
 # ---------------------------------------------------------------------------
@@ -153,7 +158,7 @@ splineData_fast <- function(X, splines = NULL, quantiles = NULL) {
   ## Pre-allocate output matrix (the single biggest speedup)
   result <- matrix(NA_real_, nrow = nr, ncol = total_splines)
 
-  ## Process each predictor — apply I_spline to X1 and X2 separately
+  ## Process each predictor -- apply I_spline to X1 and X2 separately
   csp     <- c(0L, cumsum(splines))
   out_col <- 0L
 
@@ -295,12 +300,15 @@ nnls.fit <- function(x, y, weights = rep(1, nobs), start = NULL,
       ngoodobs <- as.integer(nobs - sum(!good))
 
       ## NNLS: constrain all coefficients except intercept to be >= 0
-      fit <- nnnpls(x[good, , drop = FALSE] * w, z * w,
+      ## Cache weighted design matrix to avoid computing it twice
+      xw  <- x[good, , drop = FALSE] * w
+      fit <- nnnpls(xw, z * w,
                     con = c(-1, rep(1, ncol(x) - 1)))
       fit$coefficients <- fit$x
 
-      ## QR decomposition for diagnostics
-      QR         <- qr(x[good, , drop = FALSE] * w, tol = min(1e-07, control$epsilon / 1000))
+      ## QR decomposition for diagnostics (reuse cached xw)
+      QR         <- qr(xw, tol = min(1e-07, control$epsilon / 1000))
+      rm(xw)
       fit$qr     <- QR$qr
       fit$rank   <- QR$rank
       fit$pivot  <- QR$pivot

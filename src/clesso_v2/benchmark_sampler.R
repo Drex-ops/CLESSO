@@ -1,6 +1,6 @@
 ##############################################################################
 ##
-## benchmark_sampler.R — Performance benchmarks for CLESSO v2 sampler
+## benchmark_sampler.R -- Performance benchmarks for CLESSO v2 sampler
 ##
 ## Generates synthetic observation data and profiles every major code path
 ## in clesso_sampler.R to identify bottlenecks.
@@ -336,7 +336,7 @@ for (sz in names(datasets)) {
   obs <- datasets[[sz]]
   tgt <- pair_targets[[sz]]
 
-  cat(sprintf("Scale: %s (%d records) — within=%d, between=%d\n",
+  cat(sprintf("Scale: %s (%d records) -- within=%d, between=%d\n",
               sz, nrow(obs), tgt$n_within, tgt$n_between))
 
   t0 <- proc.time()
@@ -576,13 +576,13 @@ for (nm in names(mb_results)) {
 }
 
 cat("\nKnown bottlenecks (prioritised):\n")
-cat("  1. Within-site lapply per-site pair drawing — R-level loop over\n")
+cat("  1. Within-site lapply per-site pair drawing -- R-level loop over\n")
 cat("     potentially 100k+ sites; creates tiny data.tables each call.\n")
-cat("  2. Between-site Phase 1: growing `attempted_keys` via c() — O(n^2)\n")
+cat("  2. Between-site Phase 1: growing `attempted_keys` via c() -- O(n^2)\n")
 cat("     copy pattern. Use an environment hash set instead.\n")
-cat("  3. Between-site Phase 2: per-species lapply — same R-level loop\n")
+cat("  3. Between-site Phase 2: per-species lapply -- same R-level loop\n")
 cat("     overhead; should batch species lookups and build one DT.\n")
-cat("  4. String-based pair key deduplication (paste0) — much slower than\n")
+cat("  4. String-based pair key deduplication (paste0) -- much slower than\n")
 cat("     integer index-based dedup via data.table.\n")
 cat("  5. Within-site: capacity weights recomputed each iteration (move\n")
 cat("     outside the loop).\n")

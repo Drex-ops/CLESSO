@@ -1,6 +1,6 @@
 ##############################################################################
 ##
-## clesso_diagnostics.R — Diagnostic and function-shape plots for CLESSO v2
+## clesso_diagnostics.R -- Diagnostic and function-shape plots for CLESSO v2
 ##
 ## Loads a fitted CLESSO results object and generates:
 ##
@@ -48,8 +48,15 @@ library(splines)
 # ---------------------------------------------------------------------------
 # 1. Load results
 # ---------------------------------------------------------------------------
-results_file <- file.path(clesso_config$output_dir,
-  paste0("clesso_results_", clesso_config$species_group, ".rds"))
+## Results file lookup: use run_id from config (which includes the timestamp).
+## To load a specific prior run, set CLESSO_RUN_ID env var before sourcing
+## the config, or set clesso_config$run_id manually.
+## Also accept CLESSO_RESULTS_FILE env var for a direct path override.
+results_file <- Sys.getenv("CLESSO_RESULTS_FILE", unset = "")
+if (nchar(results_file) == 0) {
+  results_file <- file.path(clesso_config$output_dir,
+    paste0("clesso_results_", clesso_config$run_id, ".rds"))
+}
 
 if (!file.exists(results_file)) stop(paste("Results not found:", results_file))
 results <- readRDS(results_file)
@@ -59,11 +66,17 @@ config      <- results$config
 params      <- clesso_extract_params(results)
 
 species_grp <- config$species_group
+run_id      <- results$run_id %||% config$run_id %||% species_grp
 out_dir     <- config$output_dir
 
-cat(sprintf("  Loaded results for: %s\n", species_grp))
+cat(sprintf("  Loaded results for: %s  (run_id: %s)\n", species_grp, run_id))
 cat(sprintf("  Convergence: %d  (objective = %.4f)\n",
             results$fit$convergence, results$fit$objective))
+
+## Print config snapshot if available
+if (!is.null(results$config_snapshot)) {
+  cat("  Config snapshot recorded at:", format(results$config_snapshot$snapshot_time), "\n")
+}
 
 # ---------------------------------------------------------------------------
 # Helper: nice colour palette
@@ -80,7 +93,7 @@ pal_light  <- "#D1E5F0"
 # A. MODEL DIAGNOSTICS
 # ===========================================================================
 
-pdf_diag <- file.path(out_dir, paste0(species_grp, "_clesso_diagnostics.pdf"))
+pdf_diag <- file.path(out_dir, paste0(run_id, "_clesso_diagnostics.pdf"))
 pdf(pdf_diag, width = 12, height = 9)
 
 # ---------------------------------------------------------------------------
@@ -480,7 +493,7 @@ if (use_splines && !is.null(spline_info) && length(params$b_alpha) > 0) {
   }
 
 } else {
-  ## No splines — just show linear effects on alpha
+  ## No splines -- just show linear effects on alpha
   par(mfrow = c(1, min(n_alpha_cov, 3)), mar = c(5, 5, 4, 2))
 
   Z_raw <- model_data$site_info$Z_raw
@@ -518,7 +531,7 @@ x_colnames    <- turnover_info$col_names
 n_turn_vars   <- length(splines_vec)
 
 ## Extract variable base names from column names
-## e.g., "subs_1_spl1", "subs_1_spl2", "subs_1_spl3" → "subs_1"
+## e.g., "subs_1_spl1", "subs_1_spl2", "subs_1_spl3" -> "subs_1"
 var_base_names <- unique(gsub("_spl[0-9]+$", "", x_colnames))
 
 ## Cumulative spline indices

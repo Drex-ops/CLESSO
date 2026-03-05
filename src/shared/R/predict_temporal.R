@@ -1,10 +1,10 @@
 ##############################################################################
 ##
-## predict_temporal.R — Temporal prediction from a fitted STresiduals GDM
+## predict_temporal.R -- Temporal prediction from a fitted STresiduals GDM
 ##
 ## Purpose:
 ##   Given a fitted GDM from the reca_STresiduals pipeline and a set of
-##   lon/lat points with paired years (baseline → target), compute the
+##   lon/lat points with paired years (baseline -> target), compute the
 ##   temporal component of ecological distance and dissimilarity.
 ##
 ##   Spatial and substrate predictors are zeroed out; only temporal
@@ -36,25 +36,25 @@
 ## Returns:
 ##   A data.frame with columns:
 ##     lon, lat, year1, year2,
-##     temporal_distance  — temporal ecological distance (sum of temporal
+##     temporal_distance  -- temporal ecological distance (sum of temporal
 ##                          I-spline contributions, excluding intercept)
-##     linear_predictor   — intercept + temporal_distance
-##     predicted_prob     — inv.logit(linear_predictor) [mismatch probability]
-##     dissimilarity      — ObsTrans-corrected temporal dissimilarity [0, 1]
+##     linear_predictor   -- intercept + temporal_distance
+##     predicted_prob     -- inv.logit(linear_predictor) [mismatch probability]
+##     dissimilarity      -- ObsTrans-corrected temporal dissimilarity [0, 1]
 ##
 ##   Attributes (access via attr(result, "...")):
-##     "spline_table"       — full covariate matrix (n_points × n_total_splines),
+##     "spline_table"       -- full covariate matrix (n_points × n_total_splines),
 ##                            zeros for spatial/substrate, values for temporal
-##     "pred_contributions" — per-predictor summed contribution (n_points × n_preds)
-##     "raw_temporal_env"   — raw extracted temporal env values (pre-spline)
-##     "fit_metadata"       — key metadata from the fit object
+##     "pred_contributions" -- per-predictor summed contribution (n_points × n_preds)
+##     "raw_temporal_env"   -- raw extracted temporal env values (pre-spline)
+##     "fit_metadata"       -- key metadata from the fit object
 ##
 ##############################################################################
 
 # ---------------------------------------------------------------------------
 # predict_temporal_gdm
 #
-# Full pipeline: extract temporal env → I-spline → predict.
+# Full pipeline: extract temporal env -> I-spline -> predict.
 #
 # Parameters:
 #   fit_path       - path to *_fittedGDM.RData (used if 'fit' is NULL)
@@ -76,6 +76,8 @@ predict_temporal_gdm <- function(
     npy_src,
     python_exe     = NULL,
     pyper_script   = NULL,
+    modis_dir      = NULL,
+    modis_resolution = "1km",
     feather_tmpdir = tempdir(),
     month          = 6L,
     verbose        = TRUE
@@ -193,6 +195,65 @@ predict_temporal_gdm <- function(
   }
 
   env_all <- do.call(cbind, env_parts)
+
+  ## ==== 6b. Extract MODIS temporal variables (if model includes MODIS) ==
+  ## MODIS is extracted separately (no climate windowing needed).
+  ## Year 1 -> temp_modis_{var}_1 columns (baseline)
+  ## Year 2 -> temp_modis_{var}_2 columns (target)
+  if (isTRUE(fit$add_modis)) {
+    if (is.null(modis_dir)) {
+      if (exists("config", envir = parent.frame()) &&
+          !is.null(parent.frame()$config$modis_dir)) {
+        modis_dir        <- parent.frame()$config$modis_dir
+        modis_resolution <- if (!is.null(parent.frame()$config$modis_resolution))
+                              parent.frame()$config$modis_resolution else "1km"
+      }
+    }
+    if (!is.null(modis_dir)) {
+      if (verbose) cat("  Extracting MODIS temporal variables...\n")
+      modis_vars  <- fit$modis_variables
+      modis_range <- fit$modis_year_range  # c(start, end)
+      pts         <- sp::SpatialPoints(data.frame(points$lon, points$lat))
+
+      ## Pre-allocate
+      modis_yr1 <- data.frame(matrix(NA_real_, n_pts, length(modis_vars)))
+      modis_yr2 <- data.frame(matrix(NA_real_, n_pts, length(modis_vars)))
+      colnames(modis_yr1) <- paste0("temp_modis_", modis_vars, "_1")
+      colnames(modis_yr2) <- paste0("temp_modis_", modis_vars, "_2")
+
+      ## Clamp years
+      yr1_clamped <- pmin(pmax(as.integer(points$year1), modis_range[1]), modis_range[2])
+      yr2_clamped <- pmin(pmax(as.integer(points$year2), modis_range[1]), modis_range[2])
+      unique_yrs  <- sort(unique(c(yr1_clamped, yr2_clamped)))
+
+      for (vi in seq_along(modis_vars)) {
+        mv <- modis_vars[vi]
+        for (yr in unique_yrs) {
+          fname <- file.path(modis_dir,
+                             paste0("modis_", yr, "_", mv, "_",
+                                    modis_resolution, "_COG.tif"))
+          if (!file.exists(fname)) {
+            warning(sprintf("MODIS raster not found: %s -- filling with NA", fname))
+            next
+          }
+          ras <- raster::raster(fname)
+
+          idx1 <- which(yr1_clamped == yr)
+          if (length(idx1) > 0) modis_yr1[idx1, vi] <- raster::extract(ras, pts[idx1])
+
+          idx2 <- which(yr2_clamped == yr)
+          if (length(idx2) > 0) modis_yr2[idx2, vi] <- raster::extract(ras, pts[idx2])
+        }
+      }
+
+      ## Append to env_all so they get split into env_s1 / env_s2
+      env_all <- cbind(env_all, modis_yr1, modis_yr2)
+      if (verbose) cat(sprintf("  MODIS temporal: %d variables × 2 time points\n",
+                                length(modis_vars)))
+    } else {
+      warning("fit$add_modis is TRUE but modis_dir not available -- MODIS predictors will be skipped")
+    }
+  }
 
   ## ==== 7. Split site-1 / site-2 and clean column names ================
   idx_1  <- grep("_1$", names(env_all))
@@ -376,7 +437,11 @@ predict_temporal_from_env <- function(fit, env_s1, env_s2, verbose = TRUE) {
   ## Temporal ecological distance (contribution from temporal predictors only)
   ## This is the dot product of the full spline table with all coefficients;
   ## because spatial/substrate columns are zero, only temporal contributes.
-  temporal_distance <- as.numeric(spline_table %*% fit$coefficients)
+  ## Replace NA coefficients with 0 so matrix multiply doesn't propagate NAs
+  ## from unused (spatial/substrate) predictors.
+  coefs_clean <- fit$coefficients
+  coefs_clean[is.na(coefs_clean)] <- 0
+  temporal_distance <- as.numeric(spline_table %*% coefs_clean)
 
   ## Full linear predictor (intercept + temporal distance)
   eta <- fit$intercept + temporal_distance

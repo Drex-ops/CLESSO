@@ -1,6 +1,6 @@
 ##############################################################################
 ##
-## run_chunked_env.R  —  Chunked parallel environmental data extraction
+## run_chunked_env.R  --  Chunked parallel environmental data extraction
 ##
 ## Extracts environmental data in chunks of configurable size, running
 ## gen_windows() for each env-param set in parallel via foreach/doSNOW.
@@ -102,7 +102,7 @@ run_chunked_env <- function(pairs_data, params, direction_label,
 
   total_elapsed <- (proc.time() - t0)["elapsed"]
   env_out <- do.call(rbind, chunk_results)
-  cat(sprintf("  [%s] %s COMPLETE: %.1f sec (%.1f min) — %d x %d\n",
+  cat(sprintf("  [%s] %s COMPLETE: %.1f sec (%.1f min) -- %d x %d\n",
               format(Sys.time(), "%H:%M:%S"), direction_label,
               total_elapsed, total_elapsed / 60,
               nrow(env_out), ncol(env_out)))

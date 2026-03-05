@@ -1,10 +1,10 @@
 ##############################################################################
 ##
-## run_obsGDM_window_sweep.R  —  Climate window tuning for RECA obsGDM
+## run_obsGDM_window_sweep.R  --  Climate window tuning for RECA obsGDM
 ##
 ## Runs Steps 1-5 once (data load, w estimation, data prep, site×species
-## matrix, observation-pair sampling) then loops Step 6 (env extraction →
-## spline → fit → diagnostics) over a range of climate windows (3–60 yr).
+## matrix, observation-pair sampling) then loops Step 6 (env extraction ->
+## spline -> fit -> diagnostics) over a range of climate windows (3–60 yr).
 ##
 ## Only model-fit statistics are saved (no full fit objects), collected into
 ## a single summary table for downstream climate-window selection.
@@ -15,7 +15,7 @@
 ##
 ##############################################################################
 
-cat("=== RECA obsGDM — Climate Window Sweep ===\n")
+cat("=== RECA obsGDM -- Climate Window Sweep ===\n")
 cat("Loading configuration...\n")
 
 # ---------------------------------------------------------------------------
@@ -234,7 +234,7 @@ for (wi in seq_along(window_range)) {
   cat(sprintf("  Pairs after temporal filter: %d\n", n_pairs_raw))
 
   if (n_pairs_raw < 100) {
-    cat("  [SKIP] Too few pairs — skipping this window\n")
+    cat("  [SKIP] Too few pairs -- skipping this window\n")
     sweep_results <- rbind(sweep_results, data.frame(
       climate_window = c_yr, n_pairs_raw = n_pairs_raw,
       n_pairs_clean = NA, n_pairs_used = NA, intercept = NA,
@@ -587,7 +587,7 @@ if (nrow(ok_rows) >= 3) {
        xlab = "Climate Window (years)", ylab = "Elapsed (min)",
        main = "Computation Time per Window")
 
-  mtext(sprintf("Climate Window Sweep — %s | nMatch = %s | biAverage = %s | decomp = %s",
+  mtext(sprintf("Climate Window Sweep -- %s | nMatch = %s | biAverage = %s | decomp = %s",
                 config$species_group,
                 format(config$nMatch, big.mark = ","),
                 config$biAverage,

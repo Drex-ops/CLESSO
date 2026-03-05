@@ -64,7 +64,7 @@ cat("\n--- Extracting all non-NA pixel coordinates ---\n")
 if (!file.exists(ref_raster)) stop(paste("Reference raster not found:", ref_raster))
 ras <- raster(ref_raster)
 
-## Get all cell values — NA for ocean/missing
+## Get all cell values -- NA for ocean/missing
 vals <- getValues(ras)
 non_na <- which(!is.na(vals))
 coords <- xyFromCell(ras, non_na)
@@ -93,7 +93,7 @@ pts <- data.frame(
 #    For very large pixel counts we chunk the full set to keep memory
 #    and per-call sizes manageable.
 # ---------------------------------------------------------------------------
-cat(sprintf("\n--- Running chunked prediction (%d → %d) ---\n", year1, year2))
+cat(sprintf("\n--- Running chunked prediction (%d -> %d) ---\n", year1, year2))
 cat(sprintf("  Chunk size: %s pixels\n", format(chunk_size, big.mark = ",")))
 
 chunks     <- split(seq_len(n_pixels), ceiling(seq_len(n_pixels) / chunk_size))
@@ -118,12 +118,14 @@ for (ci in seq_along(chunks)) {
 
   chunk_result <- tryCatch(
     predict_temporal_gdm(
-      fit          = fit,
-      points       = pts[rows, ],
-      npy_src      = npy_src,
-      python_exe   = python_exe,
-      pyper_script = pyper_script,
-      verbose      = FALSE
+      fit              = fit,
+      points           = pts[rows, ],
+      npy_src          = npy_src,
+      python_exe       = python_exe,
+      pyper_script     = pyper_script,
+      modis_dir        = config$modis_dir,
+      modis_resolution = config$modis_resolution,
+      verbose          = FALSE
     ),
     error = function(e) {
       warning(sprintf("Chunk %d failed: %s", ci, conditionMessage(e)))
@@ -157,8 +159,11 @@ cat(sprintf("\n  Prediction complete: %s pixels in %.1f min (%.0f pixels/sec)\n"
 cat("\n--- Building output rasters ---\n")
 if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
 
-prefix <- sprintf("%s_%dyr_%d_to_%d",
-                  fit$species_group, fit$climate_window, year1, year2)
+## MODIS suffix for output filenames (derived from fit metadata)
+modis_tag <- if (isTRUE(fit$add_modis)) "_MODIS" else ""
+
+prefix <- sprintf("%s_%dyr_%d_to_%d%s",
+                  fit$species_group, fit$climate_window, year1, year2, modis_tag)
 
 ## Helper: create a raster from prediction values at non-NA cell positions
 make_raster <- function(values, template, cell_indices) {
@@ -247,19 +252,19 @@ par(mar = c(2, 2, 3, 4))
 
 ## Map 1: Temporal dissimilarity
 plot(ras_dissim, col = pal_div(100), axes = TRUE,
-     main = sprintf("Temporal Dissimilarity (%d → %d)\n%s | %d yr window",
+     main = sprintf("Temporal Dissimilarity (%d -> %d)\n%s | %d yr window",
                     year1, year2, fit$species_group, fit$climate_window),
      cex.main = 1.1)
 
 ## Map 2: Temporal ecological distance
 plot(ras_distance, col = pal_seq(100), axes = TRUE,
-     main = sprintf("Temporal Ecological Distance (%d → %d)\n%s | %d yr window",
+     main = sprintf("Temporal Ecological Distance (%d -> %d)\n%s | %d yr window",
                     year1, year2, fit$species_group, fit$climate_window),
      cex.main = 1.1)
 
 ## Map 3: Predicted mismatch probability
 plot(ras_prob, col = pal_div(100), axes = TRUE,
-     main = sprintf("Predicted Mismatch Probability (%d → %d)\n%s | %d yr window",
+     main = sprintf("Predicted Mismatch Probability (%d -> %d)\n%s | %d yr window",
                     year1, year2, fit$species_group, fit$climate_window),
      cex.main = 1.1)
 
@@ -282,7 +287,7 @@ cat(sprintf("  Saved: %s\n", basename(pdf_maps)))
 tif_map <- file.path(out_dir, paste0(prefix, "_dissimilarity_map.tif"))
 tiff(tif_map, width = 10, height = 8, units = "in", res = 300, compression = "lzw")
 plot(ras_dissim, col = pal_div(100), axes = TRUE,
-     main = sprintf("Temporal Dissimilarity (%d → %d)  |  %s  |  %d yr window",
+     main = sprintf("Temporal Dissimilarity (%d -> %d)  |  %s  |  %d yr window",
                     year1, year2, fit$species_group, fit$climate_window))
 dev.off()
 cat(sprintf("  Saved: %s\n", basename(tif_map)))

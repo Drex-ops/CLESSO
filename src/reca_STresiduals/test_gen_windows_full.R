@@ -1,6 +1,6 @@
 ##############################################################################
 ##
-## test_gen_windows_full.R  —  Full-scale env extraction test (STresiduals)
+## test_gen_windows_full.R  --  Full-scale env extraction test (STresiduals)
 ##
 ## Runs the complete Step 6a environmental data extraction on the full
 ## obsPairs table using the spatial-temporal residual decomposition:

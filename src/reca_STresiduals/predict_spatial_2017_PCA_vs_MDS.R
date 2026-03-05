@@ -4,8 +4,8 @@
 ##
 ## Generate spatial biological-community maps for 2017 using two methods:
 ##
-##   A. Transform → PCA → RGB   (fast, approximate)
-##   B. Landmark MDS → RGB      (rigorous, calibrated dissimilarity)
+##   A. Transform -> PCA -> RGB   (fast, approximate)
+##   B. Landmark MDS -> RGB      (rigorous, calibrated dissimilarity)
 ##
 ## Both use the same fitted STresiduals GDM and spatial+substrate
 ## environmental data extracted at ref_year = 2017.  The PCA approach
@@ -49,7 +49,7 @@ stretch      <- 2            # percentile stretch for RGB mapping
 ## ---- Landmark MDS parameters ----
 n_landmarks       <- 500L
 landmark_method   <- "stratified"   # spatially even coverage
-use_dissimilarity <- TRUE           # TRUE = full calibration (intercept → logit → ObsTrans)
+use_dissimilarity <- TRUE           # TRUE = full calibration (intercept -> logit -> ObsTrans)
 
 if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
 
@@ -82,10 +82,13 @@ cat(sprintf("  Predictors: %d total (%d spatial, %d substrate, %d temporal)\n",
             length(grep("^temp_", fit$predictors))))
 cat(sprintf("  Mapping year: %d\n\n", ref_year))
 
+## MODIS suffix for output filenames (derived from fit metadata)
+modis_tag <- if (isTRUE(fit$add_modis)) "_MODIS" else ""
+
 # ===========================================================================
-# A.  Transform → PCA → RGB
+# A.  Transform -> PCA -> RGB
 # ===========================================================================
-cat(sprintf("\n######  APPROACH A: Transform → PCA → RGB (ref_year = %d)  ######\n\n",
+cat(sprintf("\n######  APPROACH A: Transform -> PCA -> RGB (ref_year = %d)  ######\n\n",
     ref_year))
 
 result_pca <- predict_spatial_rgb(
@@ -97,6 +100,8 @@ result_pca <- predict_spatial_rgb(
   pyper_script = pyper_script,
   ref_year     = ref_year,
   ref_month    = ref_month,
+  modis_dir    = if (isTRUE(fit$add_modis)) config$modis_dir else NULL,
+  modis_resolution = config$modis_resolution,
   pca_method   = pca_method,
   n_components = n_components,
   stretch      = stretch,
@@ -104,7 +109,7 @@ result_pca <- predict_spatial_rgb(
 )
 
 ## Save PCA RGB GeoTIFF
-tag_pca <- sprintf("%s_%dyr_ref%d_PCA", fit$species_group, fit$climate_window, ref_year)
+tag_pca <- sprintf("%s_%dyr_ref%d%s_PCA", fit$species_group, fit$climate_window, ref_year, modis_tag)
 writeRaster(result_pca$rgb_stack,
             file.path(out_dir, paste0(tag_pca, "_RGB.tif")),
             format = "GTiff", options = "COMPRESS=LZW",
@@ -171,7 +176,7 @@ for (k in 1:3) {
   ve_str <- if (!is.null(result_pca$variance_explained))
     sprintf(" (%.1f%%)", result_pca$variance_explained[k]) else ""
   plot(score_ras, col = pc_pals[[k]],
-       main = sprintf("%s%s — %s | ref %d", pc_names[k], ve_str,
+       main = sprintf("%s%s -- %s | ref %d", pc_names[k], ve_str,
                       fit$species_group, ref_year),
        cex.main = 1.0)
 }
@@ -193,9 +198,9 @@ dev.off()
 cat(sprintf("  Saved: %s\n", basename(pdf_pcs)))
 
 # ===========================================================================
-# B.  Landmark MDS → RGB  (reuses transform from A)
+# B.  Landmark MDS -> RGB  (reuses transform from A)
 # ===========================================================================
-cat(sprintf("\n\n######  APPROACH B: Landmark MDS → RGB (ref_year = %d)  ######\n\n",
+cat(sprintf("\n\n######  APPROACH B: Landmark MDS -> RGB (ref_year = %d)  ######\n\n",
     ref_year))
 
 result_lmds <- predict_spatial_lmds(
@@ -213,9 +218,9 @@ result_lmds <- predict_spatial_lmds(
 
 ## Save LMDS RGB GeoTIFF
 dissim_tag <- if (use_dissimilarity) "dissim" else "ecodist"
-tag_lmds <- sprintf("%s_%dyr_ref%d_LMDS_%dk_%s",
+tag_lmds <- sprintf("%s_%dyr_ref%d%s_LMDS_%dk_%s",
                     fit$species_group, fit$climate_window, ref_year,
-                    n_landmarks, dissim_tag)
+                    modis_tag, n_landmarks, dissim_tag)
 writeRaster(result_lmds$rgb_stack,
             file.path(out_dir, paste0(tag_lmds, "_RGB.tif")),
             format = "GTiff", options = "COMPRESS=LZW",
@@ -258,14 +263,15 @@ cat("\n\n--- Generating comparison plots ---\n")
 # ---------------------------------------------------------------------------
 # Plot 1: Side-by-side PCA vs LMDS
 # ---------------------------------------------------------------------------
-pdf_compare <- file.path(out_dir, sprintf("%s_%dyr_ref%d_PCA_vs_LMDS.pdf",
-                                           fit$species_group, fit$climate_window, ref_year))
+pdf_compare <- file.path(out_dir, sprintf("%s_%dyr_ref%d%s_PCA_vs_LMDS.pdf",
+                                           fit$species_group, fit$climate_window, ref_year,
+                                           modis_tag))
 pdf(pdf_compare, width = 18, height = 10)
 par(mfrow = c(1, 2), mar = c(2, 2, 4, 1))
 
 ## A: PCA
 plotRGB(result_pca$rgb_stack, r = 1, g = 2, b = 3, stretch = "none",
-        main = sprintf("A: PCA → RGB\n%s | %d yr | ref %d",
+        main = sprintf("A: PCA -> RGB\n%s | %d yr | ref %d",
                        fit$species_group, fit$climate_window, ref_year),
         axes = TRUE)
 if (!is.null(result_pca$variance_explained)) {
@@ -281,7 +287,7 @@ if (!is.null(result_pca$variance_explained)) {
 
 ## B: LMDS
 plotRGB(result_lmds$rgb_stack, r = 1, g = 2, b = 3, stretch = "none",
-        main = sprintf("B: Landmark MDS → RGB (%d landmarks, %s)\n%s | %d yr | ref %d",
+        main = sprintf("B: Landmark MDS -> RGB (%d landmarks, %s)\n%s | %d yr | ref %d",
                        n_landmarks, dissim_tag,
                        fit$species_group, fit$climate_window, ref_year),
         axes = TRUE)
@@ -304,8 +310,9 @@ cat(sprintf("  Saved: %s\n", basename(pdf_compare)))
 # ---------------------------------------------------------------------------
 # Plot 2: Summary diagnostics
 # ---------------------------------------------------------------------------
-pdf_summary <- file.path(out_dir, sprintf("%s_%dyr_ref%d_PCA_vs_LMDS_summary.pdf",
-                                           fit$species_group, fit$climate_window, ref_year))
+pdf_summary <- file.path(out_dir, sprintf("%s_%dyr_ref%d%s_PCA_vs_LMDS_summary.pdf",
+                                           fit$species_group, fit$climate_window, ref_year,
+                                           modis_tag))
 pdf(pdf_summary, width = 16, height = 12)
 par(mfrow = c(2, 2), mar = c(4, 4, 4, 2))
 
@@ -375,8 +382,9 @@ cat(sprintf("  Saved: %s\n", basename(pdf_summary)))
 # ---------------------------------------------------------------------------
 # Plot 3: Predictor contribution barplot (shared)
 # ---------------------------------------------------------------------------
-pdf_contrib <- file.path(out_dir, sprintf("%s_%dyr_ref%d_spatial_predictor_contributions.pdf",
-                                           fit$species_group, fit$climate_window, ref_year))
+pdf_contrib <- file.path(out_dir, sprintf("%s_%dyr_ref%d%s_spatial_predictor_contributions.pdf",
+                                           fit$species_group, fit$climate_window, ref_year,
+                                           modis_tag))
 pdf(pdf_contrib, width = 12, height = 8)
 
 pred_info <- attr(result_pca$transformed, "predictor_info")
@@ -397,7 +405,7 @@ if (nrow(active_preds) > 0) {
           names.arg = rev(active_preds$predictor),
           col = rev(bar_cols), border = NA,
           xlab = "Coefficient Sum (biological importance)",
-          main = sprintf("Spatial Predictor Importance — %s | %d yr | ref %d",
+          main = sprintf("Spatial Predictor Importance -- %s | %d yr | ref %d",
                          fit$species_group, fit$climate_window, ref_year),
           cex.names = 0.7)
 
@@ -412,8 +420,9 @@ cat(sprintf("  Saved: %s\n", basename(pdf_contrib)))
 # ---------------------------------------------------------------------------
 # Save comparison RDS
 # ---------------------------------------------------------------------------
-rds_compare <- file.path(out_dir, sprintf("%s_%dyr_ref%d_PCA_vs_LMDS.rds",
-                                           fit$species_group, fit$climate_window, ref_year))
+rds_compare <- file.path(out_dir, sprintf("%s_%dyr_ref%d%s_PCA_vs_LMDS.rds",
+                                           fit$species_group, fit$climate_window, ref_year,
+                                           modis_tag))
 saveRDS(list(
   pca = list(
     variance_explained = result_pca$variance_explained,

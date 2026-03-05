@@ -1,6 +1,6 @@
 ##############################################################################
 ##
-## benchmark_compare.R — Side-by-side comparison: original vs optimised sampler
+## benchmark_compare.R -- Side-by-side comparison: original vs optimised sampler
 ##
 ## Runs both sampler implementations on the same synthetic data and
 ## compares wall-clock time and output equivalence.

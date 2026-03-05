@@ -4,7 +4,7 @@
 ##
 ## Animated GIF with two side-by-side panels per frame:
 ##
-##   LEFT:  Temporal biodiversity dissimilarity map  (1950 → year2)
+##   LEFT:  Temporal biodiversity dissimilarity map  (1950 -> year2)
 ##   RIGHT: PCA spatial community map                (year2)
 ##
 ## The animation sweeps year2 from 1955 to 2017 (5-year steps), showing
@@ -12,11 +12,11 @@
 ## pattern shifts through time.
 ##
 ## Design:
-##   1. Pre-compute the final year (1950 → 2017) to establish:
+##   1. Pre-compute the final year (1950 -> 2017) to establish:
 ##      - Fixed colour scale for temporal dissimilarity (global max)
 ##      - Reference PCA rotation matrix (prcomp on 2017 I-spline data)
 ##      - Fixed RGB bounds from the reference PCA scores
-##   2. Single-pass loop: compute temporal + spatial → render PNG frame
+##   2. Single-pass loop: compute temporal + spatial -> render PNG frame
 ##   3. Assemble frames into animated GIF (magick)
 ##
 ## Consistency:
@@ -33,7 +33,7 @@
 ##############################################################################
 
 cat("=== Dual-Panel Animation: Temporal Change + PCA Spatial ===\n")
-cat("=== 1950 → 2017 ===\n\n")
+cat("=== 1950 -> 2017 ===\n\n")
 
 # ---------------------------------------------------------------------------
 # 0.  Paths and parameters
@@ -246,7 +246,7 @@ ispline_transform_spatial <- function(env_spatial, verbose = TRUE) {
 
 ## --- 4c.  Project data onto reference PCA rotation ----------------------
 ##     Uses the FIXED rotation matrix and centre from the reference year.
-##     This is deterministic — no sign/dimension ambiguity.
+##     This is deterministic -- no sign/dimension ambiguity.
 project_pca_scores <- function(trans_act, pca_rotation, pca_center, verbose = TRUE) {
 
   ## Match columns: new data may have different active columns.  We
@@ -308,22 +308,22 @@ compute_temporal_dissim <- function(yr2, verbose = TRUE) {
 
 # ---------------------------------------------------------------------------
 # 5.  Pre-compute reference year (2017)
-#     → temporal dissim max for colour scale
-#     → PCA reference rotation matrix, RGB bounds
+#     -> temporal dissim max for colour scale
+#     -> PCA reference rotation matrix, RGB bounds
 # ---------------------------------------------------------------------------
 cat("\n\n===== PRE-COMPUTING REFERENCE YEAR (2017) =====\n\n")
 
-## 5a. Temporal dissimilarity 1950 → 2017 (maximum extent)
-cat("--- 5a. Temporal dissimilarity (1950 → 2017) ---\n")
+## 5a. Temporal dissimilarity 1950 -> 2017 (maximum extent)
+cat("--- 5a. Temporal dissimilarity (1950 -> 2017) ---\n")
 t0_ref <- proc.time()
 dissim_2017 <- compute_temporal_dissim(2017L, verbose = TRUE)
 valid_2017  <- !is.na(dissim_2017)
 temporal_zlim_max <- max(dissim_2017[valid_2017]) * 1.05
-cat(sprintf("  max = %.4f → zlim_max = %.4f\n",
+cat(sprintf("  max = %.4f -> zlim_max = %.4f\n",
             max(dissim_2017[valid_2017]), temporal_zlim_max))
 
 ## 5b. PCA spatial at 2017 (reference rotation matrix)
-cat("\n--- 5b. PCA spatial (2017) — computing reference rotation ---\n")
+cat("\n--- 5b. PCA spatial (2017) -- computing reference rotation ---\n")
 env_spatial_2017 <- extract_spatial_climate(2017L, verbose = TRUE)
 
 ## I-spline transform
@@ -334,7 +334,7 @@ cat("  Running prcomp() on 2017 I-spline data...\n")
 ref_pca <- prcomp(ref_transform$transformed, center = TRUE, scale. = FALSE,
                    rank. = n_components)
 
-## Save the rotation matrix and centre — these define the FIXED projection
+## Save the rotation matrix and centre -- these define the FIXED projection
 pca_rotation <- ref_pca$rotation[, seq_len(n_components), drop = FALSE]
 pca_center   <- ref_pca$center  # named vector (column means)
 
@@ -376,7 +376,7 @@ dissim_pal <- colorRampPalette(c(
 # ---------------------------------------------------------------------------
 # 7.  Main loop: compute + render each year
 # ---------------------------------------------------------------------------
-cat(sprintf("\n\n===== MAIN LOOP: %d → %d (%d frames) =====\n\n",
+cat(sprintf("\n\n===== MAIN LOOP: %d -> %d (%d frames) =====\n\n",
             min(year2_seq), max(year2_seq), length(year2_seq)))
 
 stats_list <- vector("list", length(year2_seq))
@@ -386,7 +386,7 @@ for (yi in seq_along(year2_seq)) {
   yr2    <- year2_seq[yi]
   t0_yr  <- proc.time()
 
-  cat(sprintf("\n[%s] === Frame %d/%d: %d → %d ===\n",
+  cat(sprintf("\n[%s] === Frame %d/%d: %d -> %d ===\n",
               format(Sys.time(), "%H:%M:%S"), yi, length(year2_seq), year1, yr2))
   flush.console()
 
@@ -420,7 +420,7 @@ for (yi in seq_along(year2_seq)) {
     pca_scores_yr <- project_pca_scores(yr_transform$transformed,
                                          pca_rotation, pca_center, verbose = FALSE)
     pca_coords_yr <- yr_transform$coords
-    ve <- ref_var_explained   # same rotation → same variance structure
+    ve <- ref_var_explained   # same rotation -> same variance structure
   }
 
   ## Apply fixed RGB mapping
@@ -445,7 +445,7 @@ for (yi in seq_along(year2_seq)) {
   ras_temporal <- make_raster(all_dissim, ras, non_na)
   plot(ras_temporal, col = dissim_pal, zlim = c(0, temporal_zlim_max),
        axes = TRUE, box = TRUE,
-       main = sprintf("Temporal Change: %d → %d", year1, yr2),
+       main = sprintf("Temporal Change: %d -> %d", year1, yr2),
        cex.main = 1.3,
        legend.args = list(text = "Dissimilarity", side = 4, line = 2.5, cex = 0.8))
 

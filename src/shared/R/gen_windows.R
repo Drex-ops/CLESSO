@@ -93,7 +93,7 @@ gen_windows <- function(pairs, variables, mstat, cstat, window,
   output_fp <- system(call, intern = TRUE)
   if (verbose) {
     dt <- (proc.time() - t_pre_py)["elapsed"]
-    cat(sprintf("    [gen_windows] PYTHON exec: %.3fs → %s\n", dt, output_fp))
+    cat(sprintf("    [gen_windows] PYTHON exec: %.3fs -> %s\n", dt, output_fp))
   }
 
   ## Read result

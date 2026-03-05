@@ -1,15 +1,15 @@
 ##############################################################################
 ##
-## clesso_predict.R — Prediction functions for CLESSO v2
+## clesso_predict.R -- Prediction functions for CLESSO v2
 ##
 ## Given a fitted CLESSO model (from run_clesso.R) and new site / pair data,
 ## predict the alpha (richness) and beta (turnover/similarity) components.
 ##
 ## Functions:
-##   clesso_extract_params()  — extract fitted parameters from TMB results
-##   clesso_predict_alpha()   — predict richness (alpha) at new sites
-##   clesso_predict_beta()    — predict turnover similarity for site pairs
-##   clesso_predict()         — unified prediction for sites and/or pairs
+##   clesso_extract_params()  -- extract fitted parameters from TMB results
+##   clesso_predict_alpha()   -- predict richness (alpha) at new sites
+##   clesso_predict_beta()    -- predict turnover similarity for site pairs
+##   clesso_predict()         -- unified prediction for sites and/or pairs
 ##
 ## Depends on:
 ##   - splines::bs()                   (B-spline basis at new sites)
@@ -341,7 +341,7 @@ clesso_predict_beta <- function(new_pairs,
     var_names <- env_cols
 
   } else {
-    ## No environmental data — geo distance only
+    ## No environmental data -- geo distance only
     env_i <- matrix(nrow = n_pairs, ncol = 0)
     env_j <- matrix(nrow = n_pairs, ncol = 0)
     var_names <- character(0)
@@ -393,7 +393,7 @@ clesso_predict_beta <- function(new_pairs,
   ## eta = eta0 + X %*% beta
   eta <- rep(params$eta0, n_pairs) + as.numeric(X_new %*% params$beta)
 
-  ## S = exp(-eta) — compositional similarity
+  ## S = exp(-eta) -- compositional similarity
   S <- exp(-eta)
 
   ## -----------------------------------------------------------------------

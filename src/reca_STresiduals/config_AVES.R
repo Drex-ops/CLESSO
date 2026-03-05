@@ -31,7 +31,7 @@ config$project_root <- env_or_default(
 ## Shared R module directory
 config$r_dir <- file.path(config$project_root, "src", "shared", "R")
 
-## Python executable (for gen_windows → pyper.py calls)
+## Python executable (for gen_windows -> pyper.py calls)
 ## Default to the project venv Python so pyarrow/geonpy are available
 config$python_exe <- env_or_default(
   "RECA_PYTHON_EXE",
@@ -113,8 +113,9 @@ config$date_offset_years <- as.integer(env_or_default("RECA_DATE_OFFSET_YEARS", 
 ## Grid resolution for site aggregation (degrees)
 config$grid_resolution <- as.numeric(env_or_default("RECA_GRID_RESOLUTION", "0.01"))
 
-## geonpy start year (first year of monthly climate data)
+## geonpy start/end year (range of monthly climate data in .npy files)
 config$geonpy_start_year <- as.integer(env_or_default("RECA_GEONPY_START_YEAR", "1911"))
+config$geonpy_end_year   <- as.integer(env_or_default("RECA_GEONPY_END_YEAR",   "2017"))
 
 ## Parallel settings
 config$cores_to_use <- as.integer(env_or_default(
@@ -133,6 +134,22 @@ config$w_estimation_samples <- as.integer(env_or_default("RECA_W_SAMPLES", "8000
 
 ## Skip env extraction if output file already exists
 config$skip_existing_env <- as.logical(env_or_default("RECA_SKIP_EXISTING_ENV", "TRUE"))
+
+# ---------------------------------------------------------------------------
+# MODIS land cover extraction (2001–2020 only)
+# ---------------------------------------------------------------------------
+config$add_modis        <- as.logical(env_or_default("RECA_ADD_MODIS", "FALSE"))
+config$modis_dir        <- env_or_default("RECA_MODIS_DIR",
+                             file.path(config$data_dir, "modis"))
+config$modis_variables  <- c("nontree", "nonveget", "treecov")
+config$modis_start_year <- 2001L
+config$modis_end_year   <- 2020L
+config$modis_resolution <- "1km"
+config$modis_suffix <- if (config$add_modis) "MODIS_" else ""
+
+## Maximum pairs to use for GDM fitting (NULL = no limit, use all).
+## Set to e.g. 1000000 if the GLM runs out of memory.
+config$max_fit_pairs <- NULL
 
 # ---------------------------------------------------------------------------
 # Environmental variable extraction parameters
@@ -172,4 +189,5 @@ cat("  c_yrs          :", paste(config$c_yrs, collapse = ", "), "\n")
 cat("  w_yrs          :", paste(config$w_yrs, collapse = ", "), "\n")
 cat("  biAverage      :", config$biAverage, "\n")
 cat("  decomposition  :", config$decomposition, "\n")
+cat("  add_modis      :", config$add_modis, "\n")
 cat("  cores          :", config$cores_to_use, "\n")

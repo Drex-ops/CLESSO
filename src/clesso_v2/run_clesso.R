@@ -50,6 +50,7 @@ source(file.path(clesso_config$clesso_dir, "clesso_sampler_optimised.R"))
 source(file.path(clesso_config$clesso_dir, "clesso_prepare_data.R"))
 source(file.path(clesso_config$clesso_dir, "clesso_predict.R"))
 source(file.path(clesso_config$clesso_dir, "clesso_iterative.R"))
+source(file.path(clesso_config$clesso_dir, "clesso_progress_logger.R"))
 
 # ---------------------------------------------------------------------------
 # Load packages
@@ -124,8 +125,10 @@ saveRDS(pairs_dt, file = pairs_file)
 cat(sprintf("  Pairs saved to %s\n", pairs_file))
 
 ## Compute observed species richness per site (lower bound for alpha)
+## Use the pre-filter richness from siteAggregator (counts ALL species ever
+## observed at a site, not just those remaining after date filtering).
 cat("  Computing observed richness per site (lower bound)...\n")
-site_obs_richness <- obs_dt[, .(S_obs = uniqueN(species)), by = .(site_id)]
+site_obs_richness <- unique(obs_dt[, .(site_id, S_obs = richness)])
 cat(sprintf("  Observed richness: mean = %.1f, range = [%d, %d] across %d sites\n",
             mean(site_obs_richness$S_obs),
             min(site_obs_richness$S_obs),
@@ -338,12 +341,18 @@ if (use_iterative) {
   ## ---- Strategy 2: Alternating block-coordinate descent ----
   cat("  Using ITERATIVE (alternating alpha/beta) fitting strategy\n")
 
+  progress_log_file <- file.path(clesso_config$output_dir,
+    paste0("clesso_progress_", clesso_config$run_id, ".log"))
+  cat(sprintf("  Progress log: %s\n", progress_log_file))
+  cat("  Monitor with:  tail -f", progress_log_file, "\n")
+
   iter_result <- clesso_fit_iterative(
     model_data     = model_data,
     config         = clesso_config,
     max_iter       = clesso_config$iterative_max_iter %||% 20L,
     tol            = clesso_config$iterative_tol %||% 1e-4,
-    verbose        = TRUE
+    verbose        = TRUE,
+    progress_log   = progress_log_file
   )
 
   ## Unpack into the same variables used downstream
@@ -417,16 +426,26 @@ if (use_iterative) {
   )
 
   ## Optimise
+  ## Set up progress logger so convergence can be monitored in real time.
+  ## From another terminal run:  tail -f <output_dir>/clesso_progress_<run_id>.log
+  progress_log_file <- file.path(clesso_config$output_dir,
+    paste0("clesso_progress_", clesso_config$run_id, ".log"))
+  logger <- clesso_make_logger(obj, progress_log_file,
+                               print_every = 10L,
+                               phase_label = "joint")
+  cat(sprintf("  Progress log: %s\n", progress_log_file))
+  cat("  Monitor with:  tail -f", progress_log_file, "\n")
   cat("  Fitting model...\n")
   fit <- nlminb(
     start     = obj$par,
-    objective = obj$fn,
-    gradient  = obj$gr,
+    objective = logger$fn,
+    gradient  = logger$gr,
     control   = list(
       eval.max = clesso_config$tmb_eval_max,
       iter.max = clesso_config$tmb_iter_max
     )
   )
+  logger$close()
 
   cat(sprintf("  Convergence: %d (message: %s)\n", fit$convergence, fit$message))
   cat(sprintf("  Final objective: %.4f\n", fit$objective))

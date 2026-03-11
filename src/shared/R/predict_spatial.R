@@ -134,6 +134,69 @@
 
 
 # ---------------------------------------------------------------------------
+# .extract_condition_columns  (internal helper)
+#
+# Extract site-condition values at pixel locations for a given year from a
+# single multi-band GeoTIFF (band i = condition_start_year + i - 1).
+# Returns a data.frame with a single column named
+#   "{col_prefix}{col_suffix}"  (e.g. "spat_condition_1").
+#
+# Parameters:
+#   fit            - fitted GDM list (must contain condition_variable,
+#                    condition_year_range, condition_tif_path)
+#   xy             - matrix [n × 2] of lon/lat coordinates
+#   year           - the prediction year (clamped to condition range)
+#   condition_tif  - path to the multi-band condition GeoTIFF
+#                    (overrides fit$condition_tif_path when provided)
+#   col_prefix     - column name prefix, e.g. "spat_condition" or
+#                    "temp_condition"
+#   col_suffix     - column name suffix, e.g. "_1" or "_2"
+#   verbose        - print progress
+#
+# Returns:
+#   A data.frame with one column per condition variable (currently just one).
+# ---------------------------------------------------------------------------
+.extract_condition_columns <- function(
+    fit,
+    xy,
+    year,
+    condition_tif  = NULL,
+    col_prefix     = "spat_condition",
+    col_suffix     = "_1",
+    verbose        = TRUE
+) {
+  cond_range <- fit$condition_year_range           # c(start, end)
+  yr_clamped <- min(max(as.integer(year), cond_range[1]), cond_range[2])
+  band_idx   <- yr_clamped - cond_range[1] + 1L
+
+  tif_path <- if (!is.null(condition_tif)) condition_tif else fit$condition_tif_path
+  if (is.null(tif_path) || !file.exists(tif_path)) {
+    warning(sprintf("Condition TIF not found: %s -- filling with NA", tif_path))
+    n_pixels <- nrow(xy)
+    result   <- data.frame(matrix(NA_real_, nrow = n_pixels, ncol = 1))
+    colnames(result) <- paste0(col_prefix, col_suffix)
+    return(result)
+  }
+
+  if (verbose) cat(sprintf("  Extracting condition (%s, year = %d -> clamped %d, band %d)...\n",
+                            col_prefix, as.integer(year), yr_clamped, band_idx))
+
+  brk <- raster::brick(tif_path)
+  ras <- brk[[band_idx]]
+  pts <- sp::SpatialPoints(as.data.frame(xy))
+  vals <- raster::extract(ras, pts)
+
+  result <- data.frame(vals)
+  colnames(result) <- paste0(col_prefix, col_suffix)
+
+  if (verbose) cat(sprintf("    %s%s: %d non-NA values\n",
+                            col_prefix, col_suffix,
+                            sum(!is.na(vals))))
+  result
+}
+
+
+# ---------------------------------------------------------------------------
 # transform_spatial_gdm
 #
 # Transform environmental values at each pixel through the fitted I-spline
@@ -315,6 +378,7 @@ predict_spatial_rgb <- function(
     ref_month        = 6L,
     modis_dir        = NULL,
     modis_resolution = "1km",
+    condition_tif    = NULL,
     pca_method       = "prcomp",
     n_components     = 3L,
     stretch          = 2,
@@ -461,10 +525,40 @@ predict_spatial_rgb <- function(
     }
   }
 
+  ## ---- 3c. Extract condition raster (spatial component) ----------------
+  cond_spat_vals <- NULL
+  if (isTRUE(fit$add_condition)) {
+    if (is.null(condition_tif)) {
+      if (exists("config", envir = parent.frame()) &&
+          !is.null(parent.frame()$config$condition_tif_path)) {
+        condition_tif <- parent.frame()$config$condition_tif_path
+      } else if (!is.null(fit$condition_tif_path)) {
+        condition_tif <- fit$condition_tif_path
+      } else {
+        warning("fit$add_condition is TRUE but condition_tif not provided -- condition predictors will be skipped")
+      }
+    }
+    if (!is.null(condition_tif)) {
+      if (verbose) cat(sprintf("\n--- 3c. Extracting condition spatial (year = %d) ---\n", ref_year))
+      cond_spat_vals <- .extract_condition_columns(
+        fit           = fit,
+        xy            = xy,
+        year          = ref_year,
+        condition_tif = condition_tif,
+        col_prefix    = "spat_condition",
+        col_suffix    = "_1",
+        verbose       = verbose
+      )
+      cat(sprintf("  Condition spatial: %d columns × %d pixels\n",
+                  ncol(cond_spat_vals), nrow(cond_spat_vals)))
+    }
+  }
+
   ## ---- 4. Combine env data --------------------------------------------
   if (verbose) cat("\n--- 4. Combining environmental data ---\n")
   env_df <- cbind(env_spatial, as.data.frame(subs_vals))
   if (!is.null(modis_spat_vals)) env_df <- cbind(env_df, modis_spat_vals)
+  if (!is.null(cond_spat_vals))  env_df <- cbind(env_df, cond_spat_vals)
 
   ## Remove pixels with NA environment
   na_rows <- is.na(rowSums(env_df))
@@ -764,6 +858,7 @@ predict_spatiotemporal_rgb <- function(
     env_temporal_yr2  = NULL,
     modis_dir        = NULL,
     modis_resolution = "1km",
+    condition_tif    = NULL,
     signed_temporal  = FALSE,
     alpha            = NULL,
     normalise_blocks = TRUE,
@@ -919,6 +1014,44 @@ predict_spatiotemporal_rgb <- function(
     }
   }
 
+  ## ---- 4d. Extract condition raster (spatial + temporal) ---------------
+  cond_spat_vals <- NULL
+  cond_temp_yr1  <- NULL
+  cond_temp_yr2  <- NULL
+  if (isTRUE(fit$add_condition)) {
+    if (is.null(condition_tif)) {
+      if (exists("config", envir = parent.frame()) &&
+          !is.null(parent.frame()$config$condition_tif_path)) {
+        condition_tif <- parent.frame()$config$condition_tif_path
+      } else if (!is.null(fit$condition_tif_path)) {
+        condition_tif <- fit$condition_tif_path
+      } else {
+        warning("fit$add_condition is TRUE but condition_tif not provided -- condition predictors will be skipped")
+      }
+    }
+    if (!is.null(condition_tif)) {
+      if (verbose) cat(sprintf("\n--- 4d. Extracting condition (spatial @ %d, temporal %d -> %d) ---\n",
+                                ref_year, year1, year2))
+      cond_spat_vals <- .extract_condition_columns(
+        fit = fit, xy = xy, year = ref_year,
+        condition_tif = condition_tif,
+        col_prefix = "spat_condition", col_suffix = "_1", verbose = verbose
+      )
+      cond_temp_yr1 <- .extract_condition_columns(
+        fit = fit, xy = xy, year = year1,
+        condition_tif = condition_tif,
+        col_prefix = "temp_condition", col_suffix = "_1", verbose = verbose
+      )
+      cond_temp_yr2 <- .extract_condition_columns(
+        fit = fit, xy = xy, year = year2,
+        condition_tif = condition_tif,
+        col_prefix = "temp_condition", col_suffix = "_1", verbose = verbose
+      )
+      cat(sprintf("  Condition: %d spatial + %d×2 temporal columns\n",
+                  ncol(cond_spat_vals), ncol(cond_temp_yr1)))
+    }
+  }
+
   ## ---- 5. Clean NAs and sentinels across all env ----------------------
   if (verbose) cat("\n--- 5. Cleaning data ---\n")
   env_spatial_df   <- as.data.frame(env_spatial)
@@ -930,6 +1063,9 @@ predict_spatiotemporal_rgb <- function(
   if (!is.null(modis_spat_vals))  all_env <- cbind(all_env, modis_spat_vals)
   if (!is.null(modis_temp_yr1))   all_env <- cbind(all_env, modis_temp_yr1)
   if (!is.null(modis_temp_yr2))   all_env <- cbind(all_env, modis_temp_yr2)
+  if (!is.null(cond_spat_vals))   all_env <- cbind(all_env, cond_spat_vals)
+  if (!is.null(cond_temp_yr1))    all_env <- cbind(all_env, cond_temp_yr1)
+  if (!is.null(cond_temp_yr2))    all_env <- cbind(all_env, cond_temp_yr2)
   na_rows <- is.na(rowSums(all_env))
   sentinel_rows <- apply(all_env, 1, function(r) any(r == -9999, na.rm = TRUE))
   bad_rows <- na_rows | sentinel_rows
@@ -944,6 +1080,9 @@ predict_spatiotemporal_rgb <- function(
     if (!is.null(modis_spat_vals)) modis_spat_vals <- modis_spat_vals[!bad_rows, , drop = FALSE]
     if (!is.null(modis_temp_yr1))  modis_temp_yr1  <- modis_temp_yr1[!bad_rows, , drop = FALSE]
     if (!is.null(modis_temp_yr2))  modis_temp_yr2  <- modis_temp_yr2[!bad_rows, , drop = FALSE]
+    if (!is.null(cond_spat_vals))  cond_spat_vals  <- cond_spat_vals[!bad_rows, , drop = FALSE]
+    if (!is.null(cond_temp_yr1))   cond_temp_yr1   <- cond_temp_yr1[!bad_rows, , drop = FALSE]
+    if (!is.null(cond_temp_yr2))   cond_temp_yr2   <- cond_temp_yr2[!bad_rows, , drop = FALSE]
     coords         <- coords[!bad_rows, , drop = FALSE]
     n_pixels       <- nrow(coords)
   }
@@ -952,6 +1091,7 @@ predict_spatiotemporal_rgb <- function(
   if (verbose) cat("\n--- 6a. Spatial+substrate I-spline transform ---\n")
   env_spat_combined <- cbind(env_spatial_df, env_subs_df)
   if (!is.null(modis_spat_vals)) env_spat_combined <- cbind(env_spat_combined, modis_spat_vals)
+  if (!is.null(cond_spat_vals))  env_spat_combined <- cbind(env_spat_combined, cond_spat_vals)
   trans_spatial <- transform_spatial_gdm(
     fit = fit, env_df = env_spat_combined,
     weight_by_coef = TRUE, spatial_only = TRUE, verbose = verbose
@@ -962,6 +1102,9 @@ predict_spatiotemporal_rgb <- function(
   ## Add MODIS temporal columns to the temporal env data frames
   if (!is.null(modis_temp_yr1)) env_tmpyr1_df <- cbind(env_tmpyr1_df, modis_temp_yr1)
   if (!is.null(modis_temp_yr2)) env_tmpyr2_df <- cbind(env_tmpyr2_df, modis_temp_yr2)
+  ## Add condition temporal columns to the temporal env data frames
+  if (!is.null(cond_temp_yr1)) env_tmpyr1_df <- cbind(env_tmpyr1_df, cond_temp_yr1)
+  if (!is.null(cond_temp_yr2)) env_tmpyr2_df <- cbind(env_tmpyr2_df, cond_temp_yr2)
   trans_temporal <- transform_temporal_change_gdm(
     fit = fit, env_yr1 = env_tmpyr1_df, env_yr2 = env_tmpyr2_df,
     weight_by_coef = TRUE, signed = signed_temporal, verbose = verbose
@@ -1199,6 +1342,7 @@ predict_spatiotemporal_hsl <- function(
     env_temporal_yr2 = NULL,
     modis_dir        = NULL,
     modis_resolution = "1km",
+    condition_tif    = NULL,
     trans_spatial     = NULL,
     trans_temporal    = NULL,
     coords           = NULL,
@@ -1327,12 +1471,50 @@ predict_spatiotemporal_hsl <- function(
       }
     }
 
+    ## Condition extraction (spatial + temporal, if model includes condition)
+    cond_spat_vals <- NULL
+    cond_temp_yr1  <- NULL
+    cond_temp_yr2  <- NULL
+    if (isTRUE(fit$add_condition)) {
+      if (is.null(condition_tif)) {
+        if (exists("config", envir = parent.frame()) &&
+            !is.null(parent.frame()$config$condition_tif_path)) {
+          condition_tif <- parent.frame()$config$condition_tif_path
+        } else if (!is.null(fit$condition_tif_path)) {
+          condition_tif <- fit$condition_tif_path
+        } else {
+          warning("fit$add_condition is TRUE but condition_tif not provided -- condition predictors will be skipped")
+        }
+      }
+      if (!is.null(condition_tif)) {
+        if (verbose) cat("  Extracting condition (spatial + temporal)...\n")
+        cond_spat_vals <- .extract_condition_columns(
+          fit = fit, xy = xy, year = ref_year,
+          condition_tif = condition_tif,
+          col_prefix = "spat_condition", col_suffix = "_1", verbose = verbose
+        )
+        cond_temp_yr1 <- .extract_condition_columns(
+          fit = fit, xy = xy, year = year1,
+          condition_tif = condition_tif,
+          col_prefix = "temp_condition", col_suffix = "_1", verbose = verbose
+        )
+        cond_temp_yr2 <- .extract_condition_columns(
+          fit = fit, xy = xy, year = year2,
+          condition_tif = condition_tif,
+          col_prefix = "temp_condition", col_suffix = "_1", verbose = verbose
+        )
+      }
+    }
+
     ## Clean
     env_all <- cbind(as.data.frame(env_spatial), as.data.frame(subs_vals),
                      as.data.frame(env_temporal_yr1), as.data.frame(env_temporal_yr2))
     if (!is.null(modis_spat_vals)) env_all <- cbind(env_all, as.data.frame(modis_spat_vals))
     if (!is.null(modis_temp_yr1))  env_all <- cbind(env_all, as.data.frame(modis_temp_yr1))
     if (!is.null(modis_temp_yr2))  env_all <- cbind(env_all, as.data.frame(modis_temp_yr2))
+    if (!is.null(cond_spat_vals))  env_all <- cbind(env_all, as.data.frame(cond_spat_vals))
+    if (!is.null(cond_temp_yr1))   env_all <- cbind(env_all, as.data.frame(cond_temp_yr1))
+    if (!is.null(cond_temp_yr2))   env_all <- cbind(env_all, as.data.frame(cond_temp_yr2))
     bad <- is.na(rowSums(env_all)) |
       apply(env_all, 1, function(r) any(r == -9999, na.rm = TRUE))
     if (any(bad)) {
@@ -1343,11 +1525,15 @@ predict_spatiotemporal_hsl <- function(
       if (!is.null(modis_spat_vals)) modis_spat_vals <- as.data.frame(modis_spat_vals)[!bad, , drop = FALSE]
       if (!is.null(modis_temp_yr1))  modis_temp_yr1  <- as.data.frame(modis_temp_yr1)[!bad, , drop = FALSE]
       if (!is.null(modis_temp_yr2))  modis_temp_yr2  <- as.data.frame(modis_temp_yr2)[!bad, , drop = FALSE]
+      if (!is.null(cond_spat_vals))  cond_spat_vals  <- as.data.frame(cond_spat_vals)[!bad, , drop = FALSE]
+      if (!is.null(cond_temp_yr1))   cond_temp_yr1   <- as.data.frame(cond_temp_yr1)[!bad, , drop = FALSE]
+      if (!is.null(cond_temp_yr2))   cond_temp_yr2   <- as.data.frame(cond_temp_yr2)[!bad, , drop = FALSE]
       coords           <- coords[!bad, , drop = FALSE]
     }
 
     env_spat_subs <- cbind(as.data.frame(env_spatial), as.data.frame(subs_vals))
     if (!is.null(modis_spat_vals)) env_spat_subs <- cbind(env_spat_subs, as.data.frame(modis_spat_vals))
+    if (!is.null(cond_spat_vals))  env_spat_subs <- cbind(env_spat_subs, as.data.frame(cond_spat_vals))
     trans_spatial <- transform_spatial_gdm(
       fit = fit, env_df = env_spat_subs,
       weight_by_coef = TRUE, spatial_only = TRUE, verbose = verbose)
@@ -1357,6 +1543,9 @@ predict_spatiotemporal_hsl <- function(
     env_yr2_df <- as.data.frame(env_temporal_yr2)
     if (!is.null(modis_temp_yr1)) env_yr1_df <- cbind(env_yr1_df, modis_temp_yr1)
     if (!is.null(modis_temp_yr2)) env_yr2_df <- cbind(env_yr2_df, modis_temp_yr2)
+    ## Add condition temporal columns before temporal transform
+    if (!is.null(cond_temp_yr1)) env_yr1_df <- cbind(env_yr1_df, cond_temp_yr1)
+    if (!is.null(cond_temp_yr2)) env_yr2_df <- cbind(env_yr2_df, cond_temp_yr2)
     trans_temporal <- transform_temporal_change_gdm(
       fit = fit, env_yr1 = env_yr1_df, env_yr2 = env_yr2_df,
       weight_by_coef = TRUE, signed = signed_temporal, verbose = verbose)
@@ -1656,6 +1845,7 @@ predict_spatial_lmds <- function(
     ref_month       = 6L,
     modis_dir       = NULL,
     modis_resolution = "1km",
+    condition_tif   = NULL,
     transformed     = NULL,
     coords          = NULL,
     n_landmarks     = 500L,
@@ -1761,8 +1951,32 @@ predict_spatial_lmds <- function(
       }
     }
 
+    ## Condition extraction (spatial component, if model includes condition)
+    cond_spat_vals <- NULL
+    if (isTRUE(fit$add_condition)) {
+      if (is.null(condition_tif)) {
+        if (exists("config", envir = parent.frame()) &&
+            !is.null(parent.frame()$config$condition_tif_path)) {
+          condition_tif <- parent.frame()$config$condition_tif_path
+        } else if (!is.null(fit$condition_tif_path)) {
+          condition_tif <- fit$condition_tif_path
+        } else {
+          warning("fit$add_condition is TRUE but condition_tif not provided -- condition predictors will be skipped")
+        }
+      }
+      if (!is.null(condition_tif)) {
+        if (verbose) cat("  Extracting condition spatial...\n")
+        cond_spat_vals <- .extract_condition_columns(
+          fit = fit, xy = xy, year = ref_year,
+          condition_tif = condition_tif,
+          col_prefix = "spat_condition", col_suffix = "_1", verbose = verbose
+        )
+      }
+    }
+
     env_df <- cbind(as.data.frame(env_spatial), as.data.frame(subs_vals))
     if (!is.null(modis_spat_vals)) env_df <- cbind(env_df, modis_spat_vals)
+    if (!is.null(cond_spat_vals))  env_df <- cbind(env_df, cond_spat_vals)
     na_rows <- is.na(rowSums(env_df))
     sentinel <- apply(env_df, 1, function(r) any(r == -9999, na.rm = TRUE))
     bad <- na_rows | sentinel
@@ -2017,6 +2231,7 @@ spatial_dissimilarity_from_ref <- function(
     ref_month       = 6L,
     modis_dir       = NULL,
     modis_resolution = "1km",
+    condition_tif   = NULL,
     chunk_size      = 50000L,
     verbose         = TRUE
 ) {
@@ -2107,8 +2322,30 @@ spatial_dissimilarity_from_ref <- function(
       }
     }
 
+    ## Condition extraction (spatial component, if model includes condition)
+    cond_spat_vals <- NULL
+    if (isTRUE(fit$add_condition)) {
+      if (is.null(condition_tif)) {
+        if (exists("config", envir = parent.frame()) &&
+            !is.null(parent.frame()$config$condition_tif_path)) {
+          condition_tif <- parent.frame()$config$condition_tif_path
+        } else if (!is.null(fit$condition_tif_path)) {
+          condition_tif <- fit$condition_tif_path
+        }
+      }
+      if (!is.null(condition_tif)) {
+        if (verbose) cat("  Extracting condition spatial...\n")
+        cond_spat_vals <- .extract_condition_columns(
+          fit = fit, xy = xy, year = ref_year,
+          condition_tif = condition_tif,
+          col_prefix = "spat_condition", col_suffix = "_1", verbose = verbose
+        )
+      }
+    }
+
     env_df <- cbind(as.data.frame(env_spatial), as.data.frame(subs_vals))
     if (!is.null(modis_spat_vals)) env_df <- cbind(env_df, modis_spat_vals)
+    if (!is.null(cond_spat_vals))  env_df <- cbind(env_df, cond_spat_vals)
     na_rows <- is.na(rowSums(env_df))
     sentinel <- apply(env_df, 1, function(r) any(r == -9999, na.rm = TRUE))
     bad <- na_rows | sentinel

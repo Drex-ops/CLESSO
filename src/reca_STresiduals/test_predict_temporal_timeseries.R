@@ -161,7 +161,7 @@ cat(sprintf("  Mean dissimilarity range: [%.4f (%d), %.4f (%d)]\n",
 # 6. Plots
 # ---------------------------------------------------------------------------
 cat("\n--- Generating plots ---\n")
-out_dir <- config$output_dir
+out_dir <- config$run_output_dir
 if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
 
 ## MODIS suffix for output filenames (derived from fit metadata)

@@ -152,6 +152,44 @@ config$modis_suffix <- if (config$add_modis) "MODIS_" else ""
 config$max_fit_pairs <- NULL
 
 # ---------------------------------------------------------------------------
+# Unique run folder
+# ---------------------------------------------------------------------------
+config$run_id <- env_or_default("RECA_RUN_ID", {
+  tag_parts <- c(
+    config$species_group,
+    if (config$add_modis) "MODIS" else NULL,
+    format(Sys.time(), "%Y%m%dT%H%M%S")
+  )
+  paste(tag_parts, collapse = "_")
+})
+
+config$run_output_dir <- file.path(config$output_dir, config$run_id)
+
+save_config_snapshot <- function(cfg = config) {
+  snap_file <- file.path(cfg$run_output_dir, "config_snapshot.txt")
+  lines <- c(
+    paste("# RECA config snapshot \u2014", Sys.time()),
+    paste("# Run ID:", cfg$run_id),
+    "",
+    paste("species_group      :", cfg$species_group),
+    paste("obs_csv            :", cfg$obs_csv),
+    paste("nMatch             :", cfg$nMatch),
+    paste("climate_window     :", cfg$climate_window),
+    paste("biAverage          :", cfg$biAverage),
+    paste("decomposition      :", cfg$decomposition),
+    paste("add_modis          :", cfg$add_modis),
+    if (cfg$add_modis) paste("modis_dir          :", cfg$modis_dir) else NULL,
+    paste("output_dir         :", cfg$output_dir),
+    paste("run_output_dir     :", cfg$run_output_dir),
+    paste("fit_path           :", cfg$fit_path),
+    paste("cores              :", cfg$cores_to_use),
+    ""
+  )
+  writeLines(lines, snap_file)
+  cat(sprintf("  Config snapshot saved: %s\n", snap_file))
+}
+
+# ---------------------------------------------------------------------------
 # Environmental variable extraction parameters
 #
 # Each element is a list with:
@@ -173,16 +211,21 @@ config$env_params <- list(
 )
 
 # ---------------------------------------------------------------------------
-# Create output directory if needed
+# Create output directories if needed
 # ---------------------------------------------------------------------------
 if (!dir.exists(config$output_dir)) {
   dir.create(config$output_dir, recursive = TRUE)
 }
+if (!dir.exists(config$run_output_dir)) {
+  dir.create(config$run_output_dir, recursive = TRUE)
+}
 
 cat("RECA config loaded.\n")
 cat("  Species group  :", config$species_group, "\n")
+cat("  Run ID         :", config$run_id, "\n")
 cat("  Data dir       :", config$data_dir, "\n")
 cat("  Output dir     :", config$output_dir, "\n")
+cat("  Run output dir :", config$run_output_dir, "\n")
 cat("  nMatch         :", config$nMatch, "\n")
 cat("  climate_window :", config$climate_window, "years\n")
 cat("  c_yrs          :", paste(config$c_yrs, collapse = ", "), "\n")

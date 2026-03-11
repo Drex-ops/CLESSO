@@ -87,7 +87,7 @@ print(summary(result[, c("temporal_distance", "linear_predictor",
 # 5. Plots
 # ---------------------------------------------------------------------------
 cat("\n--- Generating plots ---\n")
-out_dir <- config$output_dir
+out_dir <- config$run_output_dir
 if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
 
 ## Colour palette: blue (low change) -> red (high change)

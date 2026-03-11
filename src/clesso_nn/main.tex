@@ -1,0 +1,210 @@
+\documentclass{article}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{bm}
+
+\title{ObsPair modelling -- Neural Network variant}
+\author{Andrew Hoskins}
+\date{March 2026}
+
+\begin{document}
+
+\maketitle
+
+\section{Background}
+
+This document describes a neural network implementation of the CLESSO (Community-Level Species Similarity Observations) model. The core ecological framework -- estimating species richness ($\alpha$) and compositional turnover ($\beta$) from observation-pair data -- is identical to the TMB version described in the companion document. The key difference is that the parametric sub-models (linear terms, P-splines, I-splines) are replaced with neural networks, while preserving the ecological constraints that make the model interpretable.
+
+The motivation for this variant is computational. The TMB implementation relies on a Laplace approximation over site-level random effects ($u_i$), which requires repeated sparse Cholesky factorisations of the joint precision matrix. For large numbers of sites ($>10^4$), this becomes prohibitively expensive -- often requiring days to converge. A neural network trained with mini-batch stochastic gradient descent eliminates the Laplace approximation entirely, reducing training from days to minutes while retaining (and potentially improving upon) the flexibility of the spline-based approach.
+
+\section{Pair constructs and likelihood}
+
+The data pipeline is shared with the TMB variant. We sample a set of observation pairs $P = P_{\text{within}} \cup P_{\text{between}}$ from species occurrence records. For each pair $p$ we record:
+
+\begin{itemize}
+    \item $i_p, j_p$: the sites involved
+    \item $y_p = 0$ if the species identities match, $y_p = 1$ otherwise
+    \item $w_p$: a weight that balances the four cells \{within-match, within-mismatch, between-match, between-mismatch\}
+\end{itemize}
+
+Under the equal-draw assumption from Hoskins et al.\ (2020), the match probability decomposes as:
+
+\begin{equation}
+    p_p = \begin{cases}
+        \dfrac{1}{\alpha_i} & \text{if } i_p = j_p \text{ (within-site pair)} \\[10pt]
+        S_{i,j} \cdot \dfrac{\alpha_i + \alpha_j}{2\,\alpha_i\,\alpha_j} & \text{if } i_p \neq j_p \text{ (between-site pair)}
+    \end{cases}
+\end{equation}
+
+where $\alpha_i > 1$ is the species richness at site $i$ and $S_{i,j} = \exp(-\eta_{i,j}) \in [0,1]$ is the S\o rensen-type similarity derived from turnover $\eta_{i,j} \geq 0$.
+
+The loss function is the weighted negative log-likelihood of the Bernoulli model plus a regularisation penalty:
+
+\begin{equation}
+    \mathcal{L} = -\frac{1}{\sum_p w_p}\sum_{p \in P} w_p \Big[(1-y_p)\log p_p + y_p \log(1-p_p)\Big] + \lambda_{\text{lb}} \cdot \mathcal{R}_{\alpha}
+\end{equation}
+
+This is identical to the TMB formulation. The difference lies entirely in \textit{how $\alpha_i$ and $\eta_{i,j}$ are parameterised}.
+
+\section{Alpha sub-model: richness network}
+
+In the TMB model, richness is parameterised as:
+
+\begin{equation*}
+    \log(\alpha_i - 1) = \theta_0 + \mathbf{z}_i^\top\bm{\theta} + \sum_k g_k(z_{k,i}^{\text{raw}}) + u_i
+\end{equation*}
+
+with linear terms, P-spline smooths $g_k(\cdot)$, and site-level random effects $u_i \sim \mathcal{N}(0, \sigma_u^2)$.
+
+In the neural network variant, all of these components are replaced by a single multi-layer perceptron (MLP):
+
+\begin{equation}
+    \alpha_i = \text{softplus}\!\left(f_\alpha(\mathbf{z}_i; \bm{W}_\alpha)\right) + 1
+\end{equation}
+
+where $f_\alpha$ is a feedforward network with $L$ hidden layers:
+
+\begin{equation}
+    f_\alpha(\mathbf{z}) = \mathbf{W}^{(L+1)}\,\sigma\!\left(\mathbf{W}^{(L)}\,\sigma\!\left(\cdots\sigma\!\left(\mathbf{W}^{(1)}\,\mathbf{z} + \mathbf{b}^{(1)}\right)\cdots\right) + \mathbf{b}^{(L)}\right) + b^{(L+1)}
+\end{equation}
+
+Here $\sigma(\cdot)$ is a nonlinear activation (ReLU by default), and $\mathbf{W}^{(\ell)}, \mathbf{b}^{(\ell)}$ are the weights and biases at layer $\ell$. The default architecture uses three hidden layers with dimensions $[64, 32, 16]$ with dropout regularisation between layers.
+
+The output activation $\text{softplus}(\cdot) + 1$ guarantees $\alpha_i > 1$, matching the TMB constraint. The key advantage is that the network simultaneously learns:
+\begin{itemize}
+    \item the linear effects captured by $\mathbf{z}^\top\bm{\theta}$ in the TMB model
+    \item the nonlinear smooth terms $g_k(\cdot)$ captured by P-splines
+    \item the site-level heterogeneity captured by random effects $u_i$
+\end{itemize}
+
+all as a single differentiable function, without requiring the Laplace approximation needed by the random effects.
+
+\textbf{Note on random effects.} The flexibility of the hidden layers largely subsumes what $u_i$ captured in the TMB model. The P-spline basis with $K$ knots per covariate provides $\mathcal{O}(K)$ degrees of freedom; the network provides $\mathcal{O}(\sum_\ell d_\ell \cdot d_{\ell+1})$ parameters, which is typically much larger. If additional site-level variation is needed, a learned per-site embedding could be added, though this risks overfitting.
+
+\subsection{Alpha lower-bound penalty}
+
+As in the TMB model, a soft one-sided penalty discourages $\alpha_i < S_{\text{obs},i}$ (the observed species count):
+
+\begin{equation}
+    \mathcal{R}_\alpha = \frac{1}{|B|}\sum_{i \in B}\left[\frac{\log(1 + e^{\kappa(S_{\text{obs},i} - \alpha_i)})}{\kappa}\right]^2
+\end{equation}
+
+where $\kappa = 10$ sharpens the hinge boundary and $B$ is the current mini-batch. This is the same softplus-squared penalty used in the TMB model, applied to both $\alpha_i$ and $\alpha_j$ in each pair by indexing into the observed-richness vector.
+
+\section{Beta sub-model: monotone turnover network}
+
+\subsection{TMB approach}
+
+In the TMB model, turnover is parameterised using I-spline basis functions with non-negative coefficients:
+
+\begin{equation*}
+    \eta_{i,j} = \exp(\eta_0^{\text{raw}}) + \sum_{l=1}^{m}\sum_{s=1}^{S} \exp(\beta_{l,s}^{\text{raw}}) \cdot \left|I_s(x_{l,i}) - I_s(x_{l,j})\right|
+\end{equation*}
+
+where $I_s(\cdot)$ are monotonically non-decreasing I-spline bases and the exponentiation of the raw coefficients ensures $\beta_{l,s} \geq 0$. The composition of non-negative coefficients with monotone bases guarantees that $\eta_{i,j}$ is non-decreasing in each $|x_{l,i} - x_{l,j}|$.
+
+\subsection{Neural network approach: monotone network}
+
+We replace the I-spline transform with a \textbf{monotone neural network}. The key idea is that a composition of linear layers with \textit{non-negative weights} and \textit{monotone activation functions} is itself monotone:
+
+\begin{equation}
+    \eta_{i,j} = \text{softplus}\!\left(h_\beta(\bm{\Delta}_{i,j}; \bm{W}_\beta)\right)
+\end{equation}
+
+where $\bm{\Delta}_{i,j} = \left[|\tilde{x}_{1,i} - \tilde{x}_{1,j}|, \ldots, |\tilde{x}_{m,i} - \tilde{x}_{m,j}|\right] \geq \mathbf{0}$ is the vector of standardised environmental distances and $h_\beta$ is a monotone MLP:
+
+\begin{equation}
+    h_\beta(\bm{\Delta}) = \tilde{\mathbf{W}}^{(L+1)}\,\sigma\!\left(\tilde{\mathbf{W}}^{(L)}\,\sigma\!\left(\cdots\sigma\!\left(\tilde{\mathbf{W}}^{(1)}\,\bm{\Delta} + \mathbf{b}^{(1)}\right)\cdots\right) + \mathbf{b}^{(L)}\right) + b^{(L+1)}
+\end{equation}
+
+The critical difference from the alpha network is the weight parameterisation. Each weight matrix is constrained to be non-negative via a softplus transform on unconstrained parameters:
+
+\begin{equation}
+    \tilde{\mathbf{W}}^{(\ell)} = \text{softplus}(\mathbf{W}^{(\ell)}_{\text{raw}}) \geq 0
+\end{equation}
+
+\textbf{Monotonicity proof.} Consider the composition at any layer $\ell$:
+\begin{enumerate}
+    \item The input $\mathbf{x}^{(\ell-1)} \geq \mathbf{0}$ (base case: $\bm{\Delta} \geq 0$)
+    \item The linear map $\tilde{\mathbf{W}}^{(\ell)}\mathbf{x}^{(\ell-1)} + \mathbf{b}^{(\ell)}$ is non-decreasing in $\mathbf{x}^{(\ell-1)}$ because $\tilde{\mathbf{W}}^{(\ell)} \geq 0$
+    \item ReLU is monotone non-decreasing, so $\sigma(\cdot)$ preserves the ordering
+    \item By induction, the full composition is monotone non-decreasing in each input dimension
+\end{enumerate}
+
+This directly generalises the TMB approach: the I-spline + non-negative coefficient structure \textit{is} a single-layer monotone network with a specific (spline) feature transform. The multi-layer version is a universal approximator for monotone functions (Daniels \& Velikova, 2010), so it can represent any turnover response shape including the piecewise-quadratic curves of the I-spline model as a special case.
+
+The final $\text{softplus}(\cdot)$ ensures $\eta_{i,j} \geq 0$, so $S_{i,j} = \exp(-\eta_{i,j}) \in [0, 1]$.
+
+\subsection{Comparison}
+
+\begin{center}
+\begin{tabular}{l|l|l}
+    & TMB (I-spline + GDM) & Neural network (monotone MLP) \\
+    \hline
+    Monotonicity & Non-negative coefficients $\times$ I-splines & Non-negative weights $\times$ ReLU \\
+    Flexibility & $S \times m$ parameters (3 splines $\times$ $m$ vars) & $\sum_\ell d_\ell \cdot d_{\ell+1}$ parameters \\
+    Interactions & None (additive across variables) & Learned via hidden layers \\
+    Interpretability & Per-variable response curves & Per-variable sweeps (post-hoc) \\
+\end{tabular}
+\end{center}
+
+A notable difference is that the neural network can capture \textbf{interactions between environmental variables} -- for example, the effect of temperature distance on turnover might depend on the magnitude of precipitation distance. The I-spline model is strictly additive across variables.
+
+\section{Optimisation}
+
+The TMB model is fitted via maximum marginal likelihood using \texttt{nlminb}, with the Laplace approximation integrating over the random effects $\mathbf{u}$. Each function evaluation requires a sparse Cholesky factorisation of the joint precision matrix, which is $\mathcal{O}(n)$ in the number of sites but with a large constant.
+
+The neural network is fitted via mini-batch stochastic gradient descent using Adam (Kingma \& Ba, 2015). Each parameter update costs $\mathcal{O}(B \cdot D)$ where $B$ is the batch size and $D$ is the total number of network parameters. There is no Hessian or Laplace approximation.
+
+\begin{center}
+\begin{tabular}{l|l|l}
+    & TMB & Neural network \\
+    \hline
+    Optimiser & \texttt{nlminb} (quasi-Newton) & Adam (adaptive SGD) \\
+    Random effects & Laplace approximation & None (absorbed by network) \\
+    Per-iteration cost & Sparse Cholesky ($\sim$ seconds) & Matrix multiplies ($\sim$ milliseconds) \\
+    Typical runtime & Hours to days & Minutes \\
+    Hardware & CPU only & CPU, GPU, or Apple MPS \\
+\end{tabular}
+\end{center}
+
+Additional training details:
+\begin{itemize}
+    \item \textbf{Learning rate scheduling}: ReduceLROnPlateau (halve LR after 5 epochs without validation improvement)
+    \item \textbf{Early stopping}: halt training if validation loss does not improve for 15 consecutive epochs
+    \item \textbf{Gradient clipping}: max norm of 5.0 to stabilise training
+    \item \textbf{Weight decay}: $L_2$ penalty of $10^{-4}$ on all parameters (standard regularisation)
+    \item \textbf{Dropout}: applied between hidden layers (default rate 0.1) to reduce overfitting
+\end{itemize}
+
+\section{Relationship to TMB model}
+
+The neural network variant is not a different model in the ecological sense. The likelihood (equation 2), the match probability decomposition (equation 1), and the pair sampling strategy are all identical. What changes is the function class used to map covariates to $\alpha$ and environmental distances to $\eta$:
+
+\begin{center}
+\begin{tabular}{l|l|l}
+    Component & TMB & Neural network \\
+    \hline
+    $\alpha_i$ & Linear + P-spline + random effect & MLP with softplus output \\
+    $\eta_{i,j}$ & I-spline + non-negative coefficients & Monotone MLP with softplus output \\
+    $p_p$ & Same formula & Same formula \\
+    $\mathcal{L}$ & Same weighted Bernoulli NLL & Same weighted Bernoulli NLL \\
+    $\mathcal{R}_\alpha$ & Same softplus$^2$ lower-bound penalty & Same softplus$^2$ lower-bound penalty \\
+\end{tabular}
+\end{center}
+
+The neural network can be viewed as replacing the manually specified basis functions (B-splines, I-splines) with learned feature representations, and replacing the Gaussian random effects with implicit regularisation through dropout and weight decay.
+
+\section{Further thoughts}
+
+\begin{itemize}
+    \item All the interpretive considerations from the TMB document apply: $\alpha$ represents ``effective richness under the recording process'' rather than true species counts, and the equal-draw assumption means our estimates conflate richness with evenness
+    \item The monotone network can be interrogated post-hoc by sweeping each environmental dimension while holding others at zero (or their mean), producing per-variable response curves analogous to the I-spline partial functions in GDM
+    \item The ability to capture variable interactions is a double-edged sword -- more flexible, but harder to interpret. Careful examination of joint response surfaces is recommended
+    \item The network's richness predictions should be compared against the TMB P-spline predictions on the same data to assess consistency between the two approaches
+    \item If uncertainty quantification is needed (which the TMB \texttt{sdreport} provides), options include MC dropout at prediction time, deep ensembles, or training multiple models with different random seeds
+    \item The data pipeline (Steps 1--4 of the R pipeline) is shared between both approaches, so switching between TMB and NN fitting requires only an export step and a single Python command
+\end{itemize}
+
+\end{document}

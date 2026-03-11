@@ -48,7 +48,7 @@ rasterOptions(tmpdir = config$raster_tmpdir)
 # Load the saved obsPairs table
 # ---------------------------------------------------------------------------
 obspairs_file <- file.path(
-  config$output_dir,
+  config$run_output_dir,
   paste0("ObsPairsTable_RECA_", config$species_group, "_WindowTestRuns.rds")
 )
 if (!file.exists(obspairs_file)) stop(paste("ObsPairs file not found:", obspairs_file))

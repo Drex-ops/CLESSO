@@ -24,10 +24,10 @@ modis_tag <- if (isTRUE(config$add_modis)) "_MODIS" else ""
 dissim_prefix <- sprintf("%s_%dyr_%d_to_%d%s",
                          config$species_group, config$climate_window, year1, year2,
                          modis_tag)
-dissim_tif <- file.path(config$output_dir,
+dissim_tif <- file.path(config$run_output_dir,
                         paste0(dissim_prefix, "_temporal_dissimilarity.tif"))
 ibra_shp   <- file.path(config$data_dir, "ibra51_reg", "ibra51_regions.shp")
-out_dir    <- config$output_dir
+out_dir    <- config$run_output_dir
 if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
 
 ## Label used in plot titles

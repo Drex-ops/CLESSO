@@ -62,7 +62,7 @@ cat(sprintf("  Run full:    %s\n\n", RUN_FULL_ENV))
 # Load the saved obsPairs table (from steps 1-5)
 # ---------------------------------------------------------------------------
 obspairs_file <- file.path(
-  config$output_dir,
+  config$run_output_dir,
   paste0("ObsPairsTable_RECA_", config$species_group, "_WindowTestRuns.rds")
 )
 if (!file.exists(obspairs_file)) stop(paste("ObsPairs file not found:", obspairs_file))
@@ -349,7 +349,7 @@ if (all_pass && RUN_FULL_ENV) {
   parts <- parts[!sapply(parts, is.null)]
   obsPairs_combined <- do.call(cbind, parts)
 
-  env_file <- file.path(config$output_dir, paste0(save_prefix, "ObsEnvTable.RData"))
+  env_file <- file.path(config$run_output_dir, paste0(save_prefix, "ObsEnvTable.RData"))
   save(obsPairs_combined, file = env_file)
   cat(sprintf("  Saved: %s\n", basename(env_file)))
   cat(sprintf("  Final table: %d rows x %d cols\n\n", nrow(obsPairs_combined), ncol(obsPairs_combined)))

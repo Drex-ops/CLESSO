@@ -74,9 +74,12 @@ RsqGLM <- function(obs = NULL, pred = NULL, model = NULL) {
 
 # ---------------------------------------------------------------------------
 # inv.logit - Inverse logit (logistic) function
+#
+# Uses plogis() for numerical stability (avoids Inf/Inf -> NaN for
+# extreme values, and handles NA inputs gracefully).
 # ---------------------------------------------------------------------------
 inv.logit <- function(x) {
-  exp(x) / (1 + exp(x))
+  plogis(x)
 }
 
 # ---------------------------------------------------------------------------

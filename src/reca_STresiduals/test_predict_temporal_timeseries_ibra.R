@@ -24,7 +24,7 @@ ibra_shp     <- file.path(config$data_dir, "ibra51_reg", "ibra51_regions.shp")
 npy_src      <- config$npy_src
 python_exe   <- config$python_exe
 pyper_script <- config$pyper_script
-out_dir      <- config$output_dir
+out_dir      <- config$run_output_dir
 
 ## Time-series parameters
 baseline_year  <- 1950L
@@ -204,11 +204,32 @@ for (ri in seq_along(active_regions)) {
       mat_distance[, yi] <- res$temporal_distance
       mat_dissim[, yi]   <- res$dissimilarity
       mat_prob[, yi]     <- res$predicted_prob
+
+      ## Track NA rate for this year
+      n_na <- sum(is.na(res$dissimilarity))
+      if (n_na > 0 && (yi %% 10 == 1 || yi == n_years)) {
+        cat(sprintf("    -> %d / %d sites had NA for year %d (%.1f%%)\n",
+                    n_na, n_sites, yr, 100 * n_na / n_sites))
+      }
     }
   }
 
   reg_time <- (proc.time() - reg_t0)["elapsed"]
   cat(sprintf("  Region '%s' complete in %.1f min\n", reg, reg_time / 60))
+
+  ## NA summary for this region
+  total_cells <- prod(dim(mat_dissim))
+  na_cells    <- sum(is.na(mat_dissim))
+  if (na_cells > 0) {
+    cat(sprintf("  NA summary: %d / %d cells (%.1f%%) across %d sites × %d years\n",
+                na_cells, total_cells, 100 * na_cells / total_cells, n_sites, n_years))
+    ## Per-site NA rate
+    site_na_pct <- rowMeans(is.na(mat_dissim)) * 100
+    cat(sprintf("  Sites with >50%% NA: %d / %d | Sites with 100%% NA: %d / %d\n",
+                sum(site_na_pct > 50), n_sites, sum(site_na_pct == 100), n_sites))
+  } else {
+    cat("  No NAs in dissimilarity matrix\n")
+  }
 
   results[[reg]] <- list(
     sites        = samp,
@@ -221,6 +242,17 @@ for (ri in seq_along(active_regions)) {
 
 total_time <- (proc.time() - total_t0)["elapsed"]
 cat(sprintf("\n--- All regions complete: %.1f min total ---\n", total_time / 60))
+
+## Overall NA summary across all regions
+cat("\n--- NA Summary ---\n")
+for (reg in active_regions) {
+  r <- results[[reg]]
+  if (is.null(r)) next
+  total_c <- prod(dim(r$mat_dissim))
+  na_c    <- sum(is.na(r$mat_dissim))
+  cat(sprintf("  %-40s : %5.1f%% NA  (%d / %d)\n",
+              reg, 100 * na_c / max(total_c, 1), na_c, total_c))
+}
 
 # ---------------------------------------------------------------------------
 # 6. Save results
@@ -255,6 +287,11 @@ for (reg in active_regions) {
   r <- results[[reg]]
   if (is.null(r) || all(is.na(r$mat_dissim))) next
 
+  ## Count valid (non-NA) values per year; skip years with < 3
+  n_valid <- colSums(!is.na(r$mat_dissim))
+  ok_yrs  <- n_valid >= 3
+  if (sum(ok_yrs) < 2) next    # need at least 2 plottable years
+
   q10 <- apply(r$mat_dissim, 2, quantile, 0.10, na.rm = TRUE)
   q25 <- apply(r$mat_dissim, 2, quantile, 0.25, na.rm = TRUE)
   q50 <- apply(r$mat_dissim, 2, quantile, 0.50, na.rm = TRUE)
@@ -262,7 +299,15 @@ for (reg in active_regions) {
   q90 <- apply(r$mat_dissim, 2, quantile, 0.90, na.rm = TRUE)
   mean_d <- colMeans(r$mat_dissim, na.rm = TRUE)
 
-  y_range <- range(c(q10, q90), na.rm = TRUE)
+  ## Replace NaN/Inf from all-NA columns with NA for safe plotting
+  q10[!is.finite(q10)]       <- NA
+  q25[!is.finite(q25)]       <- NA
+  q50[!is.finite(q50)]       <- NA
+  q75[!is.finite(q75)]       <- NA
+  q90[!is.finite(q90)]       <- NA
+  mean_d[!is.finite(mean_d)] <- NA
+
+  y_range <- range(c(q10[ok_yrs], q90[ok_yrs]), na.rm = TRUE)
   if (all(is.finite(y_range)) && diff(y_range) > 0) {
     ## Add 5% padding
     pad <- diff(y_range) * 0.05
@@ -428,7 +473,15 @@ for (page in seq_len(n_pages)) {
     q75 <- apply(r$mat_dissim, 2, quantile, 0.75, na.rm = TRUE)
     q90 <- apply(r$mat_dissim, 2, quantile, 0.90, na.rm = TRUE)
 
-    y_range <- range(c(q10, q90), na.rm = TRUE)
+    ## Sanitise non-finite values from all-NA columns
+    q10[!is.finite(q10)] <- NA
+    q25[!is.finite(q25)] <- NA
+    q50[!is.finite(q50)] <- NA
+    q75[!is.finite(q75)] <- NA
+    q90[!is.finite(q90)] <- NA
+
+    ok_yrs  <- colSums(!is.na(r$mat_dissim)) >= 3
+    y_range <- range(c(q10[ok_yrs], q90[ok_yrs]), na.rm = TRUE)
     if (!all(is.finite(y_range)) || diff(y_range) == 0) {
       plot.new()
       next

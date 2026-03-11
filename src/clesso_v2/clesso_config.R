@@ -65,7 +65,7 @@ clesso_config$npy_src <- env_or_default(
 ## Substrate raster (.grd)
 clesso_config$substrate_raster <- env_or_default(
   "CLESSO_SUBSTRATE_RASTER",
-  file.path(clesso_config$data_dir, "SUBS_brk_AVES.grd")
+  file.path(clesso_config$data_dir, "SUBS_brk_VAS.grd")
 )
 
 ## Reference raster for grid alignment (.flt)
@@ -85,10 +85,10 @@ clesso_config$feather_tmpdir <- env_or_default("CLESSO_FEATHER_TMPDIR", tempdir(
 # ---------------------------------------------------------------------------
 
 ## Species group
-clesso_config$species_group <- env_or_default("CLESSO_SPECIES_GROUP", "AVES")
+clesso_config$species_group <- env_or_default("CLESSO_SPECIES_GROUP", "VAS")
 
 ## Input CSV filename (relative to data_dir)
-clesso_config$obs_csv <- env_or_default("CLESSO_OBS_CSV", "filtered_data_2018-11-20.csv")
+clesso_config$obs_csv <- env_or_default("CLESSO_OBS_CSV", "ala_vas_2026-03-03.csv")
 
 ## Date bounds for observation filtering
 clesso_config$min_date <- as.Date(env_or_default("CLESSO_MIN_DATE", "1970-01-01"))

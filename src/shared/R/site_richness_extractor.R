@@ -114,10 +114,12 @@ site.richness.extractor.bigData <- function(frog.auGrid,
   ## Build proxy: record -> site -> species
   m1 <- site_species_proxy(site_sp, site_ids)
 
-  ## Attach site-level richness
-  ones    <- rep(1, nr)
-  siteRich <- bySum(ones, frog.auGrid$ID)
-  frog.auGrid$Site.Richness <- rep(siteRich, siteRich)
+  ## Attach site-level richness (unique species count per site)
+  ## Use rowSums on the binary site×species matrix for true species count,
+  ## NOT bySum on records (which gives record count, not species count).
+  site_richness <- as.integer(rowSums(site_sp))  # n_sites vector
+  ## Expand back to per-record: each record gets its site's richness
+  frog.auGrid$Site.Richness <- site_richness[site_ids]
 
   ## Assign to global environment (legacy behaviour for downstream functions)
   assign("m1", m1, pos = .GlobalEnv)

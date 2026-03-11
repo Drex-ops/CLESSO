@@ -30,6 +30,7 @@ cat("=== Spatial Prediction Comparison: PCA vs Landmark MDS vs Reference ===\n\n
 # ---------------------------------------------------------------------------
 this_dir <- tryCatch(dirname(sys.frame(1)$ofile), error = function(e) getwd())
 source(file.path(this_dir, "config.R"))
+save_config_snapshot()
 
 project_root <- config$project_root
 fit_path     <- config$fit_path
@@ -38,7 +39,7 @@ subs_raster  <- config$substrate_raster
 npy_src      <- config$npy_src
 python_exe   <- config$python_exe
 pyper_script <- config$pyper_script
-out_dir      <- config$output_dir
+out_dir      <- config$run_output_dir
 
 ref_year  <- 1960L
 ref_month <- 6L

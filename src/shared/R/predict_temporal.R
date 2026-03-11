@@ -78,6 +78,7 @@ predict_temporal_gdm <- function(
     pyper_script   = NULL,
     modis_dir      = NULL,
     modis_resolution = "1km",
+    condition_tif  = NULL,
     feather_tmpdir = tempdir(),
     month          = 6L,
     verbose        = TRUE
@@ -255,6 +256,56 @@ predict_temporal_gdm <- function(
     }
   }
 
+  ## ==== 6c. Extract condition temporal variables (if model includes condition) ==
+  ## Condition is extracted from a multi-band GeoTIFF (one band per year).
+  ## Year 1 -> temp_condition_1 column (baseline)
+  ## Year 2 -> temp_condition_2 column (target)
+  if (isTRUE(fit$add_condition)) {
+    if (is.null(condition_tif)) {
+      if (exists("config", envir = parent.frame()) &&
+          !is.null(parent.frame()$config$condition_tif_path)) {
+        condition_tif <- parent.frame()$config$condition_tif_path
+      } else if (!is.null(fit$condition_tif_path)) {
+        condition_tif <- fit$condition_tif_path
+      }
+    }
+    if (!is.null(condition_tif)) {
+      if (verbose) cat("  Extracting condition temporal variables...\n")
+      cond_var   <- fit$condition_variable            # e.g. "condition"
+      cond_range <- fit$condition_year_range           # c(start, end)
+      pts        <- sp::SpatialPoints(data.frame(points$lon, points$lat))
+      brk        <- raster::brick(condition_tif)
+
+      ## Pre-allocate
+      cond_yr1 <- data.frame(matrix(NA_real_, n_pts, 1))
+      cond_yr2 <- data.frame(matrix(NA_real_, n_pts, 1))
+      colnames(cond_yr1) <- "temp_condition_1"
+      colnames(cond_yr2) <- "temp_condition_2"
+
+      ## Clamp years
+      yr1_cond <- pmin(pmax(as.integer(points$year1), cond_range[1]), cond_range[2])
+      yr2_cond <- pmin(pmax(as.integer(points$year2), cond_range[1]), cond_range[2])
+      unique_yrs <- sort(unique(c(yr1_cond, yr2_cond)))
+
+      for (yr in unique_yrs) {
+        band_idx <- yr - cond_range[1] + 1L
+        ras <- brk[[band_idx]]
+
+        idx1 <- which(yr1_cond == yr)
+        if (length(idx1) > 0) cond_yr1[idx1, 1] <- raster::extract(ras, pts[idx1])
+
+        idx2 <- which(yr2_cond == yr)
+        if (length(idx2) > 0) cond_yr2[idx2, 1] <- raster::extract(ras, pts[idx2])
+      }
+
+      ## Append to env_all so they get split into env_s1 / env_s2
+      env_all <- cbind(env_all, cond_yr1, cond_yr2)
+      if (verbose) cat("  Condition temporal: 1 variable × 2 time points\n")
+    } else {
+      warning("fit$add_condition is TRUE but condition_tif not available -- condition predictors will be skipped")
+    }
+  }
+
   ## ==== 7. Split site-1 / site-2 and clean column names ================
   idx_1  <- grep("_1$", names(env_all))
   idx_2  <- grep("_2$", names(env_all))
@@ -268,11 +319,19 @@ predict_temporal_gdm <- function(
 
   if (verbose) cat(sprintf("  Extracted %d temporal env columns per site\n", ncol(env_s1)))
 
-  ## Check for NA and sentinel values
-  any_na   <- any(is.na(env_s1)) || any(is.na(env_s2))
-  any_sent <- any(env_s1 == -9999, na.rm = TRUE) || any(env_s2 == -9999, na.rm = TRUE)
-  if (any_na)   warning("NA values found in extracted env data. Affected rows will have NA predictions.")
-  if (any_sent) warning("-9999 sentinel values in extracted data (possible ocean/missing grid cells).")
+  ## Replace -9999 sentinels with NA (ocean / missing grid cells)
+  env_s1[env_s1 == -9999] <- NA
+  env_s2[env_s2 == -9999] <- NA
+
+  ## Diagnose NA rates in extracted env data
+  na_count_s1 <- sum(is.na(env_s1))
+  na_count_s2 <- sum(is.na(env_s2))
+  total_cells <- prod(dim(env_s1)) + prod(dim(env_s2))
+  na_pct      <- 100 * (na_count_s1 + na_count_s2) / max(total_cells, 1)
+  if (na_pct > 0) {
+    if (verbose) cat(sprintf("  NA in extracted env: %d / %d cells (%.1f%%) -- will be handled gracefully\n",
+                             na_count_s1 + na_count_s2, total_cells, na_pct))
+  }
 
   ## ==== 8. Apply I-splines and build full covariate table ==============
   result <- .predict_from_temporal_env(fit, env_s1, env_s2, temp_idx, verbose)
@@ -441,6 +500,31 @@ predict_temporal_from_env <- function(fit, env_s1, env_s2, verbose = TRUE) {
   ## from unused (spatial/substrate) predictors.
   coefs_clean <- fit$coefficients
   coefs_clean[is.na(coefs_clean)] <- 0
+
+  ## Track which rows had any NA spline values (from missing env data)
+  rows_with_na <- rowSums(is.na(spline_table)) > 0
+  n_na_rows <- sum(rows_with_na)
+  if (n_na_rows > 0 && verbose) {
+    cat(sprintf("  %d / %d rows have partial NA env data -- using available predictors\n",
+                n_na_rows, n_pts))
+  }
+
+  ## Identify rows where ALL temporal spline values are NA (completely missing).
+  ## These cannot produce meaningful predictions and should remain NA.
+  temporal_spline_cols <- unlist(lapply(temp_idx, function(i) (csp[i] + 1):(csp[i] + fit$splines[i])))
+  rows_all_na <- rowSums(is.na(spline_table[, temporal_spline_cols, drop = FALSE])) ==
+                 length(temporal_spline_cols)
+  n_all_na <- sum(rows_all_na)
+  if (n_all_na > 0 && verbose) {
+    cat(sprintf("  %d / %d rows have ALL temporal predictors NA -- these will be NA in output\n",
+                n_all_na, n_pts))
+  }
+
+  ## Replace NA spline values with 0 so partial data still yields predictions.
+  ## Rationale: NA means we have no information for that predictor, so it
+  ## contributes zero distance (conservative -- assumes no change).
+  spline_table[is.na(spline_table)] <- 0
+
   temporal_distance <- as.numeric(spline_table %*% coefs_clean)
 
   ## Full linear predictor (intercept + temporal distance)
@@ -455,17 +539,27 @@ predict_temporal_from_env <- function(fit, env_s1, env_s2, verbose = TRUE) {
   ## Temporal dissimilarity via observation transform
   dissim <- ObsTrans(p0, fit$w_ratio, predicted_prob)
 
+  ## Restore NA for rows that had zero valid temporal env data
+  if (n_all_na > 0) {
+    temporal_distance[rows_all_na] <- NA_real_
+    eta[rows_all_na]               <- NA_real_
+    predicted_prob[rows_all_na]    <- NA_real_
+    dissim$out[rows_all_na]        <- NA_real_
+  }
+
   ## ---- Assemble output ----
   result <- data.frame(
     temporal_distance = temporal_distance,
     linear_predictor  = eta,
     predicted_prob    = predicted_prob,
     dissimilarity     = dissim$out,
+    had_na_env        = rows_with_na,
     stringsAsFactors  = FALSE
   )
 
   attr(result, "spline_table")       <- spline_table
   attr(result, "pred_contributions") <- pred_contrib
+  attr(result, "n_na_rows")          <- n_na_rows
 
   result
 }

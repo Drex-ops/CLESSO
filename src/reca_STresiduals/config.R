@@ -143,7 +143,7 @@ config$skip_existing_env <- as.logical(env_or_default("RECA_SKIP_EXISTING_ENV", 
 # File naming convention:  modis_{year}_{variable}_{resolution}_COG.tif
 #   e.g.  data/modis/modis_2015_treecov_1km_COG.tif
 # ---------------------------------------------------------------------------
-config$add_modis        <- as.logical(env_or_default("RECA_ADD_MODIS", "TRUE"))
+config$add_modis        <- as.logical(env_or_default("RECA_ADD_MODIS", "FALSE"))
 config$modis_dir        <- env_or_default("RECA_MODIS_DIR",
                              file.path(config$data_dir, "modis"))
 config$modis_variables  <- c("nontree", "nonveget", "treecov")
@@ -154,9 +154,87 @@ config$modis_resolution <- "1km"   # used in filename pattern
 ## Convenience suffix for output file naming ("_MODIS" or "")
 config$modis_suffix <- if (config$add_modis) "MODIS_" else ""
 
+# ---------------------------------------------------------------------------
+# Site condition raster (2000–2024, single multi-band GeoTIFF)
+#
+# When enabled, the condition raster is extracted for each observation-pair
+# year and added to the covariate set (spatial + temporal).
+# The TIF has 25 bands (band 1 = year 2000, band 2 = year 2001, …,
+# band 25 = year 2024).  Values are proportional condition [0, 1];
+# nodata = -9999.
+# ---------------------------------------------------------------------------
+config$add_condition        <- as.logical(env_or_default("RECA_ADD_CONDITION", "TRUE"))
+config$condition_tif_path   <- env_or_default("RECA_CONDITION_TIF",
+                                 file.path(config$data_dir, "condition",
+                                           "SiteCondition_2000_2024_uint8_to_prop_float32.tif"))
+config$condition_variable   <- "condition"
+config$condition_start_year <- 2000L
+config$condition_end_year   <- 2024L
+
+## Convenience suffix for output file naming ("COND_" or "")
+config$condition_suffix <- if (config$add_condition) "COND_" else ""
+
 ## Maximum pairs to use for GDM fitting (NULL = no limit, use all).
 ## Set to e.g. 1000000 if the GLM runs out of memory.
 config$max_fit_pairs <- NULL
+
+# ---------------------------------------------------------------------------
+# Unique run folder
+#
+# Each run/prediction session saves output to a unique subdirectory under
+# output_dir.  The folder name encodes species group, MODIS/condition
+# status, and a timestamp for uniqueness.
+#
+# Set RECA_RUN_ID to reuse an existing run folder (e.g. when predicting
+# from a previously fitted model).
+# ---------------------------------------------------------------------------
+config$run_id <- env_or_default("RECA_RUN_ID", {
+  tag_parts <- c(
+    config$species_group,
+    if (config$add_modis)     "MODIS" else NULL,
+    if (config$add_condition) "COND"  else NULL,
+    format(Sys.time(), "%Y%m%dT%H%M%S")
+  )
+  paste(tag_parts, collapse = "_")
+})
+
+config$run_output_dir <- file.path(config$output_dir, config$run_id)
+
+## Helper: write a snapshot of the config to the run folder
+save_config_snapshot <- function(cfg = config) {
+  snap_file <- file.path(cfg$run_output_dir, "config_snapshot.txt")
+  lines <- c(
+    paste("# RECA config snapshot —", Sys.time()),
+    paste("# Run ID:", cfg$run_id),
+    "",
+    paste("species_group      :", cfg$species_group),
+    paste("obs_csv            :", cfg$obs_csv),
+    paste("nMatch             :", cfg$nMatch),
+    paste("climate_window     :", cfg$climate_window),
+    paste("biAverage          :", cfg$biAverage),
+    paste("decomposition      :", cfg$decomposition),
+    paste("min_date           :", cfg$min_date),
+    paste("max_date           :", cfg$max_date),
+    paste("date_offset_years  :", cfg$date_offset_years),
+    paste("grid_resolution    :", cfg$grid_resolution),
+    paste("add_modis          :", cfg$add_modis),
+    if (cfg$add_modis) paste("modis_dir          :", cfg$modis_dir) else NULL,
+    if (cfg$add_modis) paste("modis_variables    :", paste(cfg$modis_variables, collapse = ", ")) else NULL,
+    paste("add_condition      :", cfg$add_condition),
+    if (cfg$add_condition) paste("condition_tif_path :", cfg$condition_tif_path) else NULL,
+    paste("npy_src            :", cfg$npy_src),
+    paste("substrate_raster   :", cfg$substrate_raster),
+    paste("reference_raster   :", cfg$reference_raster),
+    paste("output_dir         :", cfg$output_dir),
+    paste("run_output_dir     :", cfg$run_output_dir),
+    paste("fit_path           :", cfg$fit_path),
+    paste("cores              :", cfg$cores_to_use),
+    paste("chunk_size         :", cfg$chunk_size),
+    ""
+  )
+  writeLines(lines, snap_file)
+  cat(sprintf("  Config snapshot saved: %s\n", snap_file))
+}
 
 # ---------------------------------------------------------------------------
 # Environmental variable extraction parameters
@@ -188,22 +266,28 @@ config$fit_filename <- paste0(
   config$climate_window, "climWin_STresid_",
   if (config$biAverage) "biAverage_" else "",
   config$modis_suffix,
+  config$condition_suffix,
   "fittedGDM.RData"
 )
-config$fit_path <- file.path(config$output_dir, config$fit_filename)
+config$fit_path <- file.path(config$run_output_dir, config$fit_filename)
 
 # ---------------------------------------------------------------------------
-# Create output directory if needed
+# Create output directories if needed
 # ---------------------------------------------------------------------------
 if (!dir.exists(config$output_dir)) {
   dir.create(config$output_dir, recursive = TRUE)
 }
+if (!dir.exists(config$run_output_dir)) {
+  dir.create(config$run_output_dir, recursive = TRUE)
+}
 
 cat("RECA config loaded.\n")
 cat("  Species group  :", config$species_group, "\n")
+cat("  Run ID         :", config$run_id, "\n")
 cat("  Fit file       :", config$fit_filename, "\n")
 cat("  Data dir       :", config$data_dir, "\n")
 cat("  Output dir     :", config$output_dir, "\n")
+cat("  Run output dir :", config$run_output_dir, "\n")
 cat("  nMatch         :", config$nMatch, "\n")
 cat("  climate_window :", config$climate_window, "years\n")
 cat("  c_yrs          :", paste(config$c_yrs, collapse = ", "), "\n")
@@ -211,4 +295,5 @@ cat("  w_yrs          :", paste(config$w_yrs, collapse = ", "), "\n")
 cat("  biAverage      :", config$biAverage, "\n")
 cat("  decomposition  :", config$decomposition, "\n")
 cat("  add_modis      :", config$add_modis, "\n")
+cat("  add_condition  :", config$add_condition, "\n")
 cat("  cores          :", config$cores_to_use, "\n")

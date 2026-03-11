@@ -54,7 +54,8 @@ clesso_fit_iterative <- function(model_data,
                                  tol            = 1e-4,
                                  nlminb_control = NULL,
                                  verbose        = TRUE,
-                                 warm_start     = NULL) {
+                                 warm_start     = NULL,
+                                 progress_log   = NULL) {
 
   library(TMB)
 
@@ -169,12 +170,27 @@ clesso_fit_iterative <- function(model_data,
 
     nll_before_beta <- obj_beta$fn(obj_beta$par)
 
+    ## Progress logging for beta phase
+    if (!is.null(progress_log)) {
+      beta_logger <- clesso_make_logger(
+        obj_beta, progress_log,
+        print_every = 10L,
+        phase_label = sprintf("beta_cycle%d", iter))
+      beta_fn <- beta_logger$fn
+      beta_gr <- beta_logger$gr
+    } else {
+      beta_fn <- obj_beta$fn
+      beta_gr <- obj_beta$gr
+      beta_logger <- NULL
+    }
+
     fit_beta <- nlminb(
       start     = obj_beta$par,
-      objective = obj_beta$fn,
-      gradient  = obj_beta$gr,
+      objective = beta_fn,
+      gradient  = beta_gr,
       control   = nlminb_control
     )
+    if (!is.null(beta_logger)) beta_logger$close()
 
     ## Update pars with optimised beta values
     par_full_beta <- obj_beta$env$parList(fit_beta$par)
@@ -216,12 +232,27 @@ clesso_fit_iterative <- function(model_data,
 
     nll_before_alpha <- obj_alpha$fn(obj_alpha$par)
 
+    ## Progress logging for alpha phase
+    if (!is.null(progress_log)) {
+      alpha_logger <- clesso_make_logger(
+        obj_alpha, progress_log,
+        print_every = 10L,
+        phase_label = sprintf("alpha_cycle%d", iter))
+      alpha_fn <- alpha_logger$fn
+      alpha_gr <- alpha_logger$gr
+    } else {
+      alpha_fn <- obj_alpha$fn
+      alpha_gr <- obj_alpha$gr
+      alpha_logger <- NULL
+    }
+
     fit_alpha <- nlminb(
       start     = obj_alpha$par,
-      objective = obj_alpha$fn,
-      gradient  = obj_alpha$gr,
+      objective = alpha_fn,
+      gradient  = alpha_gr,
       control   = nlminb_control
     )
+    if (!is.null(alpha_logger)) alpha_logger$close()
 
     ## Update pars with optimised alpha values
     par_full_alpha <- obj_alpha$env$parList(fit_alpha$par)

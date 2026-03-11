@@ -38,6 +38,7 @@ if (!file.exists(config_path)) {
   config_path <- file.path(this_dir, "src", "reca_STresiduals", "config.R")
 }
 source(config_path)
+save_config_snapshot()
 source(file.path(config$r_dir, "utils.R"))
 source(file.path(config$r_dir, "gdm_functions.R"))
 source(file.path(config$r_dir, "site_aggregator.R"))
@@ -76,7 +77,7 @@ test   <- is.na(extract(ras_sp, datRED[, c("lonID", "latID")]))
 datRED <- datRED[!test, ]
 
 ## Save aggregated data
-agg_file <- file.path(config$output_dir,
+agg_file <- file.path(config$run_output_dir,
                        paste0(config$species_group, "_aggregated_basicFilt.RData"))
 save(datRED, file = agg_file)
 cat(sprintf("  Aggregated data: %d site-species-date records\n", nrow(datRED)))
@@ -168,7 +169,7 @@ obsPairs_out <- obsPairSampler.bigData.RECA(
 )
 registerDoSEQ()
 
-obspairs_file <- file.path(config$output_dir,
+obspairs_file <- file.path(config$run_output_dir,
   paste0("ObsPairsTable_RECA_", config$species_group, "_WindowTestRuns.rds"))
 saveRDS(obsPairs_out, file = obspairs_file)
 
@@ -223,6 +224,31 @@ if (config$add_modis) {
               config$modis_start_year, config$modis_end_year))
 }
 
+## ---------------------------------------------------------------------------
+## Condition raster validation (early exit if misconfigured)
+## ---------------------------------------------------------------------------
+if (config$add_condition) {
+  cat("  Condition raster extraction enabled.\n")
+  cat(sprintf("  Condition TIF: %s\n", config$condition_tif_path))
+  if (!file.exists(config$condition_tif_path)) {
+    stop(paste("Condition TIF not found:", config$condition_tif_path))
+  }
+  model_min_year <- as.integer(format(
+    config$min_date %m+% years(config$date_offset_years), "%Y"))
+  model_max_year <- as.integer(format(config$max_date, "%Y"))
+  if (model_max_year > config$condition_end_year) {
+    warning(sprintf(
+      paste0("config$max_date (%s) exceeds condition end year (%d). ",
+             "Pairs with years > %d will be clamped to %d for condition extraction."),
+      config$max_date, config$condition_end_year,
+      config$condition_end_year, config$condition_end_year
+    ))
+  }
+  cat(sprintf("  Model year range: %d\u2013%d  |  Condition coverage: %d\u2013%d\n",
+              model_min_year, model_max_year,
+              config$condition_start_year, config$condition_end_year))
+}
+
 ## Apply temporal filter: ensure earliest_year - climate_window >= geonpy_start_year
 obsPairs_out      <- obsPairs_orig
 earliest_year_all <- pmin(obsPairs_out$year1, obsPairs_out$year2)
@@ -241,6 +267,18 @@ if (config$add_modis) {
   obsPairs_out <- obsPairs_out[modis_tst, ]
 }
 
+## Additional condition temporal filter: both years must be >= condition_start_year
+if (config$add_condition) {
+  cond_tst <- obsPairs_out$year1 >= config$condition_start_year &
+              obsPairs_out$year2 >= config$condition_start_year
+  n_removed <- sum(!cond_tst)
+  if (n_removed > 0) {
+    cat(sprintf("  Condition filter: removing %d pairs with years before %d\n",
+                n_removed, config$condition_start_year))
+  }
+  obsPairs_out <- obsPairs_out[cond_tst, ]
+}
+
 ext_data     <- obsPairs_out[, 2:9]
 cat(sprintf("  Pairs after temporal filter: %d\n", nrow(obsPairs_out)))
 
@@ -250,8 +288,9 @@ save_prefix <- paste0(config$species_group, "_",
 if (config$biAverage)              save_prefix <- paste0(save_prefix, "biAverage_")
 if (config$decomposition != "none") save_prefix <- paste0(config$decomposition, "_", save_prefix)
 if (config$add_modis)              save_prefix <- paste0(save_prefix, config$modis_suffix)
+if (config$add_condition)          save_prefix <- paste0(save_prefix, config$condition_suffix)
 
-env_file <- file.path(config$output_dir, paste0(save_prefix, "ObsEnvTable.RData"))
+env_file <- file.path(config$run_output_dir, paste0(save_prefix, "ObsEnvTable.RData"))
 
 # ------------------------------------------------------------------
 # STEP 6a: Environmental data extraction
@@ -481,21 +520,126 @@ if (get_env) {
     gc()
   }
 
+  ## ------------------------------------------------------------------
+  ## STEP 6a-CONDITION: Extract condition raster (spatial + temporal)
+  ##
+  ## Condition is a single multi-band GeoTIFF where band i = year
+  ## (config$condition_start_year + i - 1).  It is treated the same
+  ## way as MODIS:
+  ##   Spatial component -- both sites at the earliest year
+  ##     spat_condition_1 = Condition(site1, earliest_year)
+  ##     spat_condition_2 = Condition(site2, earliest_year)
+  ##   Temporal component -- site 2 at baseline vs observation year
+  ##     temp_condition_1 = Condition(site2, earliest_year)
+  ##     temp_condition_2 = Condition(site2, year2)
+  ##
+  ## Years outside the condition range are clamped to the boundary year.
+  ## ------------------------------------------------------------------
+  cond_spat_1 <- NULL; cond_spat_2 <- NULL
+  cond_temp_1 <- NULL; cond_temp_2 <- NULL
+
+  if (config$add_condition) {
+    cat("  Extracting condition raster (spatial + temporal)...\n")
+
+    ## Load the multi-band TIF as a brick (one layer per year)
+    cond_brick <- brick(config$condition_tif_path)
+    cond_start <- config$condition_start_year
+    cond_end   <- config$condition_end_year
+
+    ## Helper: get band index for a given year (vectorised, clamped)
+    cond_band_idx <- function(year) {
+      yr_clamped <- pmin(pmax(year, cond_start), cond_end)
+      yr_clamped - cond_start + 1L
+    }
+
+    ## Clamp years
+    earliest_year_cond <- pmin(pmax(earliest_year, cond_start), cond_end)
+    year2_cond         <- pmin(pmax(ext_data[, 7], cond_start), cond_end)
+
+    n_pairs <- nrow(ext_data)
+    cond_pnt1 <- SpatialPoints(data.frame(ext_data[, 1], ext_data[, 2]))
+    cond_pnt2 <- SpatialPoints(data.frame(ext_data[, 5], ext_data[, 6]))
+
+    cond_var <- config$condition_variable  # "condition"
+
+    ## --- SPATIAL CONDITION ---
+    cs1 <- rep(NA_real_, n_pairs)
+    cs2 <- rep(NA_real_, n_pairs)
+
+    cat("    Spatial condition...\n")
+    for (yr in sort(unique(earliest_year_cond))) {
+      idx <- which(earliest_year_cond == yr)
+      band <- cond_band_idx(yr)
+      ras  <- cond_brick[[band]]
+      cs1[idx] <- extract(ras, cond_pnt1[idx])
+      cs2[idx] <- extract(ras, cond_pnt2[idx])
+    }
+
+    if (config$biAverage) {
+      cat("  Computing bidirectional average (condition spatial)...\n")
+      cs1_rev <- rep(NA_real_, n_pairs)
+      cs2_rev <- rep(NA_real_, n_pairs)
+      for (yr in sort(unique(earliest_year_cond))) {
+        idx <- which(earliest_year_cond == yr)
+        band <- cond_band_idx(yr)
+        ras  <- cond_brick[[band]]
+        cs1_rev[idx] <- extract(ras, cond_pnt2[idx])  # site2 -> _1
+        cs2_rev[idx] <- extract(ras, cond_pnt1[idx])  # site1 -> _2
+      }
+      cs1 <- (cs1 + cs1_rev) / 2
+      cs2 <- (cs2 + cs2_rev) / 2
+      rm(cs1_rev, cs2_rev)
+    }
+
+    cond_spat_1 <- data.frame(spat_condition_1 = cs1)
+    cond_spat_2 <- data.frame(spat_condition_2 = cs2)
+
+    ## --- TEMPORAL CONDITION ---
+    ct1 <- rep(NA_real_, n_pairs)
+    ct2 <- rep(NA_real_, n_pairs)
+
+    cat("    Temporal condition (baseline)...\n")
+    for (yr in sort(unique(earliest_year_cond))) {
+      idx <- which(earliest_year_cond == yr)
+      band <- cond_band_idx(yr)
+      ras  <- cond_brick[[band]]
+      ct1[idx] <- extract(ras, cond_pnt2[idx])
+    }
+
+    cat("    Temporal condition (target)...\n")
+    for (yr in sort(unique(year2_cond))) {
+      idx <- which(year2_cond == yr)
+      band <- cond_band_idx(yr)
+      ras  <- cond_brick[[band]]
+      ct2[idx] <- extract(ras, cond_pnt2[idx])
+    }
+
+    cond_temp_1 <- data.frame(temp_condition_1 = ct1)
+    cond_temp_2 <- data.frame(temp_condition_2 = ct2)
+
+    cat(sprintf("  Condition extraction complete: 1 spatial + 1 temporal covariate per site\n"))
+
+    rm(cond_brick, cs1, cs2, ct1, ct2, cond_pnt1, cond_pnt2)
+    gc()
+  }
+
   ## Combine: obsPairs metadata + ALL site-1/baseline cols + ALL site-2/obs cols
   ## IMPORTANT: splineData_fast splits at the midpoint, so all _1 columns must
   ## come first and all _2 columns second, in matching order.
   parts <- list(obsPairs_out,
-                env_spat1, modis_spat_1, env1_subs, env_temp1, modis_temp_1,
-                env_spat2, modis_spat_2, env2_subs, env_temp2, modis_temp_2)
+                env_spat1, modis_spat_1, cond_spat_1, env1_subs, env_temp1, modis_temp_1, cond_temp_1,
+                env_spat2, modis_spat_2, cond_spat_2, env2_subs, env_temp2, modis_temp_2, cond_temp_2)
   parts <- parts[!sapply(parts, is.null)]
   obsPairs_out <- do.call(cbind, parts)
 
-  ## Clean up climate/substrate/MODIS env objects
+  ## Clean up climate/substrate/MODIS/condition env objects
   rm(env_spatial, env_spatA, env_spat1, env_spat2,
      env_temporal, env_temp1, env_temp2, env1_subs, env2_subs)
   if (exists("env_spatB")) rm(env_spatB)
   if (exists("modis_spat_1")) rm(modis_spat_1, modis_spat_2,
                                   modis_temp_1, modis_temp_2)
+  if (exists("cond_spat_1"))  rm(cond_spat_1, cond_spat_2,
+                                  cond_temp_1, cond_temp_2)
   gc()
 
   ## Save
@@ -605,7 +749,7 @@ obsGDM_1 <- fitGDM(formula = formula, data = mod_ready)
 # ------------------------------------------------------------------
 # STEP 6f: Diagnostics and save
 # ------------------------------------------------------------------
-out_prefix <- file.path(config$output_dir, save_prefix)
+out_prefix <- file.path(config$run_output_dir, save_prefix)
 
 ## Deviance
 gdm_dev <- RsqGLM(obs = obsGDM_1$y, pred = fitted(obsGDM_1))
@@ -654,6 +798,12 @@ save(coefs, file = paste0(out_prefix, "coefficients.RData"))
     if (config$add_modis) {
       fit$modis_variables  <- config$modis_variables
       fit$modis_year_range <- c(config$modis_start_year, config$modis_end_year)
+    }
+    fit$add_condition    <- config$add_condition
+    if (config$add_condition) {
+      fit$condition_variable   <- config$condition_variable
+      fit$condition_year_range <- c(config$condition_start_year, config$condition_end_year)
+      fit$condition_tif_path   <- config$condition_tif_path
     }
     fit$run_timestamp   <- Sys.time()
 save(fit, file = paste0(out_prefix, "fittedGDM.RData"))

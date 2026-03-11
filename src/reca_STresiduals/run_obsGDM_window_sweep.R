@@ -34,6 +34,7 @@ if (!file.exists(config_path)) {
   config_path <- file.path(this_dir, "src", "reca_STresiduals", "config.R")
 }
 source(config_path)
+save_config_snapshot()
 source(file.path(config$r_dir, "utils.R"))
 source(file.path(config$r_dir, "gdm_functions.R"))
 source(file.path(config$r_dir, "site_aggregator.R"))
@@ -75,7 +76,7 @@ datRED <- siteAggregator(dat, res, box)
 test   <- is.na(extract(ras_sp, datRED[, c("lonID", "latID")]))
 datRED <- datRED[!test, ]
 
-agg_file <- file.path(config$output_dir,
+agg_file <- file.path(config$run_output_dir,
                        paste0(config$species_group, "_aggregated_basicFilt.RData"))
 save(datRED, file = agg_file)
 cat(sprintf("  Aggregated data: %d site-species-date records\n", nrow(datRED)))
@@ -161,7 +162,7 @@ obsPairs_out <- obsPairSampler.bigData.RECA(
 )
 registerDoSEQ()
 
-obspairs_file <- file.path(config$output_dir,
+obspairs_file <- file.path(config$run_output_dir,
   paste0("ObsPairsTable_RECA_", config$species_group, "_WindowSweep.rds"))
 saveRDS(obsPairs_out, file = obspairs_file)
 
@@ -255,7 +256,7 @@ for (wi in seq_along(window_range)) {
   if (config$biAverage)              save_prefix <- paste0(save_prefix, "biAverage_")
   if (config$decomposition != "none") save_prefix <- paste0(config$decomposition, "_", save_prefix)
 
-  env_file <- file.path(config$output_dir, paste0(save_prefix, "ObsEnvTable.RData"))
+  env_file <- file.path(config$run_output_dir, paste0(save_prefix, "ObsEnvTable.RData"))
   get_env  <- !config$skip_existing_env || !file.exists(env_file)
 
   status <- tryCatch({
@@ -477,7 +478,7 @@ for (wi in seq_along(window_range)) {
               wi, length(window_range), total_elapsed / 60, remaining / 60))
 
   ## Incremental save after each iteration
-  sweep_csv <- file.path(config$output_dir,
+  sweep_csv <- file.path(config$run_output_dir,
     paste0(config$species_group, "_window_sweep_stats.csv"))
   write.csv(sweep_results, sweep_csv, row.names = FALSE)
 
@@ -500,13 +501,13 @@ cat(sprintf("  Windows attempted: %d  |  Successful: %d  |  Failed: %d\n",
             sum(sweep_results$status != "ok")))
 
 ## Save final CSV
-sweep_csv <- file.path(config$output_dir,
+sweep_csv <- file.path(config$run_output_dir,
   paste0(config$species_group, "_window_sweep_stats.csv"))
 write.csv(sweep_results, sweep_csv, row.names = FALSE)
 cat(sprintf("  Saved: %s\n", basename(sweep_csv)))
 
 ## Save RDS with full results + run metadata
-sweep_rds <- file.path(config$output_dir,
+sweep_rds <- file.path(config$run_output_dir,
   paste0(config$species_group, "_window_sweep_stats.rds"))
 saveRDS(list(
   results        = sweep_results,
@@ -529,7 +530,7 @@ cat("\n--- Generating sweep diagnostic plots ---\n")
 ok_rows <- sweep_results[sweep_results$status == "ok", ]
 
 if (nrow(ok_rows) >= 3) {
-  pdf_file <- file.path(config$output_dir,
+  pdf_file <- file.path(config$run_output_dir,
     paste0(config$species_group, "_window_sweep_plots.pdf"))
   pdf(pdf_file, width = 14, height = 16)
 

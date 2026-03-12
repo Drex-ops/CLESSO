@@ -392,3 +392,219 @@ def make_dataloaders(
     )
 
     return train_loader, val_loader, train_ds, val_ds
+
+# --------------------------------------------------------------------------
+# Hard-pair mining for between-site pairs
+# --------------------------------------------------------------------------
+
+class HardPairMiner:
+    """Importance-corrected hard-pair mining for between-site beta training.
+
+    Scores every training pair by its current per-pair NLL (hardness), assigns
+    difficulty bins within each coarse cell (between-match / between-mismatch),
+    and builds a weighted sampler whose proposal distribution q(p) over-samples
+    hard pairs.  The importance correction ratio pi(p)/q(p) is stored per-pair
+    so the training loop can multiply it into the loss weights, preserving the
+    original probabilistic target.
+
+    Usage in the training loop::
+
+        miner = HardPairMiner(train_ds, config)
+        # At start of each beta phase (or every N epochs):
+        miner.refresh_scores(model, site_data, device)
+        loader = miner.make_dataloader(batch_size)
+        for batch in loader:
+            # batch["mining_iw"] contains the importance correction ratio
+            imp_correction = batch["mining_iw"]
+            ...
+
+    When hard mining is disabled (lambda_hm=0), the miner degrades to uniform
+    sampling with mining_iw=1 for every pair.
+    """
+
+    def __init__(self, dataset: CLESSOPairDataset, config):
+        self.dataset = dataset
+        self.n = len(dataset)
+
+        # Config
+        self.lambda_hm: float = config.hard_mining_lambda
+        self.n_bins: int = config.hard_mining_n_bins
+        self.bin_weights: list[float] = list(config.hard_mining_bin_weights)
+        self.a_max: float = config.hard_mining_a_max
+
+        assert len(self.bin_weights) == self.n_bins, (
+            f"hard_mining_bin_weights length ({len(self.bin_weights)}) "
+            f"must equal hard_mining_n_bins ({self.n_bins})"
+        )
+
+        # Coarse cell membership: between-match (y=0) vs between-mismatch (y=1)
+        # (All pairs in dataset are between-site when used from cyclic/two-stage)
+        self.y = dataset.y  # float32 array, 0 or 1
+        self.cell_match = self.y < 0.5   # boolean mask: True = match
+        self.cell_mismatch = ~self.cell_match
+
+        # Per-pair importance correction (initialised to 1 = no correction)
+        self.iw = np.ones(self.n, dtype=np.float32)
+
+        # Per-pair sampling probabilities (uniform initially)
+        self.q = np.ones(self.n, dtype=np.float64) / self.n
+
+    @torch.no_grad()
+    def refresh_scores(
+        self,
+        model,
+        site_data,
+        device: str,
+        batch_size: int = 16384,
+    ) -> None:
+        """Forward-pass over all training pairs to compute hardness scores.
+
+        Updates self.q (proposal distribution) and self.iw (importance
+        correction ratio pi/q, truncated by a_max).
+        """
+        model.eval()
+        Z = site_data.Z.to(device)
+        eps = 1e-7
+
+        # ---- Compute per-pair NLL ----
+        nll = np.empty(self.n, dtype=np.float64)
+
+        for start in range(0, self.n, batch_size):
+            end = min(start + batch_size, self.n)
+            idx = np.arange(start, end)
+            batch = {
+                "site_i": torch.tensor(self.dataset.site_i[idx], dtype=torch.long, device=device),
+                "site_j": torch.tensor(self.dataset.site_j[idx], dtype=torch.long, device=device),
+                "env_diff": torch.tensor(self.dataset.env_diff[idx], dtype=torch.float32, device=device),
+                "is_within": torch.tensor(self.dataset.is_within[idx], dtype=torch.float32, device=device),
+            }
+            z_i = Z[batch["site_i"]]
+            z_j = Z[batch["site_j"]]
+            fwd = model.forward(z_i, z_j, batch["env_diff"], batch["is_within"])
+            p = fwd["p_match"].clamp(eps, 1.0 - eps)
+            y = torch.tensor(self.dataset.y[idx], dtype=torch.float32, device=device)
+            h = -(1.0 - y) * torch.log(p) - y * torch.log(1.0 - p)
+            nll[start:end] = h.cpu().numpy()
+
+        # ---- Build proposal distribution q(p) ----
+        if self.lambda_hm <= 0.0:
+            # No mining: uniform proposal, iw=1
+            self.q[:] = 1.0 / self.n
+            self.iw[:] = 1.0
+            return
+
+        # Target distribution pi(p): equal mass across the two coarse cells,
+        # uniform within each cell.
+        pi = np.empty(self.n, dtype=np.float64)
+        n_match = self.cell_match.sum()
+        n_mismatch = self.cell_mismatch.sum()
+        if n_match > 0:
+            pi[self.cell_match] = 0.5 / n_match
+        if n_mismatch > 0:
+            pi[self.cell_mismatch] = 0.5 / n_mismatch
+
+        # Hard-pair proposal h*(p): extra mass on difficult bins within
+        # each coarse cell.
+        h_star = np.zeros(self.n, dtype=np.float64)
+        bin_w = np.array(self.bin_weights, dtype=np.float64)
+        bin_w /= bin_w.sum()  # normalise
+
+        for cell_mask, cell_prob in [(self.cell_match, 0.5),
+                                     (self.cell_mismatch, 0.5)]:
+            cell_idx = np.where(cell_mask)[0]
+            if len(cell_idx) == 0:
+                continue
+
+            cell_nll = nll[cell_idx]
+
+            # Quantile-based difficulty bins (avoids eta-clamp boundary issue:
+            # pairs are ranked *within* each cell, so saturated-eta pairs
+            # don't automatically dominate).
+            bin_edges = np.quantile(
+                cell_nll,
+                np.linspace(0, 1, self.n_bins + 1),
+            )
+            # np.searchsorted: bin 0 = easiest, bin n_bins-1 = hardest
+            bin_idx = np.searchsorted(bin_edges[1:-1], cell_nll, side="right")
+            # Clamp to valid range
+            bin_idx = np.clip(bin_idx, 0, self.n_bins - 1)
+
+            for d in range(self.n_bins):
+                in_bin = cell_idx[bin_idx == d]
+                n_in_bin = len(in_bin)
+                if n_in_bin == 0:
+                    continue
+                # h*(p) = Pr(cell) * Pr(bin|cell) / N_{cell,bin}
+                h_star[in_bin] = cell_prob * bin_w[d] / n_in_bin
+
+        # Mixture proposal: q(p) = (1-λ)·π(p) + λ·h*(p)
+        q = (1.0 - self.lambda_hm) * pi + self.lambda_hm * h_star
+
+        # Avoid division by zero
+        q = np.maximum(q, 1e-12)
+        q /= q.sum()  # renormalise for numerical safety
+        self.q = q
+
+        # Importance correction: pi(p) / q(p), truncated at a_max
+        ratio = pi / q
+        ratio = np.minimum(ratio, self.a_max)
+        self.iw = ratio.astype(np.float32)
+
+    def make_dataloader(
+        self,
+        batch_size: int = 8192,
+        num_workers: int = 0,
+    ) -> DataLoader:
+        """Build a DataLoader that samples pairs according to q(p).
+
+        Each batch dict includes an extra key ``mining_iw`` with the
+        per-pair importance correction ratio (float32).
+        """
+        from torch.utils.data import WeightedRandomSampler
+
+        # WeightedRandomSampler draws `num_samples` indices with replacement,
+        # proportional to the given weights.  One "epoch" = N draws so every
+        # pair is seen ~once on average.
+        sampler = WeightedRandomSampler(
+            weights=torch.from_numpy(self.q.astype(np.float64)),
+            num_samples=self.n,
+            replacement=True,
+        )
+
+        # Wrap dataset to inject mining_iw
+        wrapped = _MinedDatasetWrapper(self.dataset, self.iw)
+
+        return DataLoader(
+            wrapped,
+            batch_size=batch_size,
+            sampler=sampler,
+            collate_fn=_mined_collate_fn,
+            num_workers=num_workers,
+            pin_memory=True,
+            drop_last=False,
+        )
+
+
+class _MinedDatasetWrapper(Dataset):
+    """Thin wrapper that attaches mining importance weights to each sample."""
+
+    def __init__(self, dataset: CLESSOPairDataset, iw: np.ndarray):
+        self.dataset = dataset
+        self.iw = iw
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx: int) -> dict:
+        item = self.dataset[idx]
+        item["mining_iw"] = self.iw[idx]
+        return item
+
+
+def _mined_collate_fn(batch: list[dict]) -> dict[str, torch.Tensor]:
+    """Collate that includes the mining_iw field."""
+    base = collate_fn(batch)
+    base["mining_iw"] = torch.tensor(
+        [b["mining_iw"] for b in batch], dtype=torch.float32,
+    )
+    return base

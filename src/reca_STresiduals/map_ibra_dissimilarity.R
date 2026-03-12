@@ -16,8 +16,17 @@ this_dir <- tryCatch(dirname(sys.frame(1)$ofile), error = function(e) getwd())
 source(file.path(this_dir, "config.R"))
 
 ## Prediction years (must match predict_temporal_raster.R settings)
-year1 <- 1950L
-year2 <- 2017L
+climate_end <- config$geonpy_end_year
+if (isTRUE(config$add_modis)) {
+  year1 <- config$modis_start_year
+  year2 <- min(config$modis_end_year, climate_end)
+} else if (isTRUE(config$add_condition)) {
+  year1 <- config$condition_start_year
+  year2 <- min(config$condition_end_year, climate_end)
+} else {
+  year1 <- 1950L
+  year2 <- climate_end
+}
 
 ## Dissimilarity TIF produced by predict_temporal_raster.R
 modis_tag <- if (isTRUE(config$add_modis)) "_MODIS" else ""

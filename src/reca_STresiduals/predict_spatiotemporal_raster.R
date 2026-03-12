@@ -52,8 +52,22 @@ pyper_script <- config$pyper_script
 out_dir      <- config$run_output_dir
 
 ## ---- Year pair ----
-year1 <- 1950L
-year2 <- 2017L
+## When MODIS or Condition data is used, restrict prediction to the
+## year range covered by those layers.
+climate_end <- config$geonpy_end_year      # e.g. 2017
+
+if (isTRUE(config$add_modis)) {
+  year1 <- config$modis_start_year
+  year2 <- min(config$modis_end_year, climate_end)
+  cat(sprintf("  MODIS enabled -> predicting %d -> %d\n", year1, year2))
+} else if (isTRUE(config$add_condition)) {
+  year1 <- config$condition_start_year
+  year2 <- min(config$condition_end_year, climate_end)
+  cat(sprintf("  Condition enabled -> predicting %d -> %d\n", year1, year2))
+} else {
+  year1 <- 1950L
+  year2 <- climate_end
+}
 
 ## Reference year for spatial climate extraction
 ref_year  <- year1

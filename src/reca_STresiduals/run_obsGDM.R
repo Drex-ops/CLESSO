@@ -741,10 +741,28 @@ if (!is.null(config$max_fit_pairs) && nrow(mod_ready) > config$max_fit_pairs) {
   rm(idx)
 }
 
-cat(sprintf("  Fitting GDM on %d pairs...\n", nrow(mod_ready)))
+## ---- Case weights (2026-03-12) ----
+## The observation-pair sampler forces 50:50 match/mismatch balance, but the
+## true ratio is w:1 (mismatch:match).  Passing case weights to the GLM
+## corrects the intercept so EnvDistance=0 maps to the true base-rate instead
+## of 0.5.  This eliminates the need for the post-hoc ObsTrans w-correction.
+##
+## Weight scheme: matches (under-represented) get weight = w,
+##                mismatches get weight = 1.  Then normalise so mean = 1.
+if (isTRUE(config$use_case_weights)) {
+  case_wts <- ifelse(mod_ready$Match == 0, w, 1)
+  case_wts <- case_wts / mean(case_wts)
+  cat(sprintf("  Case weights: match w=%.2f, mismatch w=1 (normalised mean=1)\n", w))
+} else {
+  case_wts <- NULL
+}
+
+cat(sprintf("  Fitting GDM on %d pairs (lambda=%.4f)...\n",
+            nrow(mod_ready), config$ridge_lambda))
 f1      <- paste(colnames(mod_ready)[-1], collapse = "+")
 formula <- as.formula(paste(colnames(mod_ready)[1], "~", f1, sep = ""))
-obsGDM_1 <- fitGDM(formula = formula, data = mod_ready)
+obsGDM_1 <- fitGDM(formula = formula, data = mod_ready,
+                    weights = case_wts, lambda = config$ridge_lambda)
 
 # ------------------------------------------------------------------
 # STEP 6f: Diagnostics and save
@@ -780,7 +798,16 @@ save(coefs, file = paste0(out_prefix, "coefficients.RData"))
     fit$species_group   <- config$species_group
     fit$climate_window  <- c_yr
     fit$nMatch          <- config$nMatch
-    fit$w_ratio         <- w
+
+    ## w_ratio: the value used by downstream ObsTrans calls.
+    ## When case weights are applied in the fit, the w-correction is already
+    ## baked into the model intercept, so ObsTrans should use w = 1 to avoid
+    ## double-correcting.  The raw w is stored separately for reference.
+    fit$w_ratio_raw          <- w
+    fit$case_weights_applied <- isTRUE(config$use_case_weights)
+    fit$w_ratio              <- if (fit$case_weights_applied) 1 else w
+    fit$ridge_lambda         <- config$ridge_lambda
+
     fit$biAverage       <- config$biAverage
     fit$decomposition   <- config$decomposition
     fit$date_range      <- c(as.character(config$min_date), as.character(config$max_date))
@@ -809,9 +836,10 @@ save(coefs, file = paste0(out_prefix, "coefficients.RData"))
 save(fit, file = paste0(out_prefix, "fittedGDM.RData"))
 
 ## Diagnostic plots
+## Use effective w_ratio (1 when case weights applied, raw w otherwise)
 tiff(paste0(out_prefix, "GDM-ObsDiag.tif"),
       height = 6, width = 6, units = "in", res = 200, compression = "lzw")
-obs.gdm.plot(obsGDM_1, save_prefix, w, Is = fit$intercept)
+obs.gdm.plot(obsGDM_1, save_prefix, fit$w_ratio, Is = fit$intercept)
 dev.off()
 
 pdf(paste0(out_prefix, "GDM-gdmDiag.pdf"))

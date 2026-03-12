@@ -24,7 +24,7 @@ from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 from torch.utils.data import DataLoader
 
 from .config import CLESSONNConfig
-from .dataset import SiteData, make_dataloaders
+from .dataset import SiteData, make_dataloaders, HardPairMiner
 from .model import CLESSONet
 
 
@@ -664,13 +664,23 @@ def train_two_stage(
         p.requires_grad = True
 
     # Dataloaders (between-site only, unit weights — importance applied in loss)
-    s2_train, s2_val, _, _ = make_dataloaders(
+    s2_train, s2_val, s2_train_ds, _ = make_dataloaders(
         between_pairs, site_data,
         val_fraction=config.val_fraction,
         batch_size=config.batch_size,
         seed=config.seed,
         use_unit_weights=True,
     )
+
+    # Hard-pair mining
+    use_hard_mining = config.hard_mining_lambda > 0.0
+    hard_miner = None
+    if use_hard_mining:
+        hard_miner = HardPairMiner(s2_train_ds, config)
+        print(f"  Hard-pair mining: \u03bb_hm={config.hard_mining_lambda}, "
+              f"bins={config.hard_mining_n_bins}, "
+              f"bin_weights={config.hard_mining_bin_weights}, "
+              f"a_max={config.hard_mining_a_max}")
 
     beta_lr = config.learning_rate * config.beta_lr_mult
     beta_weight_raw = [p for n, p in model.beta_net.named_parameters()
@@ -716,6 +726,27 @@ def train_two_stage(
         for epoch in range(1, config.stage2_max_epochs + 1):
             print(f"  S2 Epoch {epoch}/{config.stage2_max_epochs}")
 
+            # Refresh hard-pair scores periodically
+            mining_active = (
+                use_hard_mining
+                and epoch > config.hard_mining_warmup_cycles  # reuse as warmup epochs
+            )
+            if mining_active:
+                should_refresh = (
+                    epoch == config.hard_mining_warmup_cycles + 1
+                    or (config.hard_mining_refresh_every > 0
+                        and (epoch - 1) % config.hard_mining_refresh_every == 0)
+                )
+                if should_refresh:
+                    hard_miner.refresh_scores(model, site_data, device,
+                                              batch_size=config.batch_size * 2)
+                    s2_train_active = hard_miner.make_dataloader(
+                        batch_size=config.batch_size)
+                    if epoch == config.hard_mining_warmup_cycles + 1:
+                        print(f"    Hard-pair mining activated (epoch {epoch})")
+            else:
+                s2_train_active = s2_train
+
             # ---- Train (importance-weighted) ----
             model.beta_net.train()
             model.alpha_net.eval()
@@ -727,7 +758,7 @@ def train_two_stage(
             nb = 0
             eps = 1e-7
 
-            for bi, batch in enumerate(s2_train):
+            for bi, batch in enumerate(s2_train_active):
                 batch = {k: v.to(device) for k, v in batch.items()}
                 z_i = Z[batch["site_i"]]
                 z_j = Z[batch["site_j"]]
@@ -737,11 +768,15 @@ def train_two_stage(
                 y = batch["y"]
                 eta = fwd["eta"]
 
-                # Importance weights
+                # Importance weights (alpha-harmonic-mean correction)
                 ai = fwd["alpha_i"].detach()
                 aj = fwd["alpha_j"].detach()
                 ah = 2.0 * ai * aj / (ai + aj + eps)
                 imp_w = torch.where(y < 0.5, 1.0 / ah, torch.ones_like(ah))
+
+                # Hard-pair mining importance correction
+                if mining_active and "mining_iw" in batch:
+                    imp_w = imp_w * batch["mining_iw"]
 
                 bce = -(1.0 - y) * torch.log(p) - y * torch.log(1.0 - p)
                 loss = (imp_w * bce).sum() / imp_w.sum()
@@ -895,11 +930,22 @@ def train_cyclic(
         val_fraction=config.val_fraction, batch_size=config.batch_size,
         seed=config.seed, use_unit_weights=True,
     )
-    s2_train, s2_val, _, _ = make_dataloaders(
+    s2_train, s2_val, s2_train_ds, _ = make_dataloaders(
         between_pairs, site_data,
         val_fraction=config.val_fraction, batch_size=config.batch_size,
         seed=config.seed, use_unit_weights=True,
     )
+
+    # Hard-pair mining (between-site pairs only)
+    use_hard_mining = config.hard_mining_lambda > 0.0
+    hard_miner = None
+    if use_hard_mining:
+        hard_miner = HardPairMiner(s2_train_ds, config)
+        print(f"  Hard-pair mining: λ_hm={config.hard_mining_lambda}, "
+              f"bins={config.hard_mining_n_bins}, "
+              f"bin_weights={config.hard_mining_bin_weights}, "
+              f"a_max={config.hard_mining_a_max}, "
+              f"warmup={config.hard_mining_warmup_cycles} cycles")
 
     state = TrainingState()
 
@@ -1073,10 +1119,16 @@ def train_cyclic(
             # ==============================================================
             # Phase B: Train beta on between-site pairs (alpha frozen)
             # ==============================================================
+            mining_active = (
+                use_hard_mining
+                and cycle > config.hard_mining_warmup_cycles
+            )
+            mining_label = " + hard mining" if mining_active else ""
+
             if cycle == 1 or cycle % 10 == 0:
                 print(f"\n{'─'*60}")
                 print(f"  Cycle {cycle}/{max_cycles} — Phase B: "
-                      f"Optimise BETA ({n_beta_epochs} ep, alpha frozen)")
+                      f"Optimise BETA ({n_beta_epochs} ep, alpha frozen{mining_label})")
                 print(f"{'─'*60}")
 
             for p in model.alpha_net.parameters():
@@ -1084,12 +1136,31 @@ def train_cyclic(
             for p in model.beta_net.parameters():
                 p.requires_grad = True
 
+            # Refresh hard-pair scores and rebuild mined dataloader
+            if mining_active:
+                hard_miner.refresh_scores(model, site_data, device,
+                                          batch_size=config.batch_size * 2)
+                s2_train_mined = hard_miner.make_dataloader(
+                    batch_size=config.batch_size)
+            else:
+                s2_train_mined = s2_train
+
             s2_best_loss_this_cycle = float("inf")
             s2_patience_ctr = 0
             eps = 1e-7
 
             for ep in range(1, n_beta_epochs + 1):
                 global_epoch += 1
+
+                # Mid-phase refresh of hardness scores
+                if (mining_active
+                        and ep > 1
+                        and config.hard_mining_refresh_every > 0
+                        and (ep - 1) % config.hard_mining_refresh_every == 0):
+                    hard_miner.refresh_scores(model, site_data, device,
+                                              batch_size=config.batch_size * 2)
+                    s2_train_mined = hard_miner.make_dataloader(
+                        batch_size=config.batch_size)
 
                 # ---- Train (importance-weighted) ----
                 model.beta_net.train()
@@ -1101,7 +1172,7 @@ def train_cyclic(
                 total_bg = 0.0
                 nb = 0
 
-                for bi, batch in enumerate(s2_train):
+                for bi, batch in enumerate(s2_train_mined):
                     batch = {k: v.to(device) for k, v in batch.items()}
                     z_i = Z[batch["site_i"]]
                     z_j = Z[batch["site_j"]]
@@ -1112,12 +1183,16 @@ def train_cyclic(
                     y = batch["y"]
                     eta = fwd["eta"]
 
-                    # Importance weights
+                    # Importance weights (alpha-harmonic-mean correction)
                     ai = fwd["alpha_i"].detach()
                     aj = fwd["alpha_j"].detach()
                     ah = 2.0 * ai * aj / (ai + aj + eps)
                     imp_w = torch.where(y < 0.5, 1.0 / ah,
                                         torch.ones_like(ah))
+
+                    # Hard-pair mining importance correction
+                    if mining_active and "mining_iw" in batch:
+                        imp_w = imp_w * batch["mining_iw"]
 
                     bce = (-(1.0 - y) * torch.log(p)
                            - y * torch.log(1.0 - p))
@@ -1141,7 +1216,7 @@ def train_cyclic(
 
                     if (config.log_every > 0
                             and (bi + 1) % config.log_every == 0):
-                        print(f"      batch {bi+1}/{len(s2_train)}  "
+                        print(f"      batch {bi+1}/{len(s2_train_mined)}  "
                               f"loss={loss.item():.4f}  "
                               f"η_mean={eta.mean().item():.4f}  "
                               f"η_max={eta.max().item():.4f}")

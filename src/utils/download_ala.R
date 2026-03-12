@@ -34,6 +34,8 @@
 ##   AMP     -- Amphibians (class Amphibia)
 ##   FISH    -- Actinopterygii (ray-finned fishes)
 ##   INSECT  -- Insects (class Insecta)
+##   ORTH    -- Orthoptera (grasshoppers, crickets, katydids; order Orthoptera)
+##   HYM     -- Hymenoptera (ants, bees, wasps; order Hymenoptera)
 ##   ARACH   -- Arachnids (class Arachnida)
 ##   INVERT  -- Terrestrial/freshwater invertebrates (Arthropoda,
 ##             Mollusca, Annelida, Nematoda, Platyhelminthes,
@@ -78,6 +80,8 @@ GROUP_TAXA <- list(
   AMP     = list(taxon = "Amphibia",       rank = "class",   filter_class = NULL, filter_phylum = NULL),
   FISH    = list(taxon = "Actinopterygii", rank = "class",   filter_class = NULL, filter_phylum = NULL),
   INSECT  = list(taxon = "Insecta",        rank = "class",   filter_class = NULL, filter_phylum = NULL),
+  ORTH    = list(taxon = "Orthoptera",      rank = "order",   filter_class = NULL, filter_phylum = NULL),
+  HYM     = list(taxon = "Hymenoptera",     rank = "order",   filter_class = NULL, filter_phylum = NULL),
   ARACH   = list(taxon = "Arachnida",      rank = "class",   filter_class = NULL, filter_phylum = NULL),
   INVERT  = list(
     taxon = "Animalia", rank = "kingdom",

@@ -18,6 +18,13 @@
 #
 # Quadratic I-spline with 3 knots (q1, q2, q3).
 # Returns 0 below q1, 1 above q3, quadratic between.
+#
+# Degenerate-knot guards (2026-03-12):
+#   When knots collapse (q1==q2, q2==q3, or q1==q3) due to near-zero
+#   predictor variance, the divisions (q2-q1)*(q3-q1) etc. produce
+#   NaN/Inf.  Guard against this by returning 0 (no information) when
+#   the full knot range has collapsed, or simplifying to a step function
+#   when only one boundary has collapsed.
 # ---------------------------------------------------------------------------
 I_spline <- function(predVal, q1, q2, q3) {
   outVal <- rep(NA_real_, length(predVal))
@@ -25,12 +32,34 @@ I_spline <- function(predVal, q1, q2, q3) {
   ok <- !is.na(predVal)
   pv <- predVal[ok]
   ov <- rep(NA_real_, length(pv))
+
+  ## Degenerate knot guard: full range collapsed -> no information
+  if (abs(q3 - q1) < .Machine$double.eps * 100) {
+    ov[] <- 0
+    outVal[ok] <- ov
+    return(outVal)
+  }
+
   ov[pv <= q1] <- 0
   ov[pv >= q3] <- 1
-  ov[pv > q1 & pv <= q2] <-
-    ((pv[pv > q1 & pv <= q2] - q1)^2) / ((q2 - q1) * (q3 - q1))
-  ov[pv > q2 & pv < q3] <-
-    1 - ((q3 - pv[pv > q2 & pv < q3])^2) / ((q3 - q2) * (q3 - q1))
+
+  ## Guard the intermediate branches against collapsed sub-intervals
+  if (abs(q2 - q1) < .Machine$double.eps * 100) {
+    ## q1 == q2: first branch is empty, second covers full range
+    mid <- pv > q1 & pv < q3
+    ov[mid] <- 1 - ((q3 - pv[mid])^2) / ((q3 - q1)^2)
+  } else if (abs(q3 - q2) < .Machine$double.eps * 100) {
+    ## q2 == q3: second branch is empty, first covers full range
+    mid <- pv > q1 & pv < q3
+    ov[mid] <- ((pv[mid] - q1)^2) / ((q3 - q1)^2)
+  } else {
+    ## Normal case: both sub-intervals have positive width
+    ov[pv > q1 & pv <= q2] <-
+      ((pv[pv > q1 & pv <= q2] - q1)^2) / ((q2 - q1) * (q3 - q1))
+    ov[pv > q2 & pv < q3] <-
+      1 - ((q3 - pv[pv > q2 & pv < q3])^2) / ((q3 - q2) * (q3 - q1))
+  }
+
   outVal[ok] <- ov
   outVal
 }
@@ -227,6 +256,9 @@ nnls.fit <- function(x, y, weights = rep(1, nobs), start = NULL,
                      family = gaussian(), control = list(), intercept = TRUE,
                      singular.ok = TRUE, ...) {
   require(nnls)
+  ## Extract ridge lambda before glm.control (which doesn't know about it)
+  ridge_lambda <- if (!is.null(control$lambda)) control$lambda else 0
+  control$lambda <- NULL
   control  <- do.call("glm.control", control)
   x        <- as.matrix(x)
   xnames   <- dimnames(x)[[2L]]
@@ -302,8 +334,26 @@ nnls.fit <- function(x, y, weights = rep(1, nobs), start = NULL,
       ## NNLS: constrain all coefficients except intercept to be >= 0
       ## Cache weighted design matrix to avoid computing it twice
       xw  <- x[good, , drop = FALSE] * w
-      fit <- nnnpls(xw, z * w,
-                    con = c(-1, rep(1, ncol(x) - 1)))
+
+      ## Ridge penalty (L2 regularisation, 2026-03-12):
+      ## Augment the weighted design matrix with sqrt(lambda) * I rows
+      ## and the response with matching zeros.  This adds lambda * ||beta||^2
+      ## to the objective, shrinking all spline coefficients toward zero and
+      ## preventing explosion from collinear I-spline bases.
+      ## The intercept column (column 1) is NOT penalised.
+      if (ridge_lambda > 0) {
+        p <- ncol(xw)
+        ridge_X <- matrix(0, nrow = p - 1L, ncol = p)
+        diag(ridge_X[, 2:p]) <- sqrt(ridge_lambda)
+        xw_aug  <- rbind(xw, ridge_X)
+        zw_aug  <- c(z * w, rep(0, p - 1L))
+        fit <- nnnpls(xw_aug, zw_aug,
+                      con = c(-1, rep(1, p - 1)))
+        rm(xw_aug, zw_aug, ridge_X)
+      } else {
+        fit <- nnnpls(xw, z * w,
+                      con = c(-1, rep(1, ncol(x) - 1)))
+      }
       fit$coefficients <- fit$x
 
       ## QR decomposition for diagnostics (reuse cached xw)
@@ -378,8 +428,18 @@ nnls.fit <- function(x, y, weights = rep(1, nobs), start = NULL,
           mu    <- linkinv(eta <- eta + offset)
           dev   <- sum(dev.resids(y, mu, weights))
         }
-        if (ii > control$maxit) warning("inner loop 3; cannot correct step size")
-        else if (control$trace) cat("Step halved: new deviance =", dev, "\n")
+        if (ii > control$maxit) {
+          ## Fix (2026-03-12): revert to last good coefficients instead of
+          ## continuing with diverged state that can cause negative D2.
+          warning("inner loop 3; cannot correct step size -- reverting to previous coefficients", call. = FALSE)
+          start <- coefold
+          eta   <- drop(x %*% start)
+          mu    <- linkinv(eta <- eta + offset)
+          dev   <- sum(dev.resids(y, mu, weights))
+          conv  <- FALSE
+          coef  <- start
+          break
+        } else if (control$trace) cat("Step halved: new deviance =", dev, "\n")
       }
 
       if (abs(dev - devold) / (0.1 + abs(dev)) < control$epsilon) {
@@ -463,14 +523,27 @@ nnls.fit <- function(x, y, weights = rep(1, nobs), start = NULL,
 #   formula - model formula
 #   data    - data.frame of Match ~ spline predictors
 #   link    - "logit" (default, matches run scripts) or "negexp"
+#   weights - optional numeric vector of case weights (length = nrow(data))
+#   lambda  - ridge penalty (L2 regularisation).  0 = no penalty (default).
+#             Positive values shrink coefficients towards zero, preventing
+#             explosion from collinear I-spline bases.  Typical: 0.01-0.1.
 # ---------------------------------------------------------------------------
-fitGDM <- function(formula = NULL, data = NULL, link = "logit") {
+fitGDM <- function(formula = NULL, data = NULL, link = "logit",
+                   weights = NULL, lambda = 0) {
   fam <- if (link == "negexp") {
     binomial(link = negexp())
   } else {
     binomial()
   }
-  fit <- glm(formula, family = fam, data = data,
+
+  ## Construct the call -- pass weights only when provided
+  cl <- list(formula = formula, family = fam, data = data,
              control = list(maxit = 500), method = "nnls.fit")
+  if (!is.null(weights)) cl$weights <- weights
+
+  ## Store lambda in the control list so nnls.fit can access it
+  cl$control$lambda <- lambda
+
+  fit <- do.call(glm, cl)
   fit
 }

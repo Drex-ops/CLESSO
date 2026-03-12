@@ -51,10 +51,12 @@ config$data_dir <- env_or_default("RECA_DATA_DIR", file.path(config$project_root
 config$npy_src <- env_or_default("RECA_NPY_SRC", "/Volumes/PortableSSD/CLIMATE/geonpy")
 
 ## Substrate raster brick file (.grd)
-config$substrate_raster <- env_or_default(
-  "RECA_SUBSTRATE_RASTER",
-  file.path(config$data_dir, "SUBS_brk_VAS.grd")
-)
+## RECA_SUBSTRATE_RASTER can be a bare filename (resolved relative to data_dir)
+## or an absolute path.
+config$substrate_raster <- {
+  raw <- env_or_default("RECA_SUBSTRATE_RASTER", "SUBS_brk.grd")
+  if (dirname(raw) == ".") file.path(config$data_dir, raw) else raw
+}
 
 ## Reference raster for grid alignment (.flt)
 config$reference_raster <- env_or_default(
@@ -76,10 +78,10 @@ config$feather_tmpdir <- env_or_default("RECA_FEATHER_TMPDIR", tempdir())
 # ---------------------------------------------------------------------------
 
 ## Species group: "AVES", "PLANTS", or "VAS"
-config$species_group <- env_or_default("RECA_SPECIES_GROUP", "VAS")
+config$species_group <- env_or_default("RECA_SPECIES_GROUP", "HYM")
 
 ## Input observations CSV filename (relative to data_dir)
-config$obs_csv <- env_or_default("RECA_OBS_CSV", "ala_vas_2026-03-03.csv")
+config$obs_csv <- env_or_default("RECA_OBS_CSV", "ala_hym_2026-03-11.csv")
 
 ## Number of observation-pair matches to sample
 config$nMatch <- as.integer(env_or_default("RECA_NMATCH", "1000000"))
@@ -178,6 +180,18 @@ config$condition_suffix <- if (config$add_condition) "COND_" else ""
 ## Set to e.g. 1000000 if the GLM runs out of memory.
 config$max_fit_pairs <- NULL
 
+## Ridge penalty (L2 regularisation) for the NNLS GDM fitting.
+## Positive values shrink I-spline coefficients toward zero, preventing
+## explosion from collinear bases.  0 = no penalty (original behaviour).
+## Typical range: 0.01 -- 0.1.  Tune via cross-validation if needed.
+config$ridge_lambda <- as.numeric(env_or_default("RECA_RIDGE_LAMBDA", "0.01"))
+
+## Case weighting: use the estimated mismatch/match ratio (w) as case
+## weights in the GLM fit to correct for the forced 50:50 balance in
+## the observation-pair sampler.  When TRUE, ObsTrans downstream uses
+## w = 1 (correction is already baked into the model).
+config$use_case_weights <- as.logical(env_or_default("RECA_CASE_WEIGHTS", "TRUE"))
+
 # ---------------------------------------------------------------------------
 # Unique run folder
 #
@@ -272,6 +286,34 @@ config$fit_filename <- paste0(
 config$fit_path <- file.path(config$run_output_dir, config$fit_filename)
 
 # ---------------------------------------------------------------------------
+# Auto-discover existing fit file
+#
+# When RECA_RUN_ID is NOT explicitly set and the fit file doesn't exist in
+# the new run folder, scan existing run folders under output_dir for the
+# most recent matching fit.  If found, reuse that run folder so prediction
+# scripts "just work" without needing to manually set RECA_RUN_ID.
+# ---------------------------------------------------------------------------
+if (!file.exists(config$fit_path) &&
+    nchar(Sys.getenv("RECA_RUN_ID", unset = "")) == 0 &&
+    dir.exists(config$output_dir)) {
+
+  existing_dirs <- list.dirs(config$output_dir, full.names = TRUE, recursive = FALSE)
+  ## Search newest first (directory names end with timestamp)
+  existing_dirs <- rev(sort(existing_dirs))
+
+  for (d in existing_dirs) {
+    candidate <- file.path(d, config$fit_filename)
+    if (file.exists(candidate)) {
+      config$run_id         <- basename(d)
+      config$run_output_dir <- d
+      config$fit_path       <- candidate
+      cat(sprintf("  Auto-discovered fit in existing run: %s\n", config$run_id))
+      break
+    }
+  }
+}
+
+# ---------------------------------------------------------------------------
 # Create output directories if needed
 # ---------------------------------------------------------------------------
 if (!dir.exists(config$output_dir)) {
@@ -296,4 +338,6 @@ cat("  biAverage      :", config$biAverage, "\n")
 cat("  decomposition  :", config$decomposition, "\n")
 cat("  add_modis      :", config$add_modis, "\n")
 cat("  add_condition  :", config$add_condition, "\n")
+cat("  ridge_lambda   :", config$ridge_lambda, "\n")
+cat("  case_weights   :", config$use_case_weights, "\n")
 cat("  cores          :", config$cores_to_use, "\n")

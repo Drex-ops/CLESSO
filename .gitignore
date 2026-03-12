@@ -11,3 +11,9 @@ __pycache__/
 
 # Ignore any folder called output
 **/output/
+
+# Ignore any folder called viz
+**/viz/
+
+# Ingnore settings.json files
+**/settings.json

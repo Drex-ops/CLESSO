@@ -27,8 +27,25 @@ pyper_script <- config$pyper_script
 out_dir      <- config$run_output_dir
 
 ## Time-series parameters
-baseline_year  <- 1950L
-target_years   <- 1951L:2017L
+## When MODIS or Condition data is used, restrict prediction to the
+## year range covered by those layers.  Otherwise use the full climate range.
+climate_end <- config$geonpy_end_year      # e.g. 2017
+
+if (isTRUE(config$add_modis)) {
+  baseline_year <- config$modis_start_year
+  last_year     <- min(config$modis_end_year, climate_end)
+  target_years  <- (baseline_year + 1L):last_year
+  cat(sprintf("  MODIS enabled -> time-series %d–%d\n", baseline_year, last_year))
+} else if (isTRUE(config$add_condition)) {
+  baseline_year <- config$condition_start_year
+  last_year     <- min(config$condition_end_year, climate_end)
+  target_years  <- (baseline_year + 1L):last_year
+  cat(sprintf("  Condition enabled -> time-series %d–%d\n", baseline_year, last_year))
+} else {
+  baseline_year <- 1950L
+  target_years  <- 1951L:climate_end
+}
+
 pixels_per_reg <- 1000L   # max pixels to sample per region
 
 if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
@@ -134,6 +151,21 @@ cat(sprintf("\n  Active regions with samples: %d / %d\n", n_active, n_regions))
 
 # ---------------------------------------------------------------------------
 # 5. Run time-series predictions per region
+#
+# OPTIMISATION NOTES
+#   The original version called predict_temporal_gdm() once per year per
+#   region (67 years × 5 env groups = 335 Python subprocess calls per
+#   region, ~28 000 total).  This version:
+#
+#     A) Year-batches:  all target years for a region are packed into a
+#        single mega-table (n_sites × n_years rows) and passed to
+#        predict_temporal_gdm in ONE call.  This cuts Python subprocess
+#        overhead by ~67×.
+#
+#     B) Region parallelism:  regions are processed across CPU cores
+#        with parallel::mclapply (Unix) or sequential fallback (Windows).
+#        Set RECA_IBRA_CORES env var to control (default: cores_to_use
+#        from config, capped at 8 to avoid disk I/O saturation).
 # ---------------------------------------------------------------------------
 n_years <- length(target_years)
 cat(sprintf("\n--- Running time-series predictions: %d baseline -> {%d..%d} ---\n",
@@ -141,104 +173,87 @@ cat(sprintf("\n--- Running time-series predictions: %d baseline -> {%d..%d} ---\
 cat(sprintf("    %d regions × up to %d pixels × %d years\n",
             n_active, pixels_per_reg, n_years))
 
-## Storage: list of matrices [n_sites x n_years] per region
-results <- list()
+## Number of cores for region-level parallelism
+n_cores <- as.integer(Sys.getenv("RECA_IBRA_CORES",
+               unset = as.character(min(config$cores_to_use, 8L))))
+use_parallel <- (n_cores > 1L) && (.Platform$OS.type == "unix")
+if (use_parallel) {
+  cat(sprintf("    Parallel mode: %d cores (mclapply)\n", n_cores))
+} else {
+  cat("    Sequential mode\n")
+}
 
-total_t0 <- proc.time()
-
-for (ri in seq_along(active_regions)) {
-  reg <- active_regions[ri]
-  samp <- region_samples[[reg]]
+## ---- Worker function: process one region (batched over all years) ----
+process_region <- function(reg) {
+  samp    <- region_samples[[reg]]
   n_sites <- nrow(samp)
 
-  cat(sprintf("\n=== Region %d/%d: %s (%d sites) ===\n",
-              ri, n_active, reg, n_sites))
+  ## Build mega-table: replicate every site for every target year
+  pts_all <- data.frame(
+    lon   = rep(samp$lon,   times = n_years),
+    lat   = rep(samp$lat,   times = n_years),
+    year1 = baseline_year,
+    year2 = rep(target_years, each = n_sites)
+  )
 
-  mat_distance <- matrix(NA_real_, nrow = n_sites, ncol = n_years)
-  mat_dissim   <- matrix(NA_real_, nrow = n_sites, ncol = n_years)
-  mat_prob     <- matrix(NA_real_, nrow = n_sites, ncol = n_years)
+  res <- tryCatch(
+    predict_temporal_gdm(
+      fit          = fit,
+      points       = pts_all,
+      npy_src      = npy_src,
+      python_exe   = python_exe,
+      pyper_script = pyper_script,
+      verbose      = FALSE
+    ),
+    error = function(e) {
+      warning(sprintf("[%s] prediction failed: %s", reg, conditionMessage(e)))
+      NULL
+    }
+  )
+
+  if (is.null(res)) return(NULL)
+
+  ## Reshape from long vector back to [n_sites × n_years] matrices
+  mat_distance <- matrix(res$temporal_distance, nrow = n_sites, ncol = n_years)
+  mat_dissim   <- matrix(res$dissimilarity,      nrow = n_sites, ncol = n_years)
+  mat_prob     <- matrix(res$predicted_prob,      nrow = n_sites, ncol = n_years)
+  mat_sim      <- 1 - mat_dissim
   colnames(mat_distance) <- colnames(mat_dissim) <- colnames(mat_prob) <- target_years
+  colnames(mat_sim) <- target_years
 
-  reg_t0 <- proc.time()
-
-  for (yi in seq_along(target_years)) {
-    yr <- target_years[yi]
-
-    if (yi %% 10 == 1 || yi == n_years) {
-      elapsed <- (proc.time() - reg_t0)["elapsed"]
-      if (yi > 1) {
-        rate <- (yi - 1) / elapsed
-        eta  <- (n_years - yi + 1) / rate
-        cat(sprintf("  [%s] Year %d (%d/%d) | %.0fs elapsed | ~%.1f min left\n",
-                    format(Sys.time(), "%H:%M:%S"), yr, yi, n_years, elapsed, eta / 60))
-      } else {
-        cat(sprintf("  [%s] Year %d (%d/%d)\n",
-                    format(Sys.time(), "%H:%M:%S"), yr, yi, n_years))
-      }
-      flush.console()
-    }
-
-    pts <- data.frame(
-      lon   = samp$lon,
-      lat   = samp$lat,
-      year1 = baseline_year,
-      year2 = yr
-    )
-
-    res <- tryCatch(
-      predict_temporal_gdm(
-        fit          = fit,
-        points       = pts,
-        npy_src      = npy_src,
-        python_exe   = python_exe,
-        pyper_script = pyper_script,
-        verbose      = FALSE
-      ),
-      error = function(e) {
-        warning(sprintf("[%s] Year %d failed: %s", reg, yr, conditionMessage(e)))
-        NULL
-      }
-    )
-
-    if (!is.null(res)) {
-      mat_distance[, yi] <- res$temporal_distance
-      mat_dissim[, yi]   <- res$dissimilarity
-      mat_prob[, yi]     <- res$predicted_prob
-
-      ## Track NA rate for this year
-      n_na <- sum(is.na(res$dissimilarity))
-      if (n_na > 0 && (yi %% 10 == 1 || yi == n_years)) {
-        cat(sprintf("    -> %d / %d sites had NA for year %d (%.1f%%)\n",
-                    n_na, n_sites, yr, 100 * n_na / n_sites))
-      }
-    }
-  }
-
-  reg_time <- (proc.time() - reg_t0)["elapsed"]
-  cat(sprintf("  Region '%s' complete in %.1f min\n", reg, reg_time / 60))
-
-  ## NA summary for this region
-  total_cells <- prod(dim(mat_dissim))
-  na_cells    <- sum(is.na(mat_dissim))
-  if (na_cells > 0) {
-    cat(sprintf("  NA summary: %d / %d cells (%.1f%%) across %d sites × %d years\n",
-                na_cells, total_cells, 100 * na_cells / total_cells, n_sites, n_years))
-    ## Per-site NA rate
-    site_na_pct <- rowMeans(is.na(mat_dissim)) * 100
-    cat(sprintf("  Sites with >50%% NA: %d / %d | Sites with 100%% NA: %d / %d\n",
-                sum(site_na_pct > 50), n_sites, sum(site_na_pct == 100), n_sites))
-  } else {
-    cat("  No NAs in dissimilarity matrix\n")
-  }
-
-  results[[reg]] <- list(
+  list(
     sites        = samp,
     mat_distance = mat_distance,
     mat_dissim   = mat_dissim,
+    mat_sim      = mat_sim,
     mat_prob     = mat_prob,
     n_sites      = n_sites
   )
 }
+
+## ---- Run across all regions ----
+total_t0 <- proc.time()
+
+if (use_parallel) {
+  results_list <- parallel::mclapply(
+    active_regions, process_region, mc.cores = n_cores
+  )
+} else {
+  results_list <- vector("list", n_active)
+  for (ri in seq_along(active_regions)) {
+    reg <- active_regions[ri]
+    n_sites <- nrow(region_samples[[reg]])
+    cat(sprintf("\n=== Region %d/%d: %s (%d sites × %d years = %d pairs) ===\n",
+                ri, n_active, reg, n_sites, n_years, n_sites * n_years))
+    reg_t0 <- proc.time()
+    results_list[[ri]] <- process_region(reg)
+    reg_time <- (proc.time() - reg_t0)["elapsed"]
+    cat(sprintf("  Region '%s' complete in %.1f min\n", reg, reg_time / 60))
+  }
+}
+
+## Convert to named list
+results <- setNames(results_list, active_regions)
 
 total_time <- (proc.time() - total_t0)["elapsed"]
 cat(sprintf("\n--- All regions complete: %.1f min total ---\n", total_time / 60))
@@ -248,8 +263,8 @@ cat("\n--- NA Summary ---\n")
 for (reg in active_regions) {
   r <- results[[reg]]
   if (is.null(r)) next
-  total_c <- prod(dim(r$mat_dissim))
-  na_c    <- sum(is.na(r$mat_dissim))
+  total_c <- prod(dim(r$mat_sim))
+  na_c    <- sum(is.na(r$mat_sim))
   cat(sprintf("  %-40s : %5.1f%% NA  (%d / %d)\n",
               reg, 100 * na_c / max(total_c, 1), na_c, total_c))
 }
@@ -285,19 +300,19 @@ pdf(pdf_ribbon, width = 12, height = 7)
 
 for (reg in active_regions) {
   r <- results[[reg]]
-  if (is.null(r) || all(is.na(r$mat_dissim))) next
+  if (is.null(r) || all(is.na(r$mat_sim))) next
 
   ## Count valid (non-NA) values per year; skip years with < 3
-  n_valid <- colSums(!is.na(r$mat_dissim))
+  n_valid <- colSums(!is.na(r$mat_sim))
   ok_yrs  <- n_valid >= 3
   if (sum(ok_yrs) < 2) next    # need at least 2 plottable years
 
-  q10 <- apply(r$mat_dissim, 2, quantile, 0.10, na.rm = TRUE)
-  q25 <- apply(r$mat_dissim, 2, quantile, 0.25, na.rm = TRUE)
-  q50 <- apply(r$mat_dissim, 2, quantile, 0.50, na.rm = TRUE)
-  q75 <- apply(r$mat_dissim, 2, quantile, 0.75, na.rm = TRUE)
-  q90 <- apply(r$mat_dissim, 2, quantile, 0.90, na.rm = TRUE)
-  mean_d <- colMeans(r$mat_dissim, na.rm = TRUE)
+  q10 <- apply(r$mat_sim, 2, quantile, 0.10, na.rm = TRUE)
+  q25 <- apply(r$mat_sim, 2, quantile, 0.25, na.rm = TRUE)
+  q50 <- apply(r$mat_sim, 2, quantile, 0.50, na.rm = TRUE)
+  q75 <- apply(r$mat_sim, 2, quantile, 0.75, na.rm = TRUE)
+  q90 <- apply(r$mat_sim, 2, quantile, 0.90, na.rm = TRUE)
+  mean_d <- colMeans(r$mat_sim, na.rm = TRUE)
 
   ## Replace NaN/Inf from all-NA columns with NA for safe plotting
   q10[!is.finite(q10)]       <- NA
@@ -318,8 +333,8 @@ for (reg in active_regions) {
 
   par(mar = c(5, 5, 4, 2))
   plot(NA, xlim = range(target_years), ylim = y_range,
-       xlab = "Year", ylab = "Temporal Dissimilarity",
-       main = sprintf("%s\nTemporal Dissimilarity (%d baseline) | %s | %d sites",
+       xlab = "Year", ylab = "Temporal Similarity",
+       main = sprintf("%s\nTemporal Similarity (%d baseline) | %s | %d sites",
                       reg, baseline_year, fit$species_group, r$n_sites),
        cex.main = 1.0)
 
@@ -352,10 +367,10 @@ cat(sprintf("  Saved: %s\n", basename(pdf_ribbon)))
 # ---------------------------------------------------------------------------
 cat("\n--- Generating summary comparison plot ---\n")
 
-## Compute per-region median trajectory and final-year median dissimilarity
+## Compute per-region median trajectory and final-year median similarity
 region_medians <- data.frame(
-  region       = character(),
-  final_dissim = numeric(),
+  region    = character(),
+  final_sim = numeric(),
   stringsAsFactors = FALSE
 )
 
@@ -363,23 +378,23 @@ median_trajectories <- list()
 
 for (reg in active_regions) {
   r <- results[[reg]]
-  if (is.null(r) || all(is.na(r$mat_dissim))) next
-  meds <- apply(r$mat_dissim, 2, median, na.rm = TRUE)
+  if (is.null(r) || all(is.na(r$mat_sim))) next
+  meds <- apply(r$mat_sim, 2, median, na.rm = TRUE)
   median_trajectories[[reg]] <- meds
   region_medians <- rbind(region_medians, data.frame(
-    region       = reg,
-    final_dissim = meds[length(meds)],
+    region    = reg,
+    final_sim = meds[length(meds)],
     stringsAsFactors = FALSE
   ))
 }
 
-## Order by final dissimilarity (highest change first)
-region_medians <- region_medians[order(-region_medians$final_dissim), ]
+## Order by final similarity (lowest similarity = most change, first)
+region_medians <- region_medians[order(region_medians$final_sim), ]
 
-## Colour palette: gradient from low change (blue) to high change (red)
+## Colour palette: gradient from low similarity (red) to high similarity (blue)
 n_plotted <- nrow(region_medians)
-change_pal <- colorRampPalette(c("#2166AC", "#67A9CF", "#D1E5F0",
-                                  "#FDDBC7", "#EF8A62", "#B2182B"))(n_plotted)
+change_pal <- colorRampPalette(c("#B2182B", "#EF8A62", "#FDDBC7",
+                                  "#D1E5F0", "#67A9CF", "#2166AC"))(n_plotted)
 ## Assign colours in order of change (highest = red)
 reg_colours <- setNames(change_pal, region_medians$region)
 
@@ -393,8 +408,8 @@ pad   <- diff(y_all) * 0.05
 y_all <- y_all + c(-pad, pad)
 
 plot(NA, xlim = range(target_years), ylim = y_all,
-     xlab = "Year", ylab = "Median Temporal Dissimilarity",
-     main = sprintf("IBRA Region Comparison -- Median Temporal Dissimilarity (%d baseline)\n%s | %d regions",
+     xlab = "Year", ylab = "Median Temporal Similarity",
+     main = sprintf("IBRA Region Comparison -- Median Temporal Similarity (%d baseline)\n%s | %d regions",
                     baseline_year, fit$species_group, n_plotted),
      cex.main = 1.0)
 
@@ -412,7 +427,7 @@ for (reg in c(top5, bot5)) {
 }
 
 legend("topleft",
-       legend = c(paste("Highest:", top5), "", paste("Lowest:", bot5)),
+       legend = c(paste("Lowest:", top5), "", paste("Highest:", bot5)),
        col    = c(reg_colours[top5], NA, reg_colours[bot5]),
        lwd    = c(rep(2.5, 5), NA, rep(2.5, 5)),
        lty    = c(rep(1, 5), NA, rep(1, 5)),
@@ -421,17 +436,17 @@ legend("topleft",
 dev.off()
 cat(sprintf("  Saved: %s\n", basename(pdf_all)))
 
-## --- Plot B: Bar chart of final-year median dissimilarity by region ---
-pdf_bar <- file.path(out_dir, paste0(fit$species_group, modis_tag, "_ibra_timeseries_final_dissim_barplot.pdf"))
+## --- Plot B: Bar chart of final-year median similarity by region ---
+pdf_bar <- file.path(out_dir, paste0(fit$species_group, modis_tag, "_ibra_timeseries_final_sim_barplot.pdf"))
 pdf(pdf_bar, width = 14, height = max(8, n_plotted * 0.22))
 
 par(mar = c(5, 14, 4, 2))
-bp <- barplot(rev(region_medians$final_dissim),
+bp <- barplot(rev(region_medians$final_sim),
               horiz = TRUE, las = 1,
               names.arg = rev(region_medians$region),
               col = rev(reg_colours[region_medians$region]),
               border = NA,
-              xlab = sprintf("Median Temporal Dissimilarity (%d -> %d)",
+              xlab = sprintf("Median Temporal Similarity (%d -> %d)",
                              baseline_year, max(target_years)),
               main = sprintf("IBRA Region Ranking -- %s | %d yr climate window",
                              fit$species_group, fit$climate_window),
@@ -462,16 +477,16 @@ for (page in seq_len(n_pages)) {
 
   for (reg in page_regs) {
     r <- results[[reg]]
-    if (is.null(r) || all(is.na(r$mat_dissim))) {
+    if (is.null(r) || all(is.na(r$mat_sim))) {
       plot.new()
       next
     }
 
-    q10 <- apply(r$mat_dissim, 2, quantile, 0.10, na.rm = TRUE)
-    q25 <- apply(r$mat_dissim, 2, quantile, 0.25, na.rm = TRUE)
-    q50 <- apply(r$mat_dissim, 2, quantile, 0.50, na.rm = TRUE)
-    q75 <- apply(r$mat_dissim, 2, quantile, 0.75, na.rm = TRUE)
-    q90 <- apply(r$mat_dissim, 2, quantile, 0.90, na.rm = TRUE)
+    q10 <- apply(r$mat_sim, 2, quantile, 0.10, na.rm = TRUE)
+    q25 <- apply(r$mat_sim, 2, quantile, 0.25, na.rm = TRUE)
+    q50 <- apply(r$mat_sim, 2, quantile, 0.50, na.rm = TRUE)
+    q75 <- apply(r$mat_sim, 2, quantile, 0.75, na.rm = TRUE)
+    q90 <- apply(r$mat_sim, 2, quantile, 0.90, na.rm = TRUE)
 
     ## Sanitise non-finite values from all-NA columns
     q10[!is.finite(q10)] <- NA
@@ -480,7 +495,7 @@ for (page in seq_len(n_pages)) {
     q75[!is.finite(q75)] <- NA
     q90[!is.finite(q90)] <- NA
 
-    ok_yrs  <- colSums(!is.na(r$mat_dissim)) >= 3
+    ok_yrs  <- colSums(!is.na(r$mat_sim)) >= 3
     y_range <- range(c(q10[ok_yrs], q90[ok_yrs]), na.rm = TRUE)
     if (!all(is.finite(y_range)) || diff(y_range) == 0) {
       plot.new()
@@ -490,7 +505,7 @@ for (page in seq_len(n_pages)) {
     y_range <- y_range + c(-pad, pad)
 
     plot(NA, xlim = range(target_years), ylim = y_range,
-         xlab = "", ylab = "Dissimilarity",
+         xlab = "", ylab = "Similarity",
          main = sprintf("%s (n=%d)", reg, r$n_sites),
          cex.main = 0.9)
 
@@ -507,7 +522,7 @@ for (page in seq_len(n_pages)) {
   remaining <- panels_per_page - length(page_regs)
   if (remaining > 0) for (k in seq_len(remaining)) plot.new()
 
-  mtext(sprintf("IBRA Temporal Dissimilarity -- %s (%d baseline) -- page %d/%d",
+  mtext(sprintf("IBRA Temporal Similarity -- %s (%d baseline) -- page %d/%d",
                 fit$species_group, baseline_year, page, n_pages),
         outer = TRUE, cex = 0.9)
 }

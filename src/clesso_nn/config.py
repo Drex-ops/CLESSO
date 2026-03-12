@@ -129,6 +129,21 @@ class CLESSONNConfig:
     cycle_tol: float = 1e-4        # relative change convergence threshold
 
     # ------------------------------------------------------------------
+    # Hard-pair mining (between-site pairs only)
+    # ------------------------------------------------------------------
+    # Importance-corrected hard-pair mining for beta training.
+    # Mining strength λ_hm ∈ [0,1]: 0 = disabled (default), 1 = pure hard mining.
+    # q(p) = (1-λ_hm)·π(p) + λ_hm·h*(p)  with importance correction w* = w·π(p)/q(p).
+    hard_mining_lambda: float = 0.3         # mining strength / mixing proportion (0 = off)
+    hard_mining_warmup_cycles: int = 3      # cycles before enabling mining
+    hard_mining_n_bins: int = 3             # difficulty bins (e.g. easy/medium/hard)
+    hard_mining_bin_weights: list[float] = field(
+        default_factory=lambda: [0.2, 0.3, 0.5],  # mass per bin (easy→hard)
+    )
+    hard_mining_a_max: float = 5.0          # truncation cap for π(p)/q(p)
+    hard_mining_refresh_every: int = 1      # re-score pairs every N beta epochs within a phase
+
+    # ------------------------------------------------------------------
     # Fine-tuning phase (Phase 2 of cyclic_finetune)
     # ------------------------------------------------------------------
     # After Phase 1 (damped cyclic on env-only), Phase 2 adds geographic
@@ -143,7 +158,7 @@ class CLESSONNConfig:
     # ------------------------------------------------------------------
     # Device
     # ------------------------------------------------------------------
-    device: str = "auto"  # "auto", "cpu", "mps", "cuda"
+    device: str = "mps"  # "auto", "cpu", "mps", "cuda"
 
     def resolve_device(self) -> str:
         import torch

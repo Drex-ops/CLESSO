@@ -38,6 +38,12 @@ if (isTRUE(config$add_modis)) {
   target_years  <- (baseline_year + 1L):last_year
   cat(sprintf("  MODIS enabled -> time-series %d–%d (capped by climate data end %d)\n",
               baseline_year, last_year, climate_end))
+} else if (isTRUE(config$add_condition)) {
+  baseline_year <- config$condition_start_year
+  last_year     <- min(config$condition_end_year, climate_end)
+  target_years  <- (baseline_year + 1L):last_year
+  cat(sprintf("  Condition enabled -> time-series %d–%d (capped by climate data end %d)\n",
+              baseline_year, last_year, climate_end))
 } else {
   baseline_year <- 1950L
   target_years  <- 1951L:climate_end
@@ -136,6 +142,9 @@ for (yi in seq_along(target_years)) {
   }
 }
 
+## Compute similarity = 1 - dissimilarity
+mat_sim <- 1 - mat_dissim
+
 total_time <- (proc.time() - t0)["elapsed"]
 cat(sprintf("\n  Time-series complete: %d years x %d sites in %.1f min\n",
             n_years, n_sites, total_time / 60))
@@ -144,8 +153,8 @@ cat(sprintf("\n  Time-series complete: %d years x %d sites in %.1f min\n",
 # 5. Summary
 # ---------------------------------------------------------------------------
 cat("\n--- Time-series summary ---\n")
-mean_dissim <- colMeans(mat_dissim, na.rm = TRUE)
-n_ok <- sum(is.finite(mean_dissim))
+mean_sim <- colMeans(mat_sim, na.rm = TRUE)
+n_ok <- sum(is.finite(mean_sim))
 cat(sprintf("  Valid year-columns: %d / %d\n", n_ok, n_years))
 if (n_ok == 0) {
   cat("  WARNING: All predictions failed -- no valid results to plot.\n")
@@ -153,9 +162,9 @@ if (n_ok == 0) {
   cat(sprintf("\n=== Time-series test complete (%.1f min) ===\n", total_time / 60))
   q(save = "no")
 }
-cat(sprintf("  Mean dissimilarity range: [%.4f (%d), %.4f (%d)]\n",
-            min(mean_dissim, na.rm = TRUE), target_years[which.min(mean_dissim)],
-            max(mean_dissim, na.rm = TRUE), target_years[which.max(mean_dissim)]))
+cat(sprintf("  Mean similarity range: [%.4f (%d), %.4f (%d)]\n",
+            min(mean_sim, na.rm = TRUE), target_years[which.min(mean_sim)],
+            max(mean_sim, na.rm = TRUE), target_years[which.max(mean_sim)]))
 
 # ---------------------------------------------------------------------------
 # 6. Plots
@@ -179,24 +188,24 @@ pdf_spag <- file.path(out_dir, paste0(fit$species_group, modis_tag, "_test_times
 pdf(pdf_spag, width = 12, height = 7)
 
 par(mar = c(5, 5, 4, 2))
-y_range <- range(mat_dissim, na.rm = TRUE)
+y_range <- range(mat_sim, na.rm = TRUE)
 plot(NA, xlim = range(target_years), ylim = y_range,
-     xlab = "Year", ylab = "Temporal Dissimilarity",
-     main = sprintf("Temporal Biodiversity Dissimilarity (%d baseline)\n%s | %d sites | %d yr climate window",
+     xlab = "Year", ylab = "Temporal Similarity",
+     main = sprintf("Temporal Biodiversity Similarity (%d baseline)\n%s | %d sites | %d yr climate window",
                     baseline_year, fit$species_group, n_sites, fit$climate_window),
      cex.main = 1.1)
 
 for (i in seq_len(n_sites)) {
-  lines(target_years, mat_dissim[i, ], col = adjustcolor(site_cols[i], alpha.f = 0.4), lwd = 0.8)
+  lines(target_years, mat_sim[i, ], col = adjustcolor(site_cols[i], alpha.f = 0.4), lwd = 0.8)
 }
 
 ## Mean trajectory
-lines(target_years, mean_dissim, col = "black", lwd = 3)
+lines(target_years, mean_sim, col = "black", lwd = 3)
 
 ## Confidence band (mean +/- 1 SD)
-sd_dissim <- apply(mat_dissim, 2, sd, na.rm = TRUE)
+sd_sim <- apply(mat_sim, 2, sd, na.rm = TRUE)
 polygon(c(target_years, rev(target_years)),
-        c(mean_dissim + sd_dissim, rev(mean_dissim - sd_dissim)),
+        c(mean_sim + sd_sim, rev(mean_sim - sd_sim)),
         col = adjustcolor("grey40", alpha.f = 0.15), border = NA)
 
 legend("topleft",
@@ -212,15 +221,15 @@ pdf_ribbon <- file.path(out_dir, paste0(fit$species_group, modis_tag, "_test_tim
 pdf(pdf_ribbon, width = 12, height = 7)
 
 par(mar = c(5, 5, 4, 2))
-q10 <- apply(mat_dissim, 2, quantile, 0.10, na.rm = TRUE)
-q25 <- apply(mat_dissim, 2, quantile, 0.25, na.rm = TRUE)
-q50 <- apply(mat_dissim, 2, quantile, 0.50, na.rm = TRUE)
-q75 <- apply(mat_dissim, 2, quantile, 0.75, na.rm = TRUE)
-q90 <- apply(mat_dissim, 2, quantile, 0.90, na.rm = TRUE)
+q10 <- apply(mat_sim, 2, quantile, 0.10, na.rm = TRUE)
+q25 <- apply(mat_sim, 2, quantile, 0.25, na.rm = TRUE)
+q50 <- apply(mat_sim, 2, quantile, 0.50, na.rm = TRUE)
+q75 <- apply(mat_sim, 2, quantile, 0.75, na.rm = TRUE)
+q90 <- apply(mat_sim, 2, quantile, 0.90, na.rm = TRUE)
 
 plot(NA, xlim = range(target_years), ylim = range(c(q10, q90), na.rm = TRUE),
-     xlab = "Year", ylab = "Temporal Dissimilarity",
-     main = sprintf("Temporal Dissimilarity Trajectory (%d baseline)\n%s | quantile ribbons across %d sites",
+     xlab = "Year", ylab = "Temporal Similarity",
+     main = sprintf("Temporal Similarity Trajectory (%d baseline)\n%s | quantile ribbons across %d sites",
                     baseline_year, fit$species_group, n_sites),
      cex.main = 1.1)
 
@@ -235,7 +244,7 @@ polygon(c(target_years, rev(target_years)),
 ## Median
 lines(target_years, q50, col = "#2166AC", lwd = 3)
 ## Mean
-lines(target_years, mean_dissim, col = "#B2182B", lwd = 2, lty = 2)
+lines(target_years, mean_sim, col = "#B2182B", lwd = 2, lty = 2)
 
 legend("topleft",
        legend = c("Median", "Mean", "25th–75th pctile", "10th–90th pctile"),
@@ -252,16 +261,16 @@ pdf_heat <- file.path(out_dir, paste0(fit$species_group, modis_tag, "_test_times
 pdf(pdf_heat, width = 14, height = 8)
 
 par(mar = c(5, 5, 4, 6))
-heat_pal <- colorRampPalette(c("#2166AC", "#67A9CF", "#D1E5F0",
-                                "#FDDBC7", "#EF8A62", "#B2182B"))(100)
+heat_pal <- colorRampPalette(c("#B2182B", "#EF8A62", "#FDDBC7",
+                                "#D1E5F0", "#67A9CF", "#2166AC"))(100)
 
 ## Reorder sites by latitude (south at bottom)
 ord <- order(samp$lat)
 image(x = target_years, y = seq_len(n_sites),
-      z = t(mat_dissim[ord, ]),
+      z = t(mat_sim[ord, ]),
       col = heat_pal,
       xlab = "Year", ylab = "Site (ordered by latitude, south -> north)",
-      main = sprintf("Temporal Dissimilarity Heatmap (%d baseline)\n%s | %d yr climate window",
+      main = sprintf("Temporal Similarity Heatmap (%d baseline)\n%s | %d yr climate window",
                      baseline_year, fit$species_group, fit$climate_window),
       cex.main = 1.1, axes = FALSE)
 axis(1)
@@ -273,15 +282,15 @@ box()
 ## Colour bar
 fields_available <- requireNamespace("fields", quietly = TRUE)
 if (fields_available) {
-  fields::image.plot(legend.only = TRUE, zlim = range(mat_dissim, na.rm = TRUE),
+  fields::image.plot(legend.only = TRUE, zlim = range(mat_sim, na.rm = TRUE),
                      col = heat_pal, legend.mar = 4,
-                     legend.lab = "Dissimilarity")
+                     legend.lab = "Similarity")
 }
 
 dev.off()
 cat(sprintf("  Saved: %s\n", basename(pdf_heat)))
 
-## ============ Plot 4: Multi-panel -- ecological distance + dissimilarity + rate
+## ============ Plot 4: Multi-panel -- ecological distance + similarity + rate
 pdf_multi <- file.path(out_dir, paste0(fit$species_group, modis_tag, "_test_timeseries_multipanel.pdf"))
 pdf(pdf_multi, width = 12, height = 12)
 
@@ -299,27 +308,27 @@ polygon(c(target_years, rev(target_years)),
         c(mean_dist + sd_dist, rev(pmax(0, mean_dist - sd_dist))),
         col = adjustcolor("#238B45", alpha.f = 0.15), border = NA)
 
-## Panel B: Mean dissimilarity
-plot(target_years, mean_dissim, type = "l", lwd = 3, col = "#B2182B",
-     xlab = "Year", ylab = "Temporal Dissimilarity",
-     main = sprintf("Mean Temporal Dissimilarity (%d baseline) | %s",
+## Panel B: Mean similarity
+plot(target_years, mean_sim, type = "l", lwd = 3, col = "#B2182B",
+     xlab = "Year", ylab = "Temporal Similarity",
+     main = sprintf("Mean Temporal Similarity (%d baseline) | %s",
                     baseline_year, fit$species_group))
 polygon(c(target_years, rev(target_years)),
-        c(mean_dissim + sd_dissim, rev(pmax(0, mean_dissim - sd_dissim))),
+        c(mean_sim + sd_sim, rev(pmax(0, mean_sim - sd_sim))),
         col = adjustcolor("#B2182B", alpha.f = 0.15), border = NA)
 
-## Panel C: Year-on-year rate of change in dissimilarity
-delta_dissim <- diff(mean_dissim)
+## Panel C: Year-on-year rate of change in similarity
+delta_sim <- diff(mean_sim)
 delta_years  <- target_years[-1]
-plot(delta_years, delta_dissim, type = "h", lwd = 2,
-     col = ifelse(delta_dissim >= 0, "#B2182B", "#2166AC"),
-     xlab = "Year", ylab = expression(Delta * " Dissimilarity / year"),
-     main = sprintf("Year-on-Year Change in Mean Dissimilarity | %s",
+plot(delta_years, delta_sim, type = "h", lwd = 2,
+     col = ifelse(delta_sim >= 0, "#2166AC", "#B2182B"),
+     xlab = "Year", ylab = expression(Delta * " Similarity / year"),
+     main = sprintf("Year-on-Year Change in Mean Similarity | %s",
                     fit$species_group))
 abline(h = 0, lty = 2, col = "grey50")
 ## Smoothed trend
 if (length(delta_years) > 10) {
-  lo <- loess(delta_dissim ~ delta_years, span = 0.3)
+  lo <- loess(delta_sim ~ delta_years, span = 0.3)
   lines(delta_years, predict(lo), col = "black", lwd = 2)
 }
 
@@ -336,15 +345,15 @@ par(mar = c(5, 5, 4, 8), xpd = TRUE)
 sel_idx <- lat_order[round(seq(1, n_sites, length.out = 10))]
 sel_pal <- colorRampPalette(c("#2166AC", "#D1E5F0", "#FDDBC7", "#B2182B"))(10)
 
-y_range_sel <- range(mat_dissim[sel_idx, ], na.rm = TRUE)
+y_range_sel <- range(mat_sim[sel_idx, ], na.rm = TRUE)
 plot(NA, xlim = range(target_years), ylim = y_range_sel,
-     xlab = "Year", ylab = "Temporal Dissimilarity",
+     xlab = "Year", ylab = "Temporal Similarity",
      main = sprintf("Selected Site Trajectories (%d baseline)\n%s | 10 sites by latitude",
                     baseline_year, fit$species_group),
      cex.main = 1.1)
 
 for (k in seq_along(sel_idx)) {
-  lines(target_years, mat_dissim[sel_idx[k], ], col = sel_pal[k], lwd = 2)
+  lines(target_years, mat_sim[sel_idx[k], ], col = sel_pal[k], lwd = 2)
 }
 
 ## Legend outside plot
@@ -366,8 +375,9 @@ saveRDS(list(
   sites          = samp[, c("lon", "lat")],
   mat_distance   = mat_distance,
   mat_dissim     = mat_dissim,
+  mat_sim        = mat_sim,
   mat_prob       = mat_prob,
-  mean_dissim    = mean_dissim,
+  mean_sim       = mean_sim,
   fit_metadata   = list(
     species_group  = fit$species_group,
     climate_window = fit$climate_window,

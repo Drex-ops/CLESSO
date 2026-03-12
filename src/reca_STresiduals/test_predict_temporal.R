@@ -58,18 +58,33 @@ cat(sprintf("  Sampled %d points (extent: lon [%.2f, %.2f], lat [%.2f, %.2f])\n"
             min(samp$lon), max(samp$lon),
             min(samp$lat), max(samp$lat)))
 
-## Build prediction points: same locations, 1950 -> 2017
+## Build prediction points: year range depends on covariates used
+climate_end <- config$geonpy_end_year      # e.g. 2017
+
+if (isTRUE(config$add_modis)) {
+  pred_year1 <- config$modis_start_year
+  pred_year2 <- min(config$modis_end_year, climate_end)
+  cat(sprintf("  MODIS enabled -> predicting %d -> %d\n", pred_year1, pred_year2))
+} else if (isTRUE(config$add_condition)) {
+  pred_year1 <- config$condition_start_year
+  pred_year2 <- min(config$condition_end_year, climate_end)
+  cat(sprintf("  Condition enabled -> predicting %d -> %d\n", pred_year1, pred_year2))
+} else {
+  pred_year1 <- 1950L
+  pred_year2 <- climate_end
+}
+
 pts <- data.frame(
   lon   = samp$lon,
   lat   = samp$lat,
-  year1 = 1950L,
-  year2 = 2017L
+  year1 = pred_year1,
+  year2 = pred_year2
 )
 
 # ---------------------------------------------------------------------------
 # 4. Run temporal prediction
 # ---------------------------------------------------------------------------
-cat("\n--- Running temporal prediction (1950 -> 2017) ---\n")
+cat(sprintf("\n--- Running temporal prediction (%d -> %d) ---\n", pred_year1, pred_year2))
 result <- predict_temporal_gdm(
   fit          = fit,
   points       = pts,

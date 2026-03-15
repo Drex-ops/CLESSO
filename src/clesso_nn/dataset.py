@@ -129,18 +129,45 @@ class SiteData:
         env_site_table: Optional[pd.DataFrame],
         site_obs_richness: Optional[pd.DataFrame],
         metadata: dict,
+        effort_cov_names: Optional[list[str]] = None,
     ):
         # -- Site ID → contiguous 0-based index mapping --
         site_ids = site_covariates["site_id"].values
         self.site_id_to_idx = {sid: i for i, sid in enumerate(site_ids)}
         self.n_sites = len(site_ids)
 
+        # -- Effort / detectability covariates (separate from alpha) --
+        # These are kept in a separate W matrix and fed to EffortNet.
+        self.effort_cov_names: list[str] = []
+        self.W: Optional[torch.Tensor] = None
+        self.w_mean: Optional[np.ndarray] = None
+        self.w_std: Optional[np.ndarray] = None
+
+        _effort_names = effort_cov_names or []
+        # Keep only names that actually exist in the data
+        _effort_names = [c for c in _effort_names if c in site_covariates.columns]
+        if _effort_names:
+            self.effort_cov_names = _effort_names
+            W_raw = site_covariates[_effort_names].values.astype(np.float32)
+            self.w_mean = np.nanmean(W_raw, axis=0)
+            self.w_std = np.nanstd(W_raw, axis=0)
+            self.w_std[self.w_std == 0] = 1.0
+            W = (W_raw - self.w_mean) / self.w_std
+            np.nan_to_num(W, copy=False, nan=0.0)
+            self.W = torch.from_numpy(W)  # (n_sites, K_effort)
+            print(f"  [Effort] {len(_effort_names)} effort covariates: "
+                  f"{', '.join(_effort_names)}")
+
         # -- Alpha covariates (site-level features for richness model) --
         # Use all numeric columns except site_id as alpha covariates.
+        # Exclude effort columns (they go through EffortNet separately).
         # Optionally exclude raw lon/lat (when using Fourier encoding instead).
         exclude_coords = metadata.get("exclude_coords_from_alpha", False)
+        _effort_set = set(self.effort_cov_names)
         alpha_cols = [c for c in site_covariates.columns
-                      if c != "site_id" and pd.api.types.is_numeric_dtype(site_covariates[c])]
+                      if c != "site_id"
+                      and c not in _effort_set
+                      and pd.api.types.is_numeric_dtype(site_covariates[c])]
         if exclude_coords:
             alpha_cols = [c for c in alpha_cols if c not in ("lon", "lat")]
         Z_raw = site_covariates[alpha_cols].values.astype(np.float32)
@@ -243,6 +270,11 @@ class SiteData:
     @property
     def K_alpha(self) -> int:
         return self.Z.shape[1]
+
+    @property
+    def K_effort(self) -> int:
+        """Number of effort / detectability covariates for EffortNet."""
+        return self.W.shape[1] if self.W is not None else 0
 
     @property
     def K_env(self) -> int:
@@ -464,6 +496,7 @@ class HardPairMiner:
         """
         model.eval()
         Z = site_data.Z.to(device)
+        W = site_data.W.to(device) if site_data.W is not None else None
         eps = 1e-7
 
         # ---- Compute per-pair NLL ----
@@ -480,7 +513,10 @@ class HardPairMiner:
             }
             z_i = Z[batch["site_i"]]
             z_j = Z[batch["site_j"]]
-            fwd = model.forward(z_i, z_j, batch["env_diff"], batch["is_within"])
+            w_i = W[batch["site_i"]] if W is not None else None
+            w_j = W[batch["site_j"]] if W is not None else None
+            fwd = model.forward(z_i, z_j, batch["env_diff"], batch["is_within"],
+                                w_i=w_i, w_j=w_j)
             p = fwd["p_match"].clamp(eps, 1.0 - eps)
             y = torch.tensor(self.dataset.y[idx], dtype=torch.float32, device=device)
             h = -(1.0 - y) * torch.log(p) - y * torch.log(1.0 - p)

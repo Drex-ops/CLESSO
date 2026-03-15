@@ -59,6 +59,7 @@ def train_one_epoch(
     model.train()
     Z = site_data.Z.to(device)
     S_obs = site_data.S_obs.to(device)
+    W = site_data.W.to(device) if site_data.W is not None else None
 
     total_loss = 0.0
     total_bce = 0.0
@@ -74,8 +75,10 @@ def train_one_epoch(
 
         z_i = Z[batch["site_i"]]
         z_j = Z[batch["site_j"]]
+        w_i = W[batch["site_i"]] if W is not None else None
+        w_j = W[batch["site_j"]] if W is not None else None
 
-        result = model.compute_loss(batch, z_i, z_j, S_obs)
+        result = model.compute_loss(batch, z_i, z_j, S_obs, w_i=w_i, w_j=w_j)
         loss = result["loss"]
 
         optimizer.zero_grad()
@@ -130,6 +133,7 @@ def validate(
     model.eval()
     Z = site_data.Z.to(device)
     S_obs = site_data.S_obs.to(device)
+    W = site_data.W.to(device) if site_data.W is not None else None
 
     total_loss = 0.0
     total_bce = 0.0
@@ -147,8 +151,10 @@ def validate(
         batch = {k: v.to(device) for k, v in batch.items()}
         z_i = Z[batch["site_i"]]
         z_j = Z[batch["site_j"]]
+        w_i = W[batch["site_i"]] if W is not None else None
+        w_j = W[batch["site_j"]] if W is not None else None
 
-        result = model.compute_loss(batch, z_i, z_j, S_obs)
+        result = model.compute_loss(batch, z_i, z_j, S_obs, w_i=w_i, w_j=w_j)
 
         total_loss += result["loss"].item()
         total_bce += result["bce_loss"].item()
@@ -406,6 +412,7 @@ def _stage2_validate(
     """Stage 2: validate beta on between-site pairs."""
     model.eval()
     Z = site_data.Z.to(device)
+    W = site_data.W.to(device) if site_data.W is not None else None
 
     total_loss = 0.0
     all_eta = []
@@ -417,8 +424,11 @@ def _stage2_validate(
         batch = {k: v.to(device) for k, v in batch.items()}
         z_i = Z[batch["site_i"]]
         z_j = Z[batch["site_j"]]
+        w_i = W[batch["site_i"]] if W is not None else None
+        w_j = W[batch["site_j"]] if W is not None else None
 
-        fwd = model.forward(z_i, z_j, batch["env_diff"], batch["is_within"])
+        fwd = model.forward(z_i, z_j, batch["env_diff"], batch["is_within"],
+                            w_i=w_i, w_j=w_j)
         p = fwd["p_match"].clamp(eps, 1.0 - eps)
         y = batch["y"]
         eta = fwd["eta"]
@@ -469,6 +479,7 @@ def _save_checkpoint(model, optimizer, epoch, val_loss, site_data, config, path)
         "config": {
             "K_alpha": site_data.K_alpha,
             "K_env": site_data.K_env,
+            "K_effort": site_data.K_effort,
             "alpha_hidden": config.alpha_hidden,
             "beta_hidden": config.beta_hidden,
             "alpha_dropout": config.alpha_dropout,
@@ -478,13 +489,20 @@ def _save_checkpoint(model, optimizer, epoch, val_loss, site_data, config, path)
             "alpha_regression_lambda": config.alpha_regression_lambda,
             "beta_type": config.beta_type,
             "beta_n_knots": config.beta_n_knots,
+            "beta_no_intercept": config.beta_no_intercept,
             "training_mode": config.training_mode,
+            "geo_penalty_alpha": getattr(config, "geo_penalty_alpha", 0.0),
+            "geo_penalty_beta": getattr(config, "geo_penalty_beta", 0.0),
+            "effort_hidden": list(config.effort_hidden),
+            "effort_dropout": config.effort_dropout,
         },
         "site_data_stats": {
             "z_mean": site_data.z_mean.tolist(),
             "z_std": site_data.z_std.tolist(),
             "e_mean": site_data.e_mean.tolist() if hasattr(site_data, "e_mean") and site_data.e_mean is not None else None,
             "e_std": site_data.e_std.tolist() if hasattr(site_data, "e_std") and site_data.e_std is not None else None,
+            "w_mean": site_data.w_mean.tolist() if site_data.w_mean is not None else None,
+            "w_std": site_data.w_std.tolist() if site_data.w_std is not None else None,
             "geo_mean": site_data.geo_mean.tolist() if hasattr(site_data, "geo_mean") and site_data.geo_mean is not None else None,
             "geo_std": site_data.geo_std.tolist() if hasattr(site_data, "geo_std") and site_data.geo_std is not None else None,
             "geo_dist_scale": site_data.geo_dist_scale,
@@ -493,6 +511,7 @@ def _save_checkpoint(model, optimizer, epoch, val_loss, site_data, config, path)
             "fourier_max_wavelength": site_data.fourier_max_wavelength,
             "alpha_cov_names": site_data.alpha_cov_names,
             "env_cov_names": site_data.env_cov_names,
+            "effort_cov_names": site_data.effort_cov_names,
         },
     }, path)
 
@@ -645,7 +664,8 @@ def train_two_stage(
     with torch.no_grad():
         model.eval()
         Z = site_data.Z.to(device)
-        all_alpha = model.alpha_net(Z).cpu()
+        W = site_data.W.to(device) if site_data.W is not None else None
+        all_alpha = model._compute_alpha(Z, W).cpu()
         print(f"  Alpha after Stage 1: mean={all_alpha.mean():.1f}, "
               f"std={all_alpha.std():.1f}, "
               f"min={all_alpha.min():.1f}, max={all_alpha.max():.1f}")
@@ -751,6 +771,7 @@ def train_two_stage(
             model.beta_net.train()
             model.alpha_net.eval()
             Z = site_data.Z.to(device)
+            W = site_data.W.to(device) if site_data.W is not None else None
 
             total_loss_t = 0.0
             total_eta_t = 0.0
@@ -762,8 +783,11 @@ def train_two_stage(
                 batch = {k: v.to(device) for k, v in batch.items()}
                 z_i = Z[batch["site_i"]]
                 z_j = Z[batch["site_j"]]
+                w_i = W[batch["site_i"]] if W is not None else None
+                w_j = W[batch["site_j"]] if W is not None else None
 
-                fwd = model.forward(z_i, z_j, batch["env_diff"], batch["is_within"])
+                fwd = model.forward(z_i, z_j, batch["env_diff"], batch["is_within"],
+                                    w_i=w_i, w_j=w_j)
                 p = fwd["p_match"].clamp(eps, 1.0 - eps)
                 y = batch["y"]
                 eta = fwd["eta"]
@@ -780,6 +804,13 @@ def train_two_stage(
 
                 bce = -(1.0 - y) * torch.log(p) - y * torch.log(1.0 - p)
                 loss = (imp_w * bce).sum() / imp_w.sum()
+
+                # Geographic parameter L2 penalty (beta only during Stage 2)
+                if model.geo_penalty_beta > 0 and model.K_env_env > 0:
+                    _, beta_geo_l2 = model.geo_param_penalty(
+                        K_alpha_env=model.K_alpha_env,
+                        K_env_env=model.K_env_env)
+                    loss = loss + model.geo_penalty_beta * beta_geo_l2
 
                 s2_optimizer.zero_grad()
                 loss.backward()
@@ -1111,7 +1142,8 @@ def train_cyclic(
                 with torch.no_grad():
                     model.eval()
                     Z = site_data.Z.to(device)
-                    all_alpha = model.alpha_net(Z).cpu()
+                    W = site_data.W.to(device) if site_data.W is not None else None
+                    all_alpha = model._compute_alpha(Z, W).cpu()
                     print(f"  Alpha after cycle {cycle}: mean={all_alpha.mean():.1f}, "
                           f"std={all_alpha.std():.1f}, "
                           f"min={all_alpha.min():.1f}, max={all_alpha.max():.1f}")
@@ -1166,6 +1198,7 @@ def train_cyclic(
                 model.beta_net.train()
                 model.alpha_net.eval()
                 Z = site_data.Z.to(device)
+                W = site_data.W.to(device) if site_data.W is not None else None
 
                 total_loss_t = 0.0
                 total_eta_t = 0.0
@@ -1176,9 +1209,12 @@ def train_cyclic(
                     batch = {k: v.to(device) for k, v in batch.items()}
                     z_i = Z[batch["site_i"]]
                     z_j = Z[batch["site_j"]]
+                    w_i = W[batch["site_i"]] if W is not None else None
+                    w_j = W[batch["site_j"]] if W is not None else None
 
                     fwd = model.forward(z_i, z_j, batch["env_diff"],
-                                        batch["is_within"])
+                                        batch["is_within"],
+                                        w_i=w_i, w_j=w_j)
                     p = fwd["p_match"].clamp(eps, 1.0 - eps)
                     y = batch["y"]
                     eta = fwd["eta"]
@@ -1197,6 +1233,13 @@ def train_cyclic(
                     bce = (-(1.0 - y) * torch.log(p)
                            - y * torch.log(1.0 - p))
                     loss = (imp_w * bce).sum() / imp_w.sum()
+
+                    # Geographic parameter L2 penalty (beta only during Phase B)
+                    if model.geo_penalty_beta > 0 and model.K_env_env > 0:
+                        _, beta_geo_l2 = model.geo_param_penalty(
+                            K_alpha_env=model.K_alpha_env,
+                            K_env_env=model.K_env_env)
+                        loss = loss + model.geo_penalty_beta * beta_geo_l2
 
                     beta_optimizer.zero_grad()
                     loss.backward()
@@ -1387,6 +1430,11 @@ def train_finetune_geo(
     print(f"  Max epochs: {config.finetune_max_epochs}  "
           f"Patience: {config.finetune_patience}")
 
+    # Geographic parameter L2 penalty (reads strengths from model attributes)
+    if model.geo_penalty_alpha > 0 or model.geo_penalty_beta > 0:
+        print(f"  Geo L2 penalty: alpha={model.geo_penalty_alpha}, "
+              f"beta={model.geo_penalty_beta}")
+
     model = model.to(device)
 
     # Count env-only dim_nets (from Phase 1) vs new geo dim_net(s)
@@ -1395,6 +1443,10 @@ def train_finetune_geo(
     if hasattr(site_data, 'geo') and site_data.geo is not None:
         n_env_dims += site_data.geo.shape[1]
     n_new_dims = K_env_total - n_env_dims  # geo_dist dim_net(s)
+
+    # Count env-only alpha input columns (non-Fourier)
+    K_alpha_env = sum(1 for c in site_data.alpha_cov_names
+                      if not c.startswith("fourier_"))
 
     # Separate parameters into existing vs new
     existing_params = []
@@ -1407,6 +1459,16 @@ def train_finetune_geo(
         else:
             p.requires_grad = True
             existing_params.append(p)
+
+    # Effort params — optionally frozen via finetune_freeze_effort
+    freeze_effort = getattr(config, 'finetune_freeze_effort', False)
+    if hasattr(model, 'effort_net') and model.effort_net is not None:
+        for p in model.effort_net.parameters():
+            if freeze_effort:
+                p.requires_grad = False
+            else:
+                p.requires_grad = True
+                existing_params.append(p)
 
     # Beta params: existing per-dim components vs new geo components
     from src.clesso_nn.model import AdditiveBetaNet, FactoredDeepBetaNet
@@ -1479,6 +1541,11 @@ def train_finetune_geo(
              "weight_decay": config.weight_decay},
         )
 
+    if not param_groups:
+        print("  WARNING: No trainable parameters for Phase 2. "
+              "Skipping fine-tuning.")
+        return TrainingState()
+
     optimizer = Adam(param_groups)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
 
@@ -1528,6 +1595,7 @@ def train_finetune_geo(
 
     Z = site_data.Z.to(device)
     S_obs = site_data.S_obs.to(device)
+    W = site_data.W.to(device) if site_data.W is not None else None
 
     for epoch in range(1, config.finetune_max_epochs + 1):
         # ---- Train ----
@@ -1539,8 +1607,11 @@ def train_finetune_geo(
             batch = {k: v.to(device) for k, v in batch.items()}
             z_i = Z[batch["site_i"]]
             z_j = Z[batch["site_j"]]
+            w_i = W[batch["site_i"]] if W is not None else None
+            w_j = W[batch["site_j"]] if W is not None else None
 
-            fwd = model.forward(z_i, z_j, batch["env_diff"], batch["is_within"])
+            fwd = model.forward(z_i, z_j, batch["env_diff"], batch["is_within"],
+                                w_i=w_i, w_j=w_j)
             p = fwd["p_match"].clamp(eps, 1.0 - eps)
             y = batch["y"]
 
@@ -1570,6 +1641,13 @@ def train_finetune_geo(
                     viol_i.pow(2).mean() + viol_j.pow(2).mean())
 
             loss = (imp_w * bce).sum() / imp_w.sum() + lb_penalty
+
+            # Geographic parameter L2 penalty (separate from weight decay)
+            if model.geo_penalty_alpha > 0 or model.geo_penalty_beta > 0:
+                alpha_geo_l2, beta_geo_l2 = model.geo_param_penalty(
+                    K_alpha_env=model.K_alpha_env, K_env_env=model.K_env_env)
+                loss = loss + model.geo_penalty_alpha * alpha_geo_l2 \
+                            + model.geo_penalty_beta * beta_geo_l2
 
             optimizer.zero_grad()
             loss.backward()

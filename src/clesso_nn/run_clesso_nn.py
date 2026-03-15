@@ -111,14 +111,24 @@ def main(export_dir: str, config_overrides: dict | None = None):
         data["metadata"]["fourier_n_frequencies"] = cfg.fourier_n_frequencies
         data["metadata"]["fourier_max_wavelength"] = cfg.fourier_max_wavelength
 
+    # -- Auto-detect effort columns from R metadata if not set in config --
+    _effort_names = cfg.effort_cov_names
+    if not _effort_names:
+        meta_effort = data["metadata"].get("effort_cov_cols", [])
+        if meta_effort:
+            _effort_names = list(meta_effort)
+            print(f"  [effort] Auto-detected from metadata: {_effort_names}")
+
     site_data = SiteData(
         site_covariates=data["site_covariates"],
         env_site_table=data["env_site_table"],
         site_obs_richness=data["site_obs_richness"],
         metadata=data["metadata"],
+        effort_cov_names=_effort_names if _effort_names else None,
     )
 
     print(f"  K_alpha (site covs):     {site_data.K_alpha}")
+    print(f"  K_effort (effort covs):  {site_data.K_effort}")
     print(f"  K_env   (pairwise env):  {site_data.K_env}")
     print(f"  Total pairs: {len(data['pairs']):,}")
     print(f"  Built in {time.time() - t0:.1f}s")
@@ -139,15 +149,45 @@ def main(export_dir: str, config_overrides: dict | None = None):
         alpha_regression_lambda=cfg.alpha_regression_lambda,
         beta_type=cfg.beta_type,
         beta_n_knots=cfg.beta_n_knots,
+        beta_no_intercept=cfg.beta_no_intercept,
+        K_effort=site_data.K_effort,
+        effort_hidden=cfg.effort_hidden,
+        effort_dropout=cfg.effort_dropout,
     )
     model.eta_smoothness_lambda = cfg.eta_smoothness_lambda
+    model.effort_penalty = cfg.effort_penalty
+
+    # Geographic parameter L2 penalty — count env-only dimensions
+    # so the model knows which params are "geo" and can penalise them.
+    K_alpha_env = sum(1 for c in site_data.alpha_cov_names
+                      if not c.startswith("fourier_"))
+    K_env_env = len(site_data.env_cov_names)
+    if hasattr(site_data, 'geo') and site_data.geo is not None:
+        K_env_env += site_data.geo.shape[1]
+
+    model.geo_penalty_alpha = cfg.geo_penalty_alpha
+    model.geo_penalty_beta = cfg.geo_penalty_beta
+    model.K_alpha_env = K_alpha_env
+    model.K_env_env = K_env_env
+
+    has_geo_features = (K_alpha_env < site_data.K_alpha) or (K_env_env < site_data.K_env)
+    if has_geo_features and (cfg.geo_penalty_alpha > 0 or cfg.geo_penalty_beta > 0):
+        print(f"  Geo L2 penalty: alpha={cfg.geo_penalty_alpha} "
+              f"(K_alpha_env={K_alpha_env}/{site_data.K_alpha}), "
+              f"beta={cfg.geo_penalty_beta} "
+              f"(K_env_env={K_env_env}/{site_data.K_env})")
 
     n_params = sum(p.numel() for p in model.parameters())
     n_alpha = sum(p.numel() for p in model.alpha_net.parameters())
     n_beta = sum(p.numel() for p in model.beta_net.parameters())
+    n_effort = sum(p.numel() for p in model.effort_net.parameters()) if model.effort_net else 0
     print(f"  Total parameters: {n_params:,}")
     print(f"  Alpha network:    {n_alpha:,}")
     print(f"  Beta network:     {n_beta:,}")
+    if n_effort > 0:
+        print(f"  Effort network:   {n_effort:,}")
+        print(f"    Effort:  {cfg.effort_hidden} (dropout={cfg.effort_dropout}, "
+              f"L2={cfg.effort_penalty})")
     print(f"  Architecture:")
     print(f"    Alpha: {cfg.alpha_hidden} (dropout={cfg.alpha_dropout})")
     if cfg.beta_type == "additive":
@@ -200,6 +240,7 @@ def main(export_dir: str, config_overrides: dict | None = None):
             env_site_table=data["env_site_table"],
             site_obs_richness=data["site_obs_richness"],
             metadata=meta_phase2,
+            effort_cov_names=_effort_names if _effort_names else None,
         )
         print(f"  Phase 2 K_alpha: {site_data_geo.K_alpha}  "
               f"K_env: {site_data_geo.K_env}")
@@ -208,6 +249,17 @@ def main(export_dir: str, config_overrides: dict | None = None):
         model_expanded = expand_model_for_geo(
             model, site_data_geo.K_alpha, site_data_geo.K_env, cfg,
         )
+
+        # Set geo penalty attributes on expanded model
+        K_alpha_env_geo = sum(1 for c in site_data_geo.alpha_cov_names
+                              if not c.startswith("fourier_"))
+        K_env_env_geo = len(site_data_geo.env_cov_names)
+        if hasattr(site_data_geo, 'geo') and site_data_geo.geo is not None:
+            K_env_env_geo += site_data_geo.geo.shape[1]
+        model_expanded.geo_penalty_alpha = cfg.geo_penalty_alpha
+        model_expanded.geo_penalty_beta = cfg.geo_penalty_beta
+        model_expanded.K_alpha_env = K_alpha_env_geo
+        model_expanded.K_env_env = K_env_env_geo
 
         # Fine-tune with geographic features
         state = train_finetune_geo(

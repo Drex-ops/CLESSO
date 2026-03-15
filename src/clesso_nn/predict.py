@@ -35,6 +35,13 @@ def load_model(checkpoint_path: str | Path, device: str = "cpu") -> tuple[CLESSO
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     cfg = ckpt["config"]
 
+    # Infer beta_no_intercept from state_dict if not saved in config
+    beta_no_intercept = cfg.get("beta_no_intercept", None)
+    if beta_no_intercept is None:
+        sd = ckpt["model_state_dict"]
+        beta_no_intercept = "beta_net.encoders.0.0.bias" not in sd and \
+                            "beta_net.dim_nets.0.0.bias" not in sd
+
     model = CLESSONet(
         K_alpha=cfg["K_alpha"],
         K_env=cfg["K_env"],
@@ -47,17 +54,11 @@ def load_model(checkpoint_path: str | Path, device: str = "cpu") -> tuple[CLESSO
         alpha_regression_lambda=cfg.get("alpha_regression_lambda", 0.0),
         beta_type=cfg.get("beta_type", "deep"),
         beta_n_knots=cfg.get("beta_n_knots", 32),
+        beta_no_intercept=beta_no_intercept,
+        K_effort=cfg.get("K_effort", 0),
+        effort_hidden=cfg.get("effort_hidden", [64, 32]),
+        effort_dropout=cfg.get("effort_dropout", 0.1),
     )
-    model.load_state_dict(ckpt["model_state_dict"])
-    model.to(device)
-    model.eval()
-
-    return model, ckpt
-
-
-# --------------------------------------------------------------------------
-# Alpha (richness) prediction
-# --------------------------------------------------------------------------
 
 @torch.no_grad()
 def predict_alpha(
@@ -65,6 +66,8 @@ def predict_alpha(
     site_covariates: pd.DataFrame | np.ndarray,
     ckpt: dict,
     device: str = "cpu",
+    mode: str = "env_only",
+    effort_covariates: pd.DataFrame | np.ndarray | None = None,
 ) -> np.ndarray:
     """Predict species richness α for each site.
 
@@ -74,9 +77,15 @@ def predict_alpha(
             covariates (same columns as training). Will be standardised
             using the stored training means/stds.
         ckpt: checkpoint dict (for normalisation stats)
+        mode: "env_only" (true richness, default), "full" (env+effort),
+              or "effort_only" (effort component logit only — for diagnostics)
+        effort_covariates: (n_sites, K_effort) effort features.  Required
+            when mode="full" or "effort_only" and model has effort_net.
+            Will be standardised using stored w_mean / w_std.
 
     Returns:
-        alpha: (n_sites,) array of richness estimates
+        alpha: (n_sites,) array.  For mode="effort_only", returns raw
+               effort logit (not softplus-shifted).
     """
     stats = ckpt["site_data_stats"]
     z_mean = np.array(stats["z_mean"], dtype=np.float32)
@@ -106,9 +115,36 @@ def predict_alpha(
 
     Z = (Z_raw - z_mean) / z_std
     np.nan_to_num(Z, copy=False, nan=0.0)
-
     Z_t = torch.from_numpy(Z).to(device)
-    alpha = model.alpha_net(Z_t).cpu().numpy()
+
+    # Prepare effort tensor if needed
+    W_t = None
+    if mode in ("full", "effort_only") and model.effort_net is not None:
+        w_mean = np.array(stats.get("w_mean", []), dtype=np.float32)
+        w_std = np.array(stats.get("w_std", []), dtype=np.float32)
+        if effort_covariates is not None:
+            if isinstance(effort_covariates, pd.DataFrame):
+                effort_names = stats.get("effort_cov_names", [])
+                W_raw = effort_covariates[effort_names].values.astype(np.float32)
+            else:
+                W_raw = np.asarray(effort_covariates, dtype=np.float32)
+            W = (W_raw - w_mean) / w_std
+            np.nan_to_num(W, copy=False, nan=0.0)
+            W_t = torch.from_numpy(W).to(device)
+
+    if mode == "env_only":
+        alpha = model._compute_alpha_env_only(Z_t).cpu().numpy()
+    elif mode == "full":
+        alpha = model._compute_alpha(Z_t, W_t).cpu().numpy()
+    elif mode == "effort_only":
+        # Return raw effort logit (for mapping effort component)
+        if model.effort_net is not None and W_t is not None:
+            alpha = model.effort_net(W_t).squeeze(-1).cpu().numpy()
+        else:
+            alpha = np.zeros(Z_t.shape[0], dtype=np.float32)
+    else:
+        raise ValueError(f"Unknown mode: {mode!r}")
+
     return alpha
 
 
@@ -125,6 +161,10 @@ def predict_beta(
     device: str = "cpu",
     geo_i: Optional[np.ndarray] = None,
     geo_j: Optional[np.ndarray] = None,
+    lon_i: Optional[np.ndarray] = None,
+    lat_i: Optional[np.ndarray] = None,
+    lon_j: Optional[np.ndarray] = None,
+    lat_j: Optional[np.ndarray] = None,
 ) -> dict[str, np.ndarray]:
     """Predict turnover η and similarity S for site pairs.
 
@@ -133,7 +173,9 @@ def predict_beta(
         env_i, env_j: (n_pairs, K_env_cols) environmental covariate arrays
             for sites i and j respectively (raw, un-standardised)
         ckpt: checkpoint dict
-        geo_i, geo_j: (n_pairs, 2) lon/lat arrays (if geo_distance was used)
+        geo_i, geo_j: (n_pairs, 2) lon/lat arrays (OLD geo approach — |Δlon|, |Δlat|)
+        lon_i, lat_i, lon_j, lat_j: (n_pairs,) raw lon/lat in degrees
+            for haversine geo_dist (NEW approach — include_geo_dist_in_beta)
 
     Returns:
         dict with:
@@ -157,6 +199,20 @@ def predict_beta(
         gi_std = (geo_i.astype(np.float32) - geo_mean) / geo_std
         gj_std = (geo_j.astype(np.float32) - geo_mean) / geo_std
         parts.append(np.abs(gi_std - gj_std))
+
+    # Haversine geographic distance (NEW approach)
+    if stats.get("include_geo_dist_in_beta", False):
+        geo_dist_scale = stats.get("geo_dist_scale")
+        if lon_i is not None and geo_dist_scale:
+            from .dataset import haversine_km
+            d_km = haversine_km(
+                np.asarray(lon_i, dtype=np.float32),
+                np.asarray(lat_i, dtype=np.float32),
+                np.asarray(lon_j, dtype=np.float32),
+                np.asarray(lat_j, dtype=np.float32),
+            )
+            d_norm = (d_km / geo_dist_scale).reshape(-1, 1)
+            parts.append(d_norm)
 
     env_diff = np.concatenate(parts, axis=1) if parts else np.zeros((len(env_i), 0), dtype=np.float32)
     np.nan_to_num(env_diff, copy=False, nan=0.0)
@@ -183,6 +239,10 @@ def predict_full(
     device: str = "cpu",
     geo_i: Optional[np.ndarray] = None,
     geo_j: Optional[np.ndarray] = None,
+    lon_i: Optional[np.ndarray] = None,
+    lat_i: Optional[np.ndarray] = None,
+    lon_j: Optional[np.ndarray] = None,
+    lat_j: Optional[np.ndarray] = None,
 ) -> dict[str, np.ndarray]:
     """Predict alpha for both sites and beta for each pair.
 
@@ -190,7 +250,8 @@ def predict_full(
     """
     alpha_i = predict_alpha(model, site_covariates_i, ckpt, device)
     alpha_j = predict_alpha(model, site_covariates_j, ckpt, device)
-    beta = predict_beta(model, env_i, env_j, ckpt, device, geo_i, geo_j)
+    beta = predict_beta(model, env_i, env_j, ckpt, device, geo_i, geo_j,
+                        lon_i, lat_i, lon_j, lat_j)
 
     # p_match for between-site pairs
     S = beta["similarity"]

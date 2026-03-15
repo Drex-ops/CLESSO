@@ -263,6 +263,70 @@ if (!exists("pairs_dt") || !exists("clesso_config")) {
 }
 
 # ---------------------------------------------------------------------------
+# Step 4d: Extract effort / detectability rasters at site locations
+# ---------------------------------------------------------------------------
+## The 6 raw effort rasters (ESRI BIL .flt format) live in the Effort_data_preper
+## outputs directory.  We extract values at each unique site and include them in
+## site_covariates so the NN effort‑net can use them.
+
+effort_raster_dir <- Sys.getenv(
+  "EFFORT_RASTER_DIR",
+  unset = "/Users/andrewhoskins/Library/Mobile Documents/com~apple~CloudDocs/CODE/Effort_data_preper/outputs"
+)
+
+effort_layer_names <- c(
+  "ala_record_count",
+  "ala_record_smoothed",
+  "dist_to_nearest_institution",
+  "hub_influence_unweighted",
+  "hub_influence_ecology_weighted",
+  "road_density_km_per_km2"
+)
+
+if (dir.exists(effort_raster_dir)) {
+  cat("  Extracting effort / detectability rasters at site locations...\n")
+  require(raster)
+
+  ## Rebuild unique_sites if not already in scope (e.g. sourced from run_clesso)
+  if (!exists("unique_sites") || is.null(unique_sites)) {
+    unique_sites <- unique(pairs_dt[, .(site_id = site_i, lon = lon_i, lat = lat_i)])
+    unique_sites_j <- unique(pairs_dt[, .(site_id = site_j, lon = lon_j, lat = lat_j)])
+    setnames(unique_sites_j, c("site_id", "lon", "lat"))
+    unique_sites <- unique(rbind(unique_sites, unique_sites_j), by = "site_id")
+  }
+
+  effort_parts <- list()
+  for (lyr in effort_layer_names) {
+    flt_path <- file.path(effort_raster_dir, paste0(lyr, ".flt"))
+    if (!file.exists(flt_path)) {
+      cat(sprintf("    WARNING: effort raster not found: %s\n", flt_path))
+      next
+    }
+    ras <- raster(flt_path)
+    vals <- raster::extract(ras, unique_sites[, .(lon, lat)])
+    effort_parts[[lyr]] <- vals
+    n_na <- sum(is.na(vals))
+    cat(sprintf("    %s  — %d values extracted (%d NA)\n", lyr, length(vals), n_na))
+  }
+
+  if (length(effort_parts) > 0) {
+    effort_dt <- as.data.table(effort_parts)
+
+    ## Append effort columns to site_covs (so they end up in site_covariates.feather)
+    if (!is.null(site_covs)) {
+      site_covs <- cbind(site_covs, effort_dt)
+    } else {
+      site_covs <- cbind(unique_sites[, .(site_id)], effort_dt)
+    }
+    cat(sprintf("  Effort extraction complete: %d layers appended to site_covs\n",
+                ncol(effort_dt)))
+  }
+} else {
+  cat(sprintf("  Skipping effort raster extraction (dir not found: %s)\n",
+              effort_raster_dir))
+}
+
+# ---------------------------------------------------------------------------
 # Create export directory
 # ---------------------------------------------------------------------------
 require(arrow)
@@ -370,6 +434,10 @@ if (exists("site_obs_richness") && !is.null(site_obs_richness)) {
 # ---------------------------------------------------------------------------
 cat("  Exporting metadata...\n")
 
+## Identify which effort columns actually made it into site_covs
+effort_cols_in_export <- if (exists("effort_parts") && length(effort_parts) > 0)
+                            names(effort_parts) else character(0)
+
 metadata <- list(
   species_group       = clesso_config$species_group,
   run_id              = clesso_config$run_id,
@@ -382,9 +450,11 @@ metadata <- list(
   geo_distance        = clesso_config$geo_distance,
   export_date         = as.character(Sys.time()),
   alpha_cov_cols      = if (exists("site_covs") && !is.null(site_covs))
-                          setdiff(names(site_covs), "site_id") else c("lon", "lat"),
+                          setdiff(names(site_covs), c("site_id", effort_cols_in_export))
+                        else c("lon", "lat"),
   env_cov_cols        = if (exists("env_site_table") && !is.null(env_site_table))
-                          setdiff(names(env_site_table), "site_id") else character(0)
+                          setdiff(names(env_site_table), "site_id") else character(0),
+  effort_cov_cols     = effort_cols_in_export
 )
 
 saveRDS(metadata, file.path(export_dir, "metadata.rds"))

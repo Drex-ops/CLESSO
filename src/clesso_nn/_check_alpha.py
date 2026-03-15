@@ -11,6 +11,14 @@ from clesso_nn.dataset import load_export, SiteData
 ckpt = torch.load("src/clesso_nn/output/VAS_nn/best_model.pt",
                    map_location="cpu", weights_only=False)
 cfg = ckpt["config"]
+
+# Infer beta_no_intercept from state_dict if not saved in config
+beta_no_intercept = cfg.get("beta_no_intercept", None)
+if beta_no_intercept is None:
+    sd = ckpt["model_state_dict"]
+    beta_no_intercept = "beta_net.encoders.0.0.bias" not in sd and \
+                        "beta_net.dim_nets.0.0.bias" not in sd
+
 model = CLESSONet(
     K_alpha=cfg["K_alpha"], K_env=cfg["K_env"],
     alpha_hidden=cfg["alpha_hidden"],
@@ -20,6 +28,10 @@ model = CLESSONet(
     alpha_activation=cfg["alpha_activation"],
     beta_type=cfg.get("beta_type", "deep"),
     beta_n_knots=cfg.get("beta_n_knots", 32),
+    beta_no_intercept=beta_no_intercept,
+    K_effort=cfg.get("K_effort", 0),
+    effort_hidden=cfg.get("effort_hidden", [64, 32]),
+    effort_dropout=cfg.get("effort_dropout", 0.1),
 )
 model.load_state_dict(ckpt["model_state_dict"])
 model.eval()

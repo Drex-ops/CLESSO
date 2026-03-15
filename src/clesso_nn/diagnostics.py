@@ -171,7 +171,14 @@ def run_diagnostics(
         env_site_table=data["env_site_table"],
         site_obs_richness=data["site_obs_richness"],
         metadata=data["metadata"],
+        effort_cov_names=stats.get("effort_cov_names") or None,
     )
+
+    # Override geo_dist_scale with checkpoint value for exact reproducibility
+    # (SiteData recomputes from random samples, which should match but this is safer)
+    ckpt_geo_dist_scale = stats.get("geo_dist_scale")
+    if ckpt_geo_dist_scale is not None and site_data.include_geo_dist_in_beta:
+        site_data.geo_dist_scale = ckpt_geo_dist_scale
 
     stats = ckpt["site_data_stats"]
     cfg_model = ckpt["config"]
@@ -247,13 +254,16 @@ def run_diagnostics(
     s1_log_path = checkpoint_path.parent / "training_progress_stage1.log"
     s2_log_path = checkpoint_path.parent / "training_progress_stage2.log"
     cyc_log_path = checkpoint_path.parent / "training_progress_cyclic.log"
+    ft_log_path = checkpoint_path.parent / "training_progress_finetune.log"
 
     train_log = None       # joint-mode log
     stage1_log = None      # two-stage: alpha-only on within-site
     stage2_log = None      # two-stage: beta-only on between-site
     cyclic_log = None      # cyclic: alternating alpha/beta per cycle
+    finetune_log = None    # cyclic_finetune: Phase 2 geo fine-tuning
     is_two_stage = s1_log_path.exists() and s2_log_path.exists()
     is_cyclic = cyc_log_path.exists()
+    is_cyclic_finetune = is_cyclic and ft_log_path.exists()
 
     if is_cyclic:
         cyclic_log = pd.read_csv(cyc_log_path)
@@ -262,6 +272,9 @@ def run_diagnostics(
         n_beta = len(cyclic_log[cyclic_log["phase"] == "beta"])
         print(f"  Training log (cyclic): {n_cycles} cycles, "
               f"{n_alpha} alpha epochs, {n_beta} beta epochs")
+        if is_cyclic_finetune:
+            finetune_log = pd.read_csv(ft_log_path)
+            print(f"  Training log (finetune Phase 2): {len(finetune_log)} epochs")
     elif is_two_stage:
         stage1_log = pd.read_csv(s1_log_path)
         stage2_log = pd.read_csv(s2_log_path)
@@ -349,6 +362,19 @@ def run_diagnostics(
                 f"Beta epochs/cycle:  {len(cyc_beta) // max(_nc, 1)}",
                 f"Best beta AUC:      {_best_auc:.4f}",
                 f"Best cycle:         {_best_cycle}",
+            ]
+
+        # Cyclic finetune Phase 2 summary
+        if is_cyclic_finetune and finetune_log is not None:
+            ft_epochs = len(finetune_log)
+            ft_best_auc = float(finetune_log["val_auc"].max()) if "val_auc" in finetune_log.columns else float("nan")
+            ft_best_loss = float(finetune_log["val_loss"].min()) if "val_loss" in finetune_log.columns else float("nan")
+            summary += [
+                "",
+                f"--- Phase 2: Geographic Fine-tuning ---",
+                f"Finetune epochs:     {ft_epochs}",
+                f"Best finetune AUC:   {ft_best_auc:.4f}",
+                f"Best finetune loss:  {ft_best_loss:.6f}",
             ]
 
         summary += [
@@ -497,6 +523,66 @@ def run_diagnostics(
                 ax4b.legend(loc="upper right", fontsize=8)
 
                 fig.suptitle(f"Cyclic Training: Beta Phases -- {species}", fontsize=13)
+                pdf.savefig(fig); plt.close(fig)
+
+            # ---- Phase 2 finetune curves (if cyclic_finetune) ----
+            if is_cyclic_finetune and finetune_log is not None and len(finetune_log) > 1:
+                ft = finetune_log
+                fig = plt.figure(figsize=(14, 10))
+                gs = GridSpec(2, 2, figure=fig, hspace=0.35, wspace=0.3)
+
+                # Finetune val loss
+                ax1 = fig.add_subplot(gs[0, 0])
+                ax1.plot(ft["epoch"], ft["val_loss"],
+                         color=PAL_RED, lw=1.5, label="Val loss")
+                if "train_loss" in ft.columns:
+                    ax1.plot(ft["epoch"], ft["train_loss"],
+                             color=PAL_BLUE, lw=1.5, alpha=0.7, label="Train loss")
+                ax1.set_xlabel("Epoch"); ax1.set_ylabel("Loss")
+                ax1.set_title("Phase 2 (Geo Fine-tune): Loss")
+                ax1.legend(fontsize=8)
+
+                # Finetune AUC
+                ax2 = fig.add_subplot(gs[0, 1])
+                if "val_auc" in ft.columns:
+                    ax2.plot(ft["epoch"], ft["val_auc"],
+                             color=PAL_GREEN, lw=1.5)
+                ax2.set_xlabel("Epoch"); ax2.set_ylabel("AUC")
+                ax2.set_title("Phase 2: Between-Site AUC")
+
+                # Finetune eta stats
+                ax3 = fig.add_subplot(gs[1, 0])
+                if "val_eta_mean" in ft.columns:
+                    ax3.plot(ft["epoch"], ft["val_eta_mean"],
+                             color=PAL_BLUE, lw=1.5, label="Mean η")
+                if "val_eta_std" in ft.columns:
+                    ax3.fill_between(
+                        ft["epoch"],
+                        ft["val_eta_mean"].astype(float) - ft["val_eta_std"].astype(float),
+                        ft["val_eta_mean"].astype(float) + ft["val_eta_std"].astype(float),
+                        alpha=0.15, color=PAL_BLUE, label="±1 std",
+                    )
+                ax3.set_xlabel("Epoch"); ax3.set_ylabel("η (turnover)")
+                ax3.set_title("Phase 2: Eta Stats")
+                ax3.legend(fontsize=8)
+
+                # Finetune alpha stats
+                ax4 = fig.add_subplot(gs[1, 1])
+                if "alpha_mean" in ft.columns:
+                    ax4.plot(ft["epoch"], ft["alpha_mean"],
+                             color=PAL_BLUE, lw=1.5, label="Mean α")
+                    if "alpha_min" in ft.columns:
+                        ax4.fill_between(
+                            ft["epoch"],
+                            ft["alpha_min"].astype(float),
+                            ft["alpha_max"].astype(float),
+                            alpha=0.15, color=PAL_BLUE, label="[min, max]",
+                        )
+                ax4.set_xlabel("Epoch"); ax4.set_ylabel("Alpha (richness)")
+                ax4.set_title("Phase 2: Alpha Stats")
+                ax4.legend(fontsize=8)
+
+                fig.suptitle(f"Phase 2 Geo Fine-tuning -- {species}", fontsize=13)
                 pdf.savefig(fig); plt.close(fig)
 
         elif is_two_stage and stage1_log is not None and len(stage1_log) > 1:
@@ -981,7 +1067,8 @@ def run_diagnostics(
             Z_grid[:, k] = (x_grid - z_mean[k]) / z_std[k]
 
             with torch.no_grad():
-                alpha_pred = model.alpha_net(torch.from_numpy(Z_grid)).cpu().numpy()
+                alpha_pred = model._compute_alpha_env_only(
+                    torch.from_numpy(Z_grid)).cpu().numpy()
 
             ax.plot(x_grid, alpha_pred, color=PAL_BLUE, lw=2.5)
             ax.set_xlabel(alpha_names[k])
@@ -1014,8 +1101,10 @@ def run_diagnostics(
                 Z_lo[0, k] = (x_lo - z_mean[k]) / z_std[k]
                 Z_hi[0, k] = (x_hi - z_mean[k]) / z_std[k]
                 with torch.no_grad():
-                    a_lo = model.alpha_net(torch.from_numpy(Z_lo)).item()
-                    a_hi = model.alpha_net(torch.from_numpy(Z_hi)).item()
+                    a_lo = model._compute_alpha_env_only(
+                        torch.from_numpy(Z_lo)).item()
+                    a_hi = model._compute_alpha_env_only(
+                        torch.from_numpy(Z_hi)).item()
                 pd_ranges.append(abs(a_hi - a_lo))
 
             top2 = np.argsort(pd_ranges)[-2:][::-1]
@@ -1032,7 +1121,8 @@ def run_diagnostics(
             Z_2d[:, k2] = ((X2.ravel()) - z_mean[k2]) / z_std[k2]
 
             with torch.no_grad():
-                alpha_2d = model.alpha_net(torch.from_numpy(Z_2d)).cpu().numpy()
+                alpha_2d = model._compute_alpha_env_only(
+                    torch.from_numpy(Z_2d)).cpu().numpy()
             ALPHA = alpha_2d.reshape(n_grid, n_grid)
 
             cs = ax.contourf(X1, X2, ALPHA, levels=20, cmap="YlOrRd")
@@ -1153,11 +1243,22 @@ def run_diagnostics(
 
         # Eta vs geographic distance (if available)
         ax = axes[1, 0]
-        geo_dist = env_diff[:, -2:] if K_env >= 2 else None  # last 2 are geo
-        if geo_dist is not None:
-            geo_d = np.sqrt((geo_dist ** 2).sum(axis=1))
+        # Determine geographic distance from env_diff based on model configuration
+        has_geo_dist_beta = getattr(site_data, "include_geo_dist_in_beta", False)
+        has_old_geo = site_data.geo is not None
+        geo_d_all = None
+
+        if has_geo_dist_beta:
+            # NEW approach: haversine distance is the LAST column of env_diff
+            geo_d_all = env_diff[:, -1]  # already normalised by geo_dist_scale
+        elif has_old_geo:
+            # OLD approach: last 2 columns are |Δlon|, |Δlat| (standardised)
+            geo_cols = env_diff[:, -2:]
+            geo_d_all = np.sqrt((geo_cols ** 2).sum(axis=1))
+
+        if geo_d_all is not None:
             between_mask = ~is_within
-            geo_d_b = geo_d[between_mask]
+            geo_d_b = geo_d_all[between_mask]
             rng = np.random.default_rng(42)
             n_sub = min(20000, len(eta_between))
             idx = rng.choice(len(eta_between), n_sub, replace=False)

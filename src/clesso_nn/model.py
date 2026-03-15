@@ -65,6 +65,16 @@ class AlphaNet(nn.Module):
         with torch.no_grad():
             output_layer.bias.fill_(1.1)  # softplus(1.1) + 1 ≈ 2.7
 
+    def logit(self, z: torch.Tensor) -> torch.Tensor:
+        """Return raw (pre-softplus) logit for additive decomposition.
+
+        Args:
+            z: (batch, K_alpha) standardised site covariates
+        Returns:
+            raw: (batch,) unbounded logit
+        """
+        return self.net(z).squeeze(-1)
+
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         """
         Args:
@@ -72,9 +82,61 @@ class AlphaNet(nn.Module):
         Returns:
             alpha: (batch,) positive richness values > 1
         """
-        raw = self.net(z).squeeze(-1)
+        raw = self.logit(z)
         # softplus ensures positivity; +1 ensures alpha > 1
         return F.softplus(raw) + 1.0
+
+
+# --------------------------------------------------------------------------
+# Effort / detectability network (additive offset in alpha)
+# --------------------------------------------------------------------------
+
+class EffortNet(nn.Module):
+    """Small MLP mapping effort/detectability covariates to a raw logit offset.
+
+    Used in additive decomposition:
+        α = softplus(AlphaNet.logit(env) + EffortNet(effort)) + 1
+
+    Architecture:
+        input (K_effort) → [Linear→SiLU→Dropout] × L → Linear(1)
+        output = raw logit (no activation — added to env logit before softplus)
+
+    Output bias initialised to 0 so effort starts neutral (env carries
+    the initial prediction).
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dims: list[int] = (64, 32),
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        layers = []
+        prev = input_dim
+        for h in hidden_dims:
+            layers.extend([nn.Linear(prev, h), nn.SiLU(), nn.Dropout(dropout)])
+            prev = h
+        layers.append(nn.Linear(prev, 1))
+        self.net = nn.Sequential(*layers)
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+        # Output bias = 0 → effort starts neutral
+        # (softplus(env_logit + 0) = softplus(env_logit))
+
+    def forward(self, w: torch.Tensor) -> torch.Tensor:
+        """Args:
+            w: (batch, K_effort) standardised effort covariates
+        Returns:
+            offset: (batch,) raw logit offset
+        """
+        return self.net(w).squeeze(-1)
 
 
 # --------------------------------------------------------------------------
@@ -185,17 +247,20 @@ class AdditiveBetaNet(nn.Module):
         input_dim: int,
         n_knots: int = 32,
         dropout: float = 0.1,
+        no_intercept: bool = False,
     ):
         super().__init__()
         self.K_env = input_dim
         self.n_knots = n_knots
+        self.no_intercept = no_intercept
 
         # Per-dimension monotone transformation: scalar → n_knots → 1
         # Softplus activation instead of ReLU: no dead zone, gradual onset
+        # no_intercept=True removes bias from first layer (forces origin-anchored shape)
         self.dim_nets = nn.ModuleList()
         for _ in range(input_dim):
             self.dim_nets.append(nn.Sequential(
-                MonotoneLinear(1, n_knots, bias=True),
+                MonotoneLinear(1, n_knots, bias=not no_intercept),
                 nn.Softplus(),
                 nn.Dropout(dropout),
                 MonotoneLinear(n_knots, 1, bias=False),  # no output bias → f_k(0)≈0
@@ -284,10 +349,12 @@ class FactoredDeepBetaNet(nn.Module):
         encoder_depth: int = 2,
         interaction_hidden: list[int] | None = None,
         dropout: float = 0.0,  # dropout disabled: baseline subtraction is incompatible
+        no_intercept: bool = False,
     ):
         super().__init__()
         self.K_env = input_dim
         self.encoder_hidden = encoder_hidden
+        self.no_intercept = no_intercept
 
         if interaction_hidden is None:
             interaction_hidden = [32]
@@ -295,15 +362,18 @@ class FactoredDeepBetaNet(nn.Module):
         # --- Per-dimension monotone encoders ---
         # Each maps |Δx_k| (scalar) → h_k (encoder_hidden-dim, all ≥ 0 via ReLU)
         # No dropout: baseline subtraction requires deterministic forward pass.
+        # no_intercept=True removes bias from first encoder layer.
         self.encoders = nn.ModuleList()
         for _ in range(input_dim):
             layers: list[nn.Module] = []
             in_dim = 1
+            first_layer = True
             for _ in range(encoder_depth):
                 out_dim = encoder_hidden
-                layers.append(MonotoneLinear(in_dim, out_dim))
+                layers.append(MonotoneLinear(in_dim, out_dim, bias=(not no_intercept) if first_layer else True))
                 layers.append(nn.Softplus())
                 in_dim = out_dim
+                first_layer = False
             # Final layer + ReLU ensures h_k ≥ 0 element-wise
             layers.append(MonotoneLinear(in_dim, encoder_hidden))
             layers.append(nn.ReLU())
@@ -438,6 +508,10 @@ def expand_model_for_geo(
         alpha_regression_lambda=config.alpha_regression_lambda,
         beta_type=config.beta_type,
         beta_n_knots=config.beta_n_knots,
+        beta_no_intercept=config.beta_no_intercept,
+        K_effort=model_phase1.effort_net.net[0].in_features if model_phase1.effort_net else 0,
+        effort_hidden=config.effort_hidden,
+        effort_dropout=config.effort_dropout,
     )
     model_new.eta_smoothness_lambda = config.eta_smoothness_lambda
 
@@ -487,6 +561,11 @@ def expand_model_for_geo(
 
         # New dim_nets / encoders (K_env_old .. K_env_new-1) keep fresh initialisation
 
+        # ---- Transfer EffortNet weights (if present) ----
+        if model_phase1.effort_net is not None and model_new.effort_net is not None:
+            model_new.effort_net.load_state_dict(model_phase1.effort_net.state_dict())
+        model_new.effort_penalty = model_phase1.effort_penalty
+
     n_new_alpha = K_alpha_new - K_alpha_old
     n_new_beta = K_env_new - K_env_old
     print(f"  [expand_model_for_geo] Alpha: {K_alpha_old} → {K_alpha_new} "
@@ -526,17 +605,29 @@ class CLESSONet(nn.Module):
         alpha_regression_lambda: float = 1.0,
         beta_type: str = "additive",
         beta_n_knots: int = 32,
+        beta_no_intercept: bool = False,
+        K_effort: int = 0,
+        effort_hidden: list[int] = (64, 32),
+        effort_dropout: float = 0.1,
         eps: float = 1e-7,
     ):
         super().__init__()
         self.alpha_net = AlphaNet(K_alpha, alpha_hidden, alpha_dropout, alpha_activation)
 
+        # Effort / detectability subnetwork (additive decomposition)
+        if K_effort > 0:
+            self.effort_net = EffortNet(K_effort, effort_hidden, effort_dropout)
+        else:
+            self.effort_net = None
+
         if beta_type == "additive":
-            self.beta_net = AdditiveBetaNet(K_env, beta_n_knots, beta_dropout)
+            self.beta_net = AdditiveBetaNet(K_env, beta_n_knots, beta_dropout,
+                                            no_intercept=beta_no_intercept)
         elif beta_type == "factored":
             self.beta_net = FactoredDeepBetaNet(
                 K_env, encoder_hidden=16, encoder_depth=2,
                 interaction_hidden=[32], dropout=0.0,
+                no_intercept=beta_no_intercept,
             )
         elif beta_type == "deep":
             self.beta_net = MonotoneBetaNet(K_env, beta_hidden, beta_dropout)
@@ -549,23 +640,122 @@ class CLESSONet(nn.Module):
         self.eta_smoothness_lambda = 0.0  # set by train() from config
         self.eps = eps
 
+        # Geographic parameter L2 penalty — set externally after construction.
+        # K_alpha_env / K_env_env mark the boundary between env and geo params.
+        # When > 0 and lambda > 0, geo_param_penalty() is added to compute_loss.
+        self.geo_penalty_alpha = 0.0
+        self.geo_penalty_beta = 0.0
+        self.K_alpha_env = 0   # number of non-geo alpha input columns
+        self.K_env_env = 0     # number of non-geo beta env dimensions
+        self.effort_penalty = 0.0  # L2 penalty on effort_net parameters
+
+    def geo_param_penalty(self, K_alpha_env: int = 0, K_env_env: int = 0) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute separate L2 penalties on geographic parameters.
+
+        Args:
+            K_alpha_env: number of *non-geo* input columns in alpha's first
+                         layer (env+substrate). Columns K_alpha_env: are
+                         Fourier geo features whose weights get penalised.
+            K_env_env:   number of *non-geo* env dimensions in beta.
+                         Beta dim_nets/encoders at indices K_env_env: are
+                         geo dim_nets whose parameters get penalised.
+
+        Returns:
+            (alpha_geo_l2, beta_geo_l2): scalar tensors, each is
+            sum(param**2) over the relevant geo parameters.
+            Caller multiplies by the desired lambda.
+        """
+        device = next(self.parameters()).device
+        alpha_geo_l2 = torch.tensor(0.0, device=device)
+        beta_geo_l2 = torch.tensor(0.0, device=device)
+
+        # --- Alpha: penalise first-layer weights for Fourier columns ---
+        K_alpha_total = self.alpha_net.net[0].in_features
+        if K_alpha_env > 0 and K_alpha_env < K_alpha_total:
+            # First Linear layer weights: (hidden, K_alpha_total)
+            first_layer = self.alpha_net.net[0]
+            geo_weights = first_layer.weight[:, K_alpha_env:]  # columns for Fourier
+            alpha_geo_l2 = geo_weights.pow(2).sum()
+
+        # --- Beta: penalise parameters of geo dim_nets / encoders ---
+        if K_env_env > 0 and K_env_env < getattr(self.beta_net, 'K_env', 0):
+            if isinstance(self.beta_net, AdditiveBetaNet):
+                for k in range(K_env_env, self.beta_net.K_env):
+                    for p in self.beta_net.dim_nets[k].parameters():
+                        beta_geo_l2 = beta_geo_l2 + p.pow(2).sum()
+            elif isinstance(self.beta_net, FactoredDeepBetaNet):
+                for k in range(K_env_env, self.beta_net.K_env):
+                    for p in self.beta_net.encoders[k].parameters():
+                        beta_geo_l2 = beta_geo_l2 + p.pow(2).sum()
+                    for p in self.beta_net.dim_projectors[k].parameters():
+                        beta_geo_l2 = beta_geo_l2 + p.pow(2).sum()
+
+        return alpha_geo_l2, beta_geo_l2
+
+    def effort_param_penalty(self) -> torch.Tensor:
+        """Compute L2 penalty on all effort_net parameters.
+
+        Returns scalar tensor: sum(param**2) over all effort_net weights.
+        Caller multiplies by self.effort_penalty.
+        """
+        device = next(self.parameters()).device
+        if self.effort_net is None:
+            return torch.tensor(0.0, device=device)
+        total = torch.tensor(0.0, device=device)
+        for p in self.effort_net.parameters():
+            total = total + p.pow(2).sum()
+        return total
+
+    def _compute_alpha(
+        self,
+        z: torch.Tensor,
+        w: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Compute alpha with additive effort decomposition.
+
+        α = softplus(env_logit + effort_logit) + 1
+
+        Args:
+            z: (B, K_alpha) standardised env site covariates
+            w: (B, K_effort) standardised effort covariates, or None
+        Returns:
+            alpha: (B,) positive richness values > 1
+        """
+        raw_env = self.alpha_net.logit(z)
+        if self.effort_net is not None and w is not None:
+            raw_effort = self.effort_net(w)
+            raw = raw_env + raw_effort
+        else:
+            raw = raw_env
+        return F.softplus(raw) + 1.0
+
+    def _compute_alpha_env_only(self, z: torch.Tensor) -> torch.Tensor:
+        """Compute alpha from env covariates only (effort zeroed).
+
+        Used at prediction time to get 'true richness' without
+        observation-process artifacts.
+        """
+        return self.alpha_net(z)  # softplus(logit) + 1
+
     def forward(
         self,
         z_i: torch.Tensor,       # (B, K_alpha): site covariates for site i
         z_j: torch.Tensor,       # (B, K_alpha): site covariates for site j
         env_diff: torch.Tensor,  # (B, K_env):   |env_i - env_j|
         is_within: torch.Tensor, # (B,):         1=within, 0=between
+        w_i: torch.Tensor | None = None,  # (B, K_effort): effort covs site i
+        w_j: torch.Tensor | None = None,  # (B, K_effort): effort covs site j
     ) -> dict[str, torch.Tensor]:
         """Forward pass returning alpha, eta, similarity, and match probability.
 
         Returns dict with keys:
-            alpha_i, alpha_j : (B,) richness estimates
+            alpha_i, alpha_j : (B,) richness estimates (including effort)
             eta              : (B,) turnover (only meaningful for between-site)
             similarity       : (B,) S = exp(-eta)
             p_match          : (B,) probability of species match
         """
-        alpha_i = self.alpha_net(z_i)
-        alpha_j = self.alpha_net(z_j)
+        alpha_i = self._compute_alpha(z_i, w_i)
+        alpha_j = self._compute_alpha(z_j, w_j)
         eta = self.beta_net(env_diff)
         similarity = torch.exp(-eta)
 
@@ -590,27 +780,33 @@ class CLESSONet(nn.Module):
         z_i: torch.Tensor,
         z_j: torch.Tensor,
         S_obs: torch.Tensor,      # (n_sites,) observed richness
+        w_i: torch.Tensor | None = None,
+        w_j: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """Compute weighted BCE loss + alpha penalties.
 
-        Loss = weighted_BCE + lb_penalty + alpha_regression
+        Loss = weighted_BCE + lb_penalty + alpha_regression + effort_penalty
 
         Where:
           - weighted_BCE:     standard binary cross-entropy weighted by pair weights
           - lb_penalty:       soft lower-bound: λ_lb * mean[softplus(S_obs-α)]²
           - alpha_regression: direct MSE anchor: λ_reg * MSE(α, S_obs)
             Prevents alpha from collapsing to degenerate values.
+          - effort_penalty:   L2 on effort_net parameters to keep effort effect small
 
         Args:
             batch: dict from dataloader with y, is_within, weight, env_diff, site_i, site_j
             z_i: (B, K_alpha) site covariates for site i
             z_j: (B, K_alpha) site covariates for site j
             S_obs: (n_sites,) observed species count per site
+            w_i: (B, K_effort) effort covariates for site i, or None
+            w_j: (B, K_effort) effort covariates for site j, or None
 
         Returns:
             dict with loss, bce_loss, lb_penalty, alpha_reg_loss, and forward outputs
         """
-        fwd = self.forward(z_i, z_j, batch["env_diff"], batch["is_within"])
+        fwd = self.forward(z_i, z_j, batch["env_diff"], batch["is_within"],
+                           w_i=w_i, w_j=w_j)
 
         y = batch["y"]
         w = batch["weight"]
@@ -664,11 +860,29 @@ class CLESSONet(nn.Module):
 
         loss = bce_loss + lb_penalty + alpha_reg_loss + eta_smooth_loss
 
+        # Effort net L2 penalty (keep effort effect small / regularised)
+        effort_loss = torch.tensor(0.0, device=p.device)
+        if self.effort_penalty > 0 and self.effort_net is not None:
+            effort_loss = self.effort_penalty * self.effort_param_penalty()
+            loss = loss + effort_loss
+
+        # Geographic parameter L2 penalty (separate from weight decay)
+        geo_loss = torch.tensor(0.0, device=p.device)
+        if (self.geo_penalty_alpha > 0 or self.geo_penalty_beta > 0) \
+                and (self.K_alpha_env > 0 or self.K_env_env > 0):
+            alpha_geo_l2, beta_geo_l2 = self.geo_param_penalty(
+                K_alpha_env=self.K_alpha_env, K_env_env=self.K_env_env)
+            geo_loss = self.geo_penalty_alpha * alpha_geo_l2 \
+                     + self.geo_penalty_beta * beta_geo_l2
+            loss = loss + geo_loss
+
         return {
             "loss": loss,
             "bce_loss": bce_loss,
             "lb_penalty": lb_penalty,
             "alpha_reg_loss": alpha_reg_loss,
             "eta_smooth_loss": eta_smooth_loss,
+            "effort_loss": effort_loss,
+            "geo_loss": geo_loss,
             **fwd,
         }

@@ -226,6 +226,50 @@ def extract_climate(npy_src: str | Path, lons: np.ndarray, lats: np.ndarray,
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# Step 3b: Extract effort rasters (ESRI BIL float32)
+# ──────────────────────────────────────────────────────────────────────────
+
+def extract_effort_rasters(
+    effort_dir: str | Path,
+    effort_names: list[str],
+    mask: np.ndarray,
+) -> np.ndarray:
+    """Read effort rasters (.flt ESRI BIL) and extract at land cells.
+
+    Each raster is expected to be a single-band .flt file with matching .hdr,
+    at the same resolution/extent as the reference grid.
+
+    Returns: (n_valid, K_effort) float32 array
+    """
+    effort_dir = Path(effort_dir)
+    cols = []
+
+    for name in effort_names:
+        flt_path = effort_dir / f"{name}.flt"
+        if not flt_path.exists():
+            # Try .tif too
+            flt_path = effort_dir / f"{name}.tif"
+        if not flt_path.exists():
+            raise FileNotFoundError(
+                f"Effort raster not found: {effort_dir / name}.flt (or .tif)")
+
+        with rasterio.open(flt_path) as src:
+            data = src.read(1).astype(np.float32)
+            nodata = src.nodata
+
+        if nodata is not None:
+            data[data == nodata] = np.nan
+
+        vals = data[mask]
+        cols.append(vals)
+        n_nan = np.isnan(vals).sum()
+        print(f"    {name}: range [{np.nanmin(vals):.3g}, {np.nanmax(vals):.3g}], "
+              f"NaN: {n_nan}")
+
+    return np.column_stack(cols)
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # Step 4: Load model and predict
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -237,6 +281,14 @@ def load_model(checkpoint_path: str | Path, device: str = "cpu"):
 
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     cfg = ckpt["config"]
+
+    # Infer beta_no_intercept from state_dict if not saved in config
+    # (for checkpoints saved before this flag was added)
+    beta_no_intercept = cfg.get("beta_no_intercept", None)
+    if beta_no_intercept is None:
+        sd = ckpt["model_state_dict"]
+        beta_no_intercept = "beta_net.encoders.0.0.bias" not in sd and \
+                            "beta_net.dim_nets.0.0.bias" not in sd
 
     model = CLESSONet(
         K_alpha=cfg["K_alpha"],
@@ -250,6 +302,10 @@ def load_model(checkpoint_path: str | Path, device: str = "cpu"):
         alpha_regression_lambda=cfg.get("alpha_regression_lambda", 0.0),
         beta_type=cfg.get("beta_type", "deep"),
         beta_n_knots=cfg.get("beta_n_knots", 32),
+        beta_no_intercept=beta_no_intercept,
+        K_effort=cfg.get("K_effort", 0),
+        effort_hidden=cfg.get("effort_hidden", [64, 32]),
+        effort_dropout=cfg.get("effort_dropout", 0.1),
     )
     model.load_state_dict(ckpt["model_state_dict"])
     model.to(device)
@@ -260,10 +316,17 @@ def load_model(checkpoint_path: str | Path, device: str = "cpu"):
 
 @torch.no_grad()
 def predict_alpha_batched(model, Z: np.ndarray, batch_size: int,
-                          device: str = "cpu") -> np.ndarray:
+                          device: str = "cpu",
+                          W: np.ndarray | None = None,
+                          mode: str = "env_only") -> np.ndarray:
     """Predict alpha in batches to manage memory.
 
-    Z: (n_cells, K_alpha) standardised covariate array
+    Args:
+        Z: (n_cells, K_alpha) standardised covariate array
+        W: (n_cells, K_effort) standardised effort array (or None)
+        mode: "env_only" (true richness), "full" (env+effort),
+              "effort_only" (effort logit component)
+
     Returns: (n_cells,) alpha predictions
     """
     n = Z.shape[0]
@@ -272,7 +335,21 @@ def predict_alpha_batched(model, Z: np.ndarray, batch_size: int,
     for start in range(0, n, batch_size):
         end = min(start + batch_size, n)
         Z_batch = torch.from_numpy(Z[start:end]).to(device)
-        alpha[start:end] = model.alpha_net(Z_batch).cpu().numpy()
+        W_batch = None
+        if W is not None:
+            W_batch = torch.from_numpy(W[start:end]).to(device)
+
+        if mode == "env_only":
+            alpha[start:end] = model._compute_alpha_env_only(Z_batch).cpu().numpy()
+        elif mode == "full":
+            alpha[start:end] = model._compute_alpha(Z_batch, W_batch).cpu().numpy()
+        elif mode == "effort_only":
+            if model.effort_net is not None and W_batch is not None:
+                alpha[start:end] = model.effort_net(W_batch).squeeze(-1).cpu().numpy()
+            else:
+                alpha[start:end] = 0.0
+        else:
+            raise ValueError(f"Unknown mode: {mode!r}")
 
         if (start // batch_size) % 10 == 0:
             pct = 100 * end / n
@@ -538,6 +615,9 @@ def main():
                         help="Prediction batch size")
     parser.add_argument("--device", type=str, default="cpu",
                         help="Torch device (cpu, mps, cuda)")
+    parser.add_argument("--effort-raster-dir", type=str, default=None,
+                        help="Directory containing effort rasters (.flt). "
+                             "Required if model was trained with effort features.")
     args = parser.parse_args()
 
     t_start = time.time()
@@ -622,23 +702,73 @@ def main():
     Z = (Z_raw - z_mean) / z_std
     np.nan_to_num(Z, copy=False, nan=0.0)
 
+    # ── Extract effort rasters (if model has effort_net) ─────────────
+    W = None
+    effort_names = stats.get("effort_cov_names", [])
+    has_effort = model.effort_net is not None and len(effort_names) > 0
+    if has_effort:
+        effort_dir = args.effort_raster_dir
+        if effort_dir:
+            print(f"  Extracting {len(effort_names)} effort rasters...")
+            W_raw = extract_effort_rasters(effort_dir, effort_names, mask)
+            w_mean = np.array(stats["w_mean"], dtype=np.float32)
+            w_std = np.array(stats["w_std"], dtype=np.float32)
+            W = (W_raw - w_mean) / w_std
+            np.nan_to_num(W, copy=False, nan=0.0)
+            print(f"  Effort matrix: {W.shape} (cells × effort features)")
+        else:
+            print("  WARNING: Model has effort_net but --effort-raster-dir "
+                  "not supplied. Effort component will be zeroed.")
+
     # ── Predict ──────────────────────────────────────────────────────
-    alpha = predict_alpha_batched(model, Z, args.batch_size, args.device)
+    # Always produce env_only surface (true richness)
+    print("  Predicting env-only alpha (true richness)...")
+    alpha = predict_alpha_batched(model, Z, args.batch_size, args.device,
+                                  mode="env_only")
 
     # Mark NaN-covariate cells as NaN in output
     if n_nan_cells > 0:
         alpha[nan_mask] = np.nan
 
-    print(f"  Alpha range: {np.nanmin(alpha):.2f} – {np.nanmax(alpha):.2f}")
-    print(f"  Alpha mean:  {np.nanmean(alpha):.2f}")
-    print(f"  Alpha median: {np.nanmedian(alpha):.2f}")
+    print(f"  Alpha (env-only) range: {np.nanmin(alpha):.2f} – {np.nanmax(alpha):.2f}")
+    print(f"  Alpha (env-only) mean:  {np.nanmean(alpha):.2f}")
+    print(f"  Alpha (env-only) median: {np.nanmedian(alpha):.2f}")
+
+    # If effort available, also produce full and effort-only surfaces
+    alpha_full = None
+    alpha_effort = None
+    if has_effort and W is not None:
+        print("  Predicting full alpha (env + effort)...")
+        alpha_full = predict_alpha_batched(model, Z, args.batch_size,
+                                           args.device, W=W, mode="full")
+        if n_nan_cells > 0:
+            alpha_full[nan_mask] = np.nan
+        print(f"  Alpha (full) range: {np.nanmin(alpha_full):.2f} – "
+              f"{np.nanmax(alpha_full):.2f}")
+
+        print("  Predicting effort logit component...")
+        alpha_effort = predict_alpha_batched(model, Z, args.batch_size,
+                                             args.device, W=W, mode="effort_only")
+        if n_nan_cells > 0:
+            alpha_effort[nan_mask] = np.nan
+        print(f"  Effort logit range: {np.nanmin(alpha_effort):.3f} – "
+              f"{np.nanmax(alpha_effort):.3f}")
 
     # ── Write output ─────────────────────────────────────────────────
-    print("\n[5/6] Writing GeoTIFF...")
-    write_geotiff(args.output, alpha, grid)
+    print("\n[5/6] Writing GeoTIFF(s)...")
+    output_path = Path(args.output)
+    write_geotiff(output_path, alpha, grid)
+
+    if alpha_full is not None:
+        full_path = output_path.with_stem(output_path.stem + "_full")
+        write_geotiff(full_path, alpha_full, grid)
+
+    if alpha_effort is not None:
+        effort_path = output_path.with_stem(output_path.stem + "_effort_logit")
+        write_geotiff(effort_path, alpha_effort, grid)
 
     # ── Generate PDF map ─────────────────────────────────────────────
-    pdf_path = Path(args.output).with_suffix(".pdf")
+    pdf_path = output_path.with_suffix(".pdf")
     print("\n[6/6] Generating PDF map...")
     shapefile_path = PROJECT_ROOT / "data" / "ibra51_reg" / "ibra51_regions.shp"
     plot_alpha_map(
@@ -651,7 +781,11 @@ def main():
     dt = time.time() - t_start
     print(f"\nDone in {dt:.0f}s ({dt / 60:.1f} min)")
     print(f"Outputs:")
-    print(f"  GeoTIFF: {args.output}")
+    print(f"  GeoTIFF (env-only): {output_path}")
+    if alpha_full is not None:
+        print(f"  GeoTIFF (full):     {full_path}")
+    if alpha_effort is not None:
+        print(f"  GeoTIFF (effort):   {effort_path}")
     print(f"  PDF map: {pdf_path}")
 
 

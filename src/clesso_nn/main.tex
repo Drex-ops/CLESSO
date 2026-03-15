@@ -106,6 +106,59 @@ As in the TMB model, a soft one-sided penalty discourages $\alpha_i < S_{\text{o
 
 where $\kappa = 10$ sharpens the hinge boundary and $B$ is the current mini-batch. This is the same softplus-squared penalty used in the TMB model, applied to both $\alpha_i$ and $\alpha_j$ in each pair by indexing into the observed-richness vector.
 
+\subsection{Effort/detectability decomposition}
+\label{sec:effort-decomposition}
+
+Under the equal-draw assumption, $\alpha$ represents an \emph{effective richness under the recording process} rather than true species richness. Consequently, spatial variation in sampling effort, observer intensity, institutional proximity, and road access can all inflate or deflate $\alpha$ estimates, creating artefactual structure that may be absorbed by the turnover model if not accounted for explicitly. To separate the observation-process signal from the ecological signal, the alpha model is decomposed into two additive components on the logit scale:
+
+\begin{equation}
+    \alpha_i = \text{softplus}\!\Big(\underbrace{f_\alpha(\mathbf{z}_i;\, \bm{W}_\alpha)}_{\text{environment logit}} + \underbrace{f_\omega(\mathbf{w}_i;\, \bm{W}_\omega)}_{\text{effort logit}}\Big) + 1
+\end{equation}
+
+where $\mathbf{z}_i$ is the vector of environmental and substrate covariates (as before) and $\mathbf{w}_i$ is a separate vector of effort/detectability covariates at site~$i$. The two sub-networks are:
+
+\begin{description}
+    \item[EnvNet] $f_\alpha(\mathbf{z})$: the existing alpha MLP (Section~3), unchanged in architecture. Its output is now interpreted as the pre-activation \emph{environment logit}.
+    \item[EffortNet] $f_\omega(\mathbf{w})$: a smaller MLP (default hidden layers $[64, 32]$, SiLU activation, dropout) mapping effort covariates to a scalar \emph{effort logit}. The output bias is initialised to zero so that the effort contribution is neutral at the start of training, i.e.\ $f_\omega(\mathbf{w}) \approx 0$ initially.
+\end{description}
+
+The additive decomposition has several desirable properties:
+\begin{enumerate}
+    \item \textbf{Clean separation at prediction time.} To predict true ecological richness (uncontaminated by sampling artefacts), we simply zero-out the effort logit: $\alpha_i^{\text{env}} = \text{softplus}(f_\alpha(\mathbf{z}_i)) + 1$. No EffortNet evaluation is needed.
+    \item \textbf{Diagnostic mappability.} The effort logit $f_\omega(\mathbf{w}_i)$ can be mapped spatially to visualise where sampling effort inflates or deflates apparent richness.
+    \item \textbf{Neutral initialisation.} Because $f_\omega$ starts near zero, the model begins training as if effort covariates were absent. The effort signal is learned only if it improves the likelihood.
+    \item \textbf{Backward compatibility.} When no effort covariates are supplied ($K_\omega = 0$), the EffortNet is not instantiated and the model reduces to the original architecture.
+\end{enumerate}
+
+\paragraph{Effort covariates.}
+Six raster-derived effort layers are extracted at each site location:
+
+\begin{center}
+\begin{tabular}{ll}
+    \toprule
+    Covariate & Description \\
+    \midrule
+    \texttt{ala\_record\_count} & Total ALA occurrence records per grid cell \\
+    \texttt{ala\_record\_smoothed} & Gaussian-smoothed record density \\
+    \texttt{dist\_to\_nearest\_institution} & Distance (km) to nearest collection/museum \\
+    \texttt{hub\_influence\_unweighted} & Gravity-weighted influence of all institutions \\
+    \texttt{hub\_influence\_ecology\_weighted} & As above, weighted by ecology-relevant collections \\
+    \texttt{road\_density\_km\_per\_km2} & Road network density (km road per km$^2$) \\
+    \bottomrule
+\end{tabular}
+\end{center}
+
+All layers share the same 0.05$^\circ$ grid as the environmental covariates (670$\times$813 pixels). Values are standardised (zero-mean, unit-variance) before input to EffortNet.
+
+\paragraph{Regularisation.}
+An optional $L_2$ penalty on EffortNet parameters (controlled by \texttt{effort\_penalty}) can be used to shrink the effort component toward zero, encouraging the model to explain as much variation as possible through the environmental pathway. The penalty is added to the total loss:
+\begin{equation}
+    \mathcal{L}_{\text{effort}} = \lambda_\omega \sum_{\theta \in \bm{W}_\omega} \theta^2
+\end{equation}
+
+\paragraph{Interaction with training modes.}
+The effort decomposition is active from the start of training in all modes (joint, two-stage, cyclic, cyclic fine-tune). During cyclic fine-tuning Phase~2, EffortNet weights are transferred from Phase~1 alongside the existing alpha architecture expansion.
+
 \section{Beta sub-model: monotone turnover network}
 
 \subsection{TMB approach}
@@ -428,6 +481,7 @@ The neural network variant is not a different model in the ecological sense. The
     Component & TMB & Neural network \\
     \hline
     $\alpha_i$ & Linear + P-spline + random effect & MLP (SiLU) with softplus output \\
+    Effort separation & Not modelled & Additive EffortNet decomposition \\
     $\eta_{i,j}$ & I-spline + non-negative coefficients & Additive/factored monotone network \\
     $p_p$ & Same formula & Same formula \\
     $\mathcal{L}$ & Same weighted Bernoulli NLL & Same (+ importance weighting for $\beta$) \\
@@ -461,7 +515,15 @@ A comprehensive diagnostic PDF (mirroring the R script \texttt{clesso\_diagnosti
 
 \subsection{Alpha surface}
 
-Species richness is predicted across all of Australia using the trained alpha network applied to a gridded covariate stack (0.05$^\circ$ resolution, 670$\times$813 cells). The covariates include 6 substrate PCA bands, 9 AWAP climate variables (matching training columns), and optionally Fourier positional features. The output is a single-band GeoTIFF.
+Species richness is predicted across all of Australia using the trained alpha network applied to a gridded covariate stack (0.05$^\circ$ resolution, 670$\times$813 cells). The covariates include 6 substrate PCA bands, 9 AWAP climate variables (matching training columns), and optionally Fourier positional features.
+
+When the effort decomposition is active (Section~\ref{sec:effort-decomposition}), three alpha surfaces are produced:
+\begin{enumerate}
+    \item \textbf{Environment-only} ($\alpha^{\text{env}}$): the primary prediction surface, computed as $\text{softplus}(f_\alpha(\mathbf{z})) + 1$ with the effort logit zeroed. This represents estimated true richness uncontaminated by sampling artefacts and is saved as the main GeoTIFF.
+    \item \textbf{Full} ($\alpha^{\text{full}}$): the combined prediction $\text{softplus}(f_\alpha(\mathbf{z}) + f_\omega(\mathbf{w})) + 1$, representing apparent richness as influenced by both environment and observation process. Requires effort raster layers at the same grid resolution.
+    \item \textbf{Effort logit} ($f_\omega(\mathbf{w})$): the raw effort network output, mapped spatially to visualise where sampling effort inflates (positive values) or deflates (negative values) apparent richness relative to the environmental baseline.
+\end{enumerate}
+All three are saved as separate GeoTIFF files.
 
 \subsection{Beta surface (community composition map)}
 
@@ -477,12 +539,114 @@ A spatial map of biological community composition is generated using Landmark MD
 
 The result is a 3-band GeoTIFF where similar colours indicate similar predicted community composition.
 
+\section{Identifiability considerations and practical safeguards}
+
+A central challenge in the ObsPair formulation is that the between-site match probability depends on both richness and turnover:
+\begin{equation}
+    p_{ij}
+    =
+    S_{ij}\cdot \frac{\alpha_i+\alpha_j}{2\alpha_i\alpha_j},
+    \qquad
+    S_{ij} = \exp(-\eta_{ij}).
+\end{equation}
+Consequently, a low between-site match probability can be explained either by low similarity (\(\beta\)-driven turnover) or by high effective richness at one or both sites (\(\alpha\)-driven dilution of the chance of a match). This creates a genuine identifiability problem unless the two components are anchored by different sources of information or are constrained to play distinct structural roles.
+
+\subsection{Primary source of identifiability}
+
+The strongest direct information for \(\alpha_i\) comes from within-site pairs, for which
+\begin{equation}
+    p_{ii} = \frac{1}{\alpha_i}.
+\end{equation}
+This implies that within-site pairs are the main empirical anchor for the richness model, whereas between-site pairs are responsible for learning turnover conditional on that baseline. In practice, identifiability improves when the fitting procedure preserves this division of labour. Useful strategies include:
+\begin{itemize}
+    \item assigning sufficient weight to within-site pairs during training,
+    \item pretraining the \(\alpha\) model on within-site pairs before joint optimisation,
+    \item freezing or partially damping \(\alpha\) while the \(\beta\) model is first introduced,
+    \item and using auxiliary constraints on \(\alpha\) based on observed richness or sample-completeness information when available.
+\end{itemize}
+
+\subsection{Constraining the turnover baseline}
+
+A further safeguard is to prevent the \(\beta\) model from learning a free baseline reduction in match probability that competes with \(\alpha\). In particular, if turnover is parameterised as
+\begin{equation}
+    \eta_{ij} = \eta_0 + f(\bm{\Delta}_{ij}),
+\end{equation}
+then the intercept \(\eta_0\) can absorb residual mismatch even when environmental distance is zero, weakening the separation between richness and turnover. A cleaner formulation enforces
+\begin{equation}
+    \eta(\mathbf 0) = 0,
+\end{equation}
+so that turnover only explains additional decay in similarity with increasing environmental separation. This is consistent with the ecological interpretation that identical environmental conditions should not imply positive turnover in the modeled distance component.
+
+\subsection{Controlling flexibility asymmetrically}
+
+Because \(\alpha\) and \(\beta\) both influence between-site match probabilities, identifiability is sensitive to their relative flexibility. In practice, the \(\alpha\) model is often the more dangerous absorber of residual structure, because it contributes to both within-site and between-site probabilities and can mimic unmodeled heterogeneity. It is therefore often beneficial to keep the \(\alpha\) model somewhat more conservative than the \(\beta\) model, for example by:
+\begin{itemize}
+    \item using a smaller network for \(\alpha\) than for \(\beta\),
+    \item applying stronger weight decay or dropout to \(\alpha\),
+    \item shrinking interaction terms more strongly than main effects,
+    \item and restricting any spatial residual term in \(\alpha\) to be broad-scale and heavily penalised.
+\end{itemize}
+The goal is not to underfit richness, but to avoid allowing \(\alpha\) to become a universal explanation for all pairwise mismatch.
+
+\subsection{Separating spatial and environmental structure}
+
+Spatial structure is a particularly important source of confounding because both richness and compositional turnover are typically spatially autocorrelated. If flexible spatial residual structure is allowed in both the \(\alpha\) and \(\beta\) components, the two sub-models may compete to explain the same latent gradient. Identifiability is improved by assigning spatial structure more deliberately, for example by:
+\begin{itemize}
+    \item placing residual spatial structure in \(\alpha\) only and keeping \(\beta\) purely environmental,
+    \item placing geographic separation in \(\beta\) only and keeping \(\alpha\) non-spatial,
+    \item or restricting the two components to operate at different spatial scales (e.g.\ broad-scale residual structure in \(\alpha\), local environmental turnover in \(\beta\)).
+\end{itemize}
+In all cases, the preferred strategy is to avoid giving both sub-models unrestricted access to the same latent spatial signal.
+
+\subsection{Observation-process covariates and auxiliary information}
+
+Under the equal-draw assumption, \(\alpha\) should be interpreted as an \emph{effective richness under the recording process}, not necessarily a direct estimate of true species richness. This means that sampling effort, detectability, checklist completeness, and species-evenness effects can all enter the \(\alpha\) estimate. If these recording-process components are not modeled explicitly, they may be confounded with turnover.
+
+As described in Section~\ref{sec:effort-decomposition}, the current implementation addresses this directly through an additive effort decomposition:
+\begin{equation}
+    \alpha_i = \text{softplus}\!\big(f_\alpha(\mathbf{z}_i) + f_\omega(\mathbf{w}_i)\big) + 1,
+\end{equation}
+where six spatial proxies for observation effort (ALA record density, institutional proximity, road access, etc.) are modeled through a dedicated EffortNet sub-network. This allows the environmental component $f_\alpha$ to focus on true ecological variation while the effort component $f_\omega$ absorbs recording-process artefacts. At prediction time, zeroing the effort logit recovers an estimate of richness driven purely by environmental conditions.
+
+The additive structure on the logit scale means that effort acts as a multiplicative scaling of the match probability: sites with high recording effort will have higher apparent richness (and therefore lower within-site match probability), which is consistent with the intuition that better-sampled sites reveal more species under the equal-draw framework.
+
+Where richer site-level biodiversity summaries are available, a further improvement is to include an auxiliary loss or penalty that encourages \(\alpha\) to remain consistent with externally estimated richness-like quantities.
+
+\subsection{Pair design and training strategy (not yet implemented)}
+
+Identifiability is also influenced by which pairs are seen during fitting. Pairs are most informative when they help break the correlation between geography, environment, and expected turnover. In particular, it is helpful to include:
+\begin{itemize}
+    \item pairs spanning small, moderate, and large environmental distances,
+    \item geographically distant but environmentally similar pairs,
+    \item geographically close but environmentally distinct pairs,
+    \item and sufficient repeated within-site information to stabilise \(\alpha\).
+\end{itemize}
+From an optimisation perspective, staged fitting can further improve stability. A practical sequence is:
+\begin{enumerate}
+    \item fit \(\alpha\) primarily from within-site pairs and any richness constraints,
+    \item fit \(\beta\) conditional on that \(\alpha\) baseline,
+    \item jointly fine-tune both components,
+    \item and introduce any spatial residual term only after the non-spatial model is stable.
+\end{enumerate}
+This does not change the statistical model, but helps preserve the intended functional roles of the two components during training.
+
+\subsection{Summary}
+
+In short, the \(\alpha\) and \(\beta\) components become more identifiable when they are forced to answer different questions from different evidence sources:
+\begin{itemize}
+    \item \(\alpha\) should primarily explain within-site matching and site-level richness/recording-process variation,
+    \item \(\beta\) should primarily explain the decay in similarity with between-site environmental separation,
+    \item and residual spatial or observational effects should be assigned deliberately rather than left for both components to absorb opportunistically.
+\end{itemize}
+These considerations are important regardless of whether the sub-models are specified using splines, monotone neural networks, or lattice-style architectures.
+
 \section{Further thoughts}
 
 \begin{itemize}
     \item All the interpretive considerations from the TMB document apply: $\alpha$ represents ``effective richness under the recording process'' rather than true species counts, and the equal-draw assumption means our estimates conflate richness with evenness.
     \item The additive monotone network can be interrogated post-hoc by sweeping each environmental dimension while holding others at zero, producing per-variable response curves analogous to the I-spline partial functions in GDM. The factored network additionally allows examination of joint response surfaces.
     \item The ability to capture variable interactions (factored beta) is a double-edged sword --- more flexible, but harder to interpret. Careful examination of joint response surfaces is recommended. The additive beta is preferred when interpretability is paramount.
+    \item The effort/detectability decomposition (Section~\ref{sec:effort-decomposition}) provides a principled way to separate observation-process artefacts from ecological signal in the alpha model. The effort logit surface is a useful diagnostic: regions where $f_\omega > 0$ indicate that recording effort inflates apparent richness, while $f_\omega < 0$ indicates under-sampled areas. Comparing the environment-only and full alpha surfaces quantifies the magnitude of the sampling-effort correction.
     \item The network's richness predictions should be compared against the TMB P-spline predictions on the same data to assess consistency between the two approaches.
     \item If uncertainty quantification is needed (which the TMB \texttt{sdreport} provides), options include MC dropout at prediction time, deep ensembles, or training multiple models with different random seeds.
     \item The data pipeline (Steps 1--4 of the R pipeline) is shared between both approaches, so switching between TMB and NN fitting requires only an export step (\texttt{export\_for\_nn.R}) and a single Python command.

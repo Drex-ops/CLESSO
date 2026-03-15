@@ -64,6 +64,7 @@ class CLESSONNConfig:
     beta_hidden: list[int] = field(default_factory=lambda: [128, 64, 32])  # only for beta_type="deep"
     beta_n_knots: int = 32       # per-dimension knots for beta_type="additive"
     beta_dropout: float = 0.1
+    beta_no_intercept: bool = True  # if True, remove bias from first MonotoneLinear in additive/factored nets
     beta_lr_mult: float = 10.0  # LR multiplier for beta network (relative to base LR)
     beta_grad_scale: float = 100.0  # gradient amplification for beta params (via hooks)
     include_geo_in_beta: bool = False  # OLD: include raw lon/lat diffs in beta (deprecated)
@@ -72,7 +73,27 @@ class CLESSONNConfig:
 
     # Fourier positional encoding for alpha model
     fourier_n_frequencies: int = 0       # number of frequency octaves (0 = disabled)
-    fourier_max_wavelength: float = 40.0 # degrees; wavelengths = max/2^k for k=0..N-1
+    fourier_max_wavelength: float = 10.0 # degrees; wavelengths = max/2^k for k=0..N-1
+
+    # ------------------------------------------------------------------
+    # Effort / detectability network (additive decomposition in alpha)
+    # ------------------------------------------------------------------
+    # When effort_cov_names is non-empty, a separate EffortNet is created:
+    #   α = softplus(EnvNet(env) + EffortNet(effort)) + 1
+    # This cleanly separates observation-process artifacts from true richness.
+    # At prediction time, the effort component can be zeroed to obtain "true richness".
+    #
+    # Note: for future exploration, a multiplicative decomposition
+    #   α_eff = α_true / detection_prob 
+    # could replace the additive form. That would require EffortNet to output
+    # a sigmoid-bounded detection probability rather than a raw logit offset.
+    effort_cov_names: list[str] = field(default_factory=list)  # column names in site_covariates (empty = disabled)
+    effort_hidden: list[int] = field(default_factory=lambda: [64, 32])
+    effort_dropout: float = 0.1
+    effort_penalty: float = 0.0  # L2 penalty on all effort_net parameters (0 = disabled)
+
+    # Path to effort raster directory (for surface prediction)
+    effort_raster_dir: Optional[Path] = None
 
     # Eta smoothness penalty: lambda * mean(eta^2) on between-site pairs.
     # Penalises large eta to encourage gradual turnover.
@@ -134,7 +155,7 @@ class CLESSONNConfig:
     # Importance-corrected hard-pair mining for beta training.
     # Mining strength λ_hm ∈ [0,1]: 0 = disabled (default), 1 = pure hard mining.
     # q(p) = (1-λ_hm)·π(p) + λ_hm·h*(p)  with importance correction w* = w·π(p)/q(p).
-    hard_mining_lambda: float = 0.3         # mining strength / mixing proportion (0 = off)
+    hard_mining_lambda: float = 0.0         # mining strength / mixing proportion (0 = off)
     hard_mining_warmup_cycles: int = 3      # cycles before enabling mining
     hard_mining_n_bins: int = 3             # difficulty bins (e.g. easy/medium/hard)
     hard_mining_bin_weights: list[float] = field(
@@ -154,6 +175,17 @@ class CLESSONNConfig:
     finetune_new_param_lr_mult: float = 5.0  # LR multiplier for new geo params
     finetune_patience: int = 30       # early stopping patience
     finetune_freeze_existing: bool = True  # freeze Phase 1 params; only train new geo params
+    finetune_freeze_effort: bool = False     # freeze EffortNet params in Phase 2 (False = keep training)
+
+    # Geographic parameter L2 penalty (separate from weight_decay).
+    # Penalises geo-related parameters strongly so the model only uses
+    # spatial information when site-level covariates cannot explain the
+    # pattern.  Applied as: lambda * sum(param^2) added to the loss.
+    #   geo_penalty_alpha: L2 on alpha-net weights connecting to Fourier columns
+    #   geo_penalty_beta:  L2 on beta-net geo dim_net / encoder parameters
+    # Set to 0.0 to disable.
+    geo_penalty_alpha: float = 0.2    # strong default — spatial alpha is expensive
+    geo_penalty_beta: float = 1.0     # strong default — spatial beta is expensive
 
     # ------------------------------------------------------------------
     # Device

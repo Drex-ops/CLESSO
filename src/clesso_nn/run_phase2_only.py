@@ -60,6 +60,9 @@ def main():
         alpha_lb_lambda=cfg.alpha_lower_bound_lambda,
         alpha_regression_lambda=cfg.alpha_regression_lambda,
         beta_type=cfg.beta_type, beta_n_knots=cfg.beta_n_knots,
+        K_effort=ckpt["config"].get("K_effort", 0),
+        effort_hidden=ckpt["config"].get("effort_hidden", [64, 32]),
+        effort_dropout=ckpt["config"].get("effort_dropout", 0.1),
     )
     model_p1.load_state_dict(ckpt["model_state_dict"])
     print("  Phase 1 model restored successfully")
@@ -77,6 +80,7 @@ def main():
         env_site_table=data["env_site_table"],
         site_obs_richness=data["site_obs_richness"],
         metadata=data["metadata"],
+        effort_cov_names=ckpt.get("site_data_stats", {}).get("effort_cov_names") or None,
     )
     print(f"  Phase 2 K_alpha: {site_data_geo.K_alpha}  K_env: {site_data_geo.K_env}")
 

@@ -58,7 +58,14 @@ def load_model(checkpoint_path: str | Path, device: str = "cpu") -> tuple[CLESSO
         K_effort=cfg.get("K_effort", 0),
         effort_hidden=cfg.get("effort_hidden", [64, 32]),
         effort_dropout=cfg.get("effort_dropout", 0.1),
+        effort_mode=cfg.get("effort_mode", "additive"),
     )
+
+    model.load_state_dict(ckpt["model_state_dict"])
+    model.to(device)
+    model.eval()
+    return model, ckpt
+
 
 @torch.no_grad()
 def predict_alpha(

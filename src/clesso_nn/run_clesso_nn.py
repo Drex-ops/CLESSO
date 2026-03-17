@@ -25,7 +25,9 @@ Prerequisites:
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -34,7 +36,7 @@ import numpy as np
 import torch
 
 
-def main(export_dir: str, config_overrides: dict | None = None):
+def main(export_dir: str | None = None, config_overrides: dict | None = None):
     """Run the full CLESSO NN pipeline."""
 
     # Add project root to path if needed
@@ -50,7 +52,7 @@ def main(export_dir: str, config_overrides: dict | None = None):
         export_alpha_predictions,
         predict_alpha,
     )
-    from src.clesso_nn.train import train, train_two_stage, train_cyclic, train_finetune_geo
+    from src.clesso_nn.train import train, train_two_stage, train_cyclic, train_finetune_geo, train_finetune_joint, train_calibration
 
     print("=" * 60)
     print("  CLESSO Neural Network Pipeline")
@@ -60,7 +62,8 @@ def main(export_dir: str, config_overrides: dict | None = None):
     # Configuration
     # ------------------------------------------------------------------
     cfg = CLESSONNConfig()
-    cfg.export_dir = Path(export_dir).resolve()
+    if export_dir is not None:
+        cfg.export_dir = Path(export_dir).resolve()
     if config_overrides:
         for k, v in config_overrides.items():
             setattr(cfg, k, v)
@@ -72,6 +75,27 @@ def main(export_dir: str, config_overrides: dict | None = None):
 
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
+
+    # ------------------------------------------------------------------
+    # Save config snapshot (source file + resolved JSON)
+    # ------------------------------------------------------------------
+    # 1. Copy the literal config.py so we know exactly what was on disk
+    config_src = Path(__file__).resolve().parent / "config.py"
+    if config_src.exists():
+        shutil.copy2(config_src, cfg.output_dir / "config_snapshot.py")
+        print(f"  Config source saved: {cfg.output_dir / 'config_snapshot.py'}")
+
+    # 2. Dump resolved values (includes CLI overrides) as JSON
+    def _serialise(obj):
+        if isinstance(obj, Path):
+            return str(obj)
+        raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+    cfg_dict = dataclasses.asdict(cfg)
+    cfg_json_path = cfg.output_dir / "config_resolved.json"
+    with open(cfg_json_path, "w") as f:
+        json.dump(cfg_dict, f, indent=2, default=_serialise)
+    print(f"  Resolved config saved: {cfg_json_path}")
 
     # ------------------------------------------------------------------
     # Step 1: Load exported data
@@ -87,6 +111,14 @@ def main(export_dir: str, config_overrides: dict | None = None):
     if data["site_obs_richness"] is not None:
         print(f"  Obs richness: {len(data['site_obs_richness']):,} sites")
     print(f"  Loaded in {time.time() - t0:.1f}s")
+
+    # --- Preprocessing: optionally drop match-boost (stratum 4) pairs ---
+    if getattr(cfg, 'exclude_match_boost', False) and 'stratum' in data['pairs'].columns:
+        n_before = len(data['pairs'])
+        data['pairs'] = data['pairs'][data['pairs']['stratum'] != 4].reset_index(drop=True)
+        n_dropped = n_before - len(data['pairs'])
+        print(f"  [exclude_match_boost] Dropped {n_dropped:,} stratum-4 pairs "
+              f"({n_before:,} -> {len(data['pairs']):,})")
 
     # ------------------------------------------------------------------
     # Step 2: Build site data and dataloaders
@@ -112,6 +144,8 @@ def main(export_dir: str, config_overrides: dict | None = None):
         data["metadata"]["fourier_max_wavelength"] = cfg.fourier_max_wavelength
 
     # -- Auto-detect effort columns from R metadata if not set in config --
+    # Always detect effort column names so they can be excluded from alpha,
+    # even when use_effort=False (prevents leaking into AlphaNet).
     _effort_names = cfg.effort_cov_names
     if not _effort_names:
         meta_effort = data["metadata"].get("effort_cov_cols", [])
@@ -119,12 +153,25 @@ def main(export_dir: str, config_overrides: dict | None = None):
             _effort_names = list(meta_effort)
             print(f"  [effort] Auto-detected from metadata: {_effort_names}")
 
+    # Drop endogenous covariates (e.g. record count) that are confounded
+    # with apparent richness.  They are still excluded from alpha.
+    _drop_set = set(cfg.effort_drop_cov_names)
+    _dropped = [c for c in _effort_names if c in _drop_set]
+    _effort_names_filtered = [c for c in _effort_names if c not in _drop_set]
+    if _dropped:
+        print(f"  [effort] Dropped endogenous covariates: {_dropped}")
+
+    if not cfg.use_effort:
+        print("  [effort] EffortNet disabled by config.use_effort=False"
+              f" (excluding {len(_effort_names)} effort cols from alpha)")
+
     site_data = SiteData(
         site_covariates=data["site_covariates"],
         env_site_table=data["env_site_table"],
         site_obs_richness=data["site_obs_richness"],
         metadata=data["metadata"],
-        effort_cov_names=_effort_names if _effort_names else None,
+        effort_cov_names=_effort_names_filtered if (cfg.use_effort and _effort_names_filtered) else None,
+        exclude_cov_names=_effort_names if _effort_names else None,
     )
 
     print(f"  K_alpha (site covs):     {site_data.K_alpha}")
@@ -146,6 +193,8 @@ def main(export_dir: str, config_overrides: dict | None = None):
         beta_dropout=cfg.beta_dropout,
         alpha_activation=cfg.alpha_activation,
         alpha_lb_lambda=cfg.alpha_lower_bound_lambda,
+        alpha_anchor_lambda=cfg.alpha_anchor_lambda,
+        alpha_anchor_tolerance=cfg.alpha_anchor_tolerance,
         alpha_regression_lambda=cfg.alpha_regression_lambda,
         beta_type=cfg.beta_type,
         beta_n_knots=cfg.beta_n_knots,
@@ -153,9 +202,24 @@ def main(export_dir: str, config_overrides: dict | None = None):
         K_effort=site_data.K_effort,
         effort_hidden=cfg.effort_hidden,
         effort_dropout=cfg.effort_dropout,
+        effort_mode=cfg.effort_mode,
     )
     model.eta_smoothness_lambda = cfg.eta_smoothness_lambda
+    model.eta_anti_collapse_lambda = cfg.eta_anti_collapse_lambda
     model.effort_penalty = cfg.effort_penalty
+
+    # Composite likelihood parameters
+    model.stratum_weights = cfg.stratum_weights
+    model.match_boost_lambda = cfg.match_boost_lambda
+
+    # Load retention rates from R sampler metadata (for retrospective correction)
+    rr_meta = data["metadata"].get("retention_rates", {})
+    if rr_meta:
+        model.retention_rates = {str(k): float(v) for k, v in rr_meta.items()
+                                  if v is not None and v == v}  # skip NaN
+        print(f"  Retention rates loaded: {model.retention_rates}")
+    else:
+        print("  WARNING: No retention rates in metadata — retrospective correction disabled")
 
     # Geographic parameter L2 penalty — count env-only dimensions
     # so the model knows which params are "geo" and can penalise them.
@@ -187,7 +251,7 @@ def main(export_dir: str, config_overrides: dict | None = None):
     if n_effort > 0:
         print(f"  Effort network:   {n_effort:,}")
         print(f"    Effort:  {cfg.effort_hidden} (dropout={cfg.effort_dropout}, "
-              f"L2={cfg.effort_penalty})")
+              f"L2={cfg.effort_penalty}, mode={cfg.effort_mode})")
     print(f"  Architecture:")
     print(f"    Alpha: {cfg.alpha_hidden} (dropout={cfg.alpha_dropout})")
     if cfg.beta_type == "additive":
@@ -220,59 +284,92 @@ def main(export_dir: str, config_overrides: dict | None = None):
 
         # Save Phase 1 checkpoint separately
         phase1_ckpt = cfg.output_dir / "best_model_phase1.pt"
-        import shutil
         if (cfg.output_dir / "best_model.pt").exists():
             shutil.copy2(cfg.output_dir / "best_model.pt", phase1_ckpt)
             print(f"  Phase 1 checkpoint saved: {phase1_ckpt}")
 
         # ============================================================
-        # Phase 2: Expand model + fine-tune with geographic features
+        # Phase 2: Fine-tune
         # ============================================================
-        # Build new SiteData WITH Fourier + geo_dist
-        print("\n--- Building Phase 2 dataset (with geographic features) ---")
-        meta_phase2 = dict(data["metadata"])  # copy
-        meta_phase2["include_geo_dist_in_beta"] = cfg.include_geo_dist_in_beta
-        meta_phase2["fourier_n_frequencies"] = cfg.fourier_n_frequencies
-        meta_phase2["fourier_max_wavelength"] = cfg.fourier_max_wavelength
+        finetune_mode = getattr(cfg, 'finetune_mode', 'geo')
+        print(f"\n  Phase 2 mode: {finetune_mode}")
 
-        site_data_geo = SiteData(
-            site_covariates=data["site_covariates"],
-            env_site_table=data["env_site_table"],
-            site_obs_richness=data["site_obs_richness"],
-            metadata=meta_phase2,
-            effort_cov_names=_effort_names if _effort_names else None,
-        )
-        print(f"  Phase 2 K_alpha: {site_data_geo.K_alpha}  "
-              f"K_env: {site_data_geo.K_env}")
+        if finetune_mode == "joint":
+            # Joint alpha+beta training on same env/effort variables
+            state = train_finetune_joint(
+                model=model,
+                pairs=data["pairs"],
+                site_data=site_data,
+                config=cfg,
+                best_phase1_loss=phase1_loss,
+            )
+        else:
+            # Original geo-expansion fine-tune
+            # Build new SiteData WITH Fourier + geo_dist
+            print("\n--- Building Phase 2 dataset (with geographic features) ---")
+            meta_phase2 = dict(data["metadata"])  # copy
+            meta_phase2["include_geo_dist_in_beta"] = cfg.include_geo_dist_in_beta
+            meta_phase2["fourier_n_frequencies"] = cfg.fourier_n_frequencies
+            meta_phase2["fourier_max_wavelength"] = cfg.fourier_max_wavelength
 
-        # Expand model architecture to accommodate new features
-        model_expanded = expand_model_for_geo(
-            model, site_data_geo.K_alpha, site_data_geo.K_env, cfg,
-        )
+            site_data_geo = SiteData(
+                site_covariates=data["site_covariates"],
+                env_site_table=data["env_site_table"],
+                site_obs_richness=data["site_obs_richness"],
+                metadata=meta_phase2,
+                effort_cov_names=_effort_names_filtered if (cfg.use_effort and _effort_names_filtered) else None,
+                exclude_cov_names=_effort_names if _effort_names else None,
+            )
+            print(f"  Phase 2 K_alpha: {site_data_geo.K_alpha}  "
+                  f"K_env: {site_data_geo.K_env}")
 
-        # Set geo penalty attributes on expanded model
-        K_alpha_env_geo = sum(1 for c in site_data_geo.alpha_cov_names
-                              if not c.startswith("fourier_"))
-        K_env_env_geo = len(site_data_geo.env_cov_names)
-        if hasattr(site_data_geo, 'geo') and site_data_geo.geo is not None:
-            K_env_env_geo += site_data_geo.geo.shape[1]
-        model_expanded.geo_penalty_alpha = cfg.geo_penalty_alpha
-        model_expanded.geo_penalty_beta = cfg.geo_penalty_beta
-        model_expanded.K_alpha_env = K_alpha_env_geo
-        model_expanded.K_env_env = K_env_env_geo
+            # Expand model architecture to accommodate new features
+            model_expanded = expand_model_for_geo(
+                model, site_data_geo.K_alpha, site_data_geo.K_env, cfg,
+            )
 
-        # Fine-tune with geographic features
-        state = train_finetune_geo(
-            model=model_expanded,
-            pairs=data["pairs"],
-            site_data=site_data_geo,
-            config=cfg,
-            best_phase1_loss=phase1_loss,
-        )
+            # Set geo penalty attributes on expanded model
+            K_alpha_env_geo = sum(1 for c in site_data_geo.alpha_cov_names
+                                  if not c.startswith("fourier_"))
+            K_env_env_geo = len(site_data_geo.env_cov_names)
+            if hasattr(site_data_geo, 'geo') and site_data_geo.geo is not None:
+                K_env_env_geo += site_data_geo.geo.shape[1]
+            model_expanded.geo_penalty_alpha = cfg.geo_penalty_alpha
+            model_expanded.geo_penalty_beta = cfg.geo_penalty_beta
+            model_expanded.K_alpha_env = K_alpha_env_geo
+            model_expanded.K_env_env = K_env_env_geo
 
-        # Use expanded model and geo site_data going forward
-        model = model_expanded
-        site_data = site_data_geo
+            # Fine-tune with geographic features
+            state = train_finetune_geo(
+                model=model_expanded,
+                pairs=data["pairs"],
+                site_data=site_data_geo,
+                config=cfg,
+                best_phase1_loss=phase1_loss,
+            )
+
+            # Use expanded model and geo site_data going forward
+            model = model_expanded
+            site_data = site_data_geo
+
+        # ============================================================
+        # Phase 3: Calibration (design-weighted, no mining/boost)
+        # ============================================================
+        if cfg.calibration_epochs > 0:
+            # Copy composite likelihood params to expanded model
+            model.stratum_weights = cfg.stratum_weights
+            model.match_boost_lambda = cfg.match_boost_lambda
+            if rr_meta:
+                model.retention_rates = {str(k): float(v) for k, v in rr_meta.items()
+                                          if v is not None and v == v}
+
+            cal_state = train_calibration(
+                model=model,
+                pairs=data["pairs"],
+                site_data=site_data,
+                config=cfg,
+            )
+            print(f"  Calibration best val loss: {cal_state.best_val_loss:.6f}")
 
     elif cfg.training_mode == "two_stage":
         state = train_two_stage(
@@ -296,7 +393,8 @@ def main(export_dir: str, config_overrides: dict | None = None):
             val_fraction=cfg.val_fraction,
             batch_size=cfg.batch_size,
             seed=cfg.seed,
-            use_unit_weights=cfg.use_unit_weights,
+            use_unit_weights=False,
+            use_design_weights=getattr(cfg, 'use_design_weights', True),
         )
         state = train(
             model=model,
@@ -401,7 +499,15 @@ def main(export_dir: str, config_overrides: dict | None = None):
     # ------------------------------------------------------------------
     import subprocess
 
-    checkpoint_path = str(cfg.output_dir / "best_model.pt")
+    # Use the best available checkpoint: calibrated > phase2 > base
+    calibrated_path = cfg.output_dir / "best_model_calibrated.pt"
+    base_path = cfg.output_dir / "best_model.pt"
+    if calibrated_path.exists():
+        checkpoint_path = str(calibrated_path)
+        print(f"  Using calibrated checkpoint: {checkpoint_path}")
+    else:
+        checkpoint_path = str(base_path)
+        print(f"  Using checkpoint: {checkpoint_path}")
 
     # 1. Diagnostics
     print("\n" + "=" * 60)
@@ -427,6 +533,21 @@ def main(export_dir: str, config_overrides: dict | None = None):
             str(project_root / "src" / "clesso_nn" / "predict_alpha_surface.py"),
             "--checkpoint", checkpoint_path,
         ]
+        # Pass effort INPUT dir so the surface script can produce
+        # full (env+effort) and effort-only surfaces alongside env-only.
+        # Auto-detect: if model has effort but no explicit dir, search defaults.
+        effort_dir = cfg.effort_input_dir
+        if effort_dir is None and site_data.K_effort > 0:
+            for search_path in getattr(cfg, '_effort_input_search_paths', []):
+                candidate = Path(search_path)
+                if not candidate.is_absolute():
+                    candidate = project_root / candidate
+                if candidate.is_dir():
+                    effort_dir = candidate
+                    print(f"  [effort] Auto-detected raster dir: {effort_dir}")
+                    break
+        if effort_dir is not None and Path(effort_dir).is_dir():
+            alpha_cmd += ["--effort-input-dir", str(effort_dir)]
         subprocess.run(alpha_cmd, check=True)
     except Exception as e:
         print(f"  WARNING: Alpha surface prediction failed: {e}")
@@ -459,13 +580,10 @@ if __name__ == "__main__":
         description="CLESSO Neural Network Pipeline",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    _default_export = str(
-        Path(__file__).resolve().parent.parent
-        / "clesso_v2/output/VAS_20260310_092634/nn_export"
-    )
     parser.add_argument(
-        "--export-dir", default=_default_export,
-        help="Path to directory with feather files from export_for_nn.R",
+        "--export-dir", default=None,
+        help="Path to directory with feather files from export_for_nn.R "
+             "(default: uses export_dir from config.py)",
     )
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
@@ -484,6 +602,24 @@ if __name__ == "__main__":
     parser.add_argument(
         "--beta-hidden", type=str, default=None,
         help="Beta hidden dims as comma-separated ints, e.g. '64,32,16'",
+    )
+    parser.add_argument(
+        "--effort-input-dir", type=str, default=None,
+        help="Directory containing effort INPUT rasters (.flt/.hdr). "
+             "Output surfaces go to the model output directory.",
+    )
+    parser.add_argument(
+        "--effort-lr", type=float, default=None,
+        help="Learning rate for EffortNet (default: 3× base LR)",
+    )
+    parser.add_argument(
+        "--effort-weight-decay", type=float, default=None,
+        help="Weight decay for EffortNet (default: inherits --lr weight_decay)",
+    )
+    parser.add_argument(
+        "--effort-mode", type=str, default=None,
+        choices=["additive", "multiplicative", "completeness"],
+        help="Effort decomposition: 'completeness' (default), 'additive', or 'multiplicative'",
     )
 
     args = parser.parse_args()
@@ -509,6 +645,14 @@ if __name__ == "__main__":
         overrides["training_mode"] = args.mode
     if args.alpha_hidden is not None:
         overrides["alpha_hidden"] = [int(x) for x in args.alpha_hidden.split(",")]
+    if getattr(args, 'effort_input_dir', None) is not None:
+        overrides["effort_input_dir"] = args.effort_input_dir
+    if args.effort_lr is not None:
+        overrides["effort_lr"] = args.effort_lr
+    if args.effort_weight_decay is not None:
+        overrides["effort_weight_decay"] = args.effort_weight_decay
+    if args.effort_mode is not None:
+        overrides["effort_mode"] = args.effort_mode
     if args.beta_hidden is not None:
         overrides["beta_hidden"] = [int(x) for x in args.beta_hidden.split(",")]
 

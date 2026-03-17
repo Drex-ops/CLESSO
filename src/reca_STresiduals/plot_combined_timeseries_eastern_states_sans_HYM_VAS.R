@@ -455,6 +455,41 @@ cat(sprintf("=== B) IBRA-level combined timeseries (filtered: %s) ===\n\n", stat
 pdf_ibra <- file.path(viz_dir, sprintf("combined_timeseries_IBRA_base_vs_cond_%s.pdf", prefix))
 pdf(pdf_ibra, width = 14, height = 8)
 
+## ---- Pre-compute per-group ylim across eastern-state IBRA regions ----
+## Consistent within each group; different between groups for max variation.
+group_ylims <- list()
+for (grp in groups) {
+  r <- registry[[grp]]
+  if (is.null(r$base_ibra)) next
+  tmp_base <- readRDS(r$base_ibra)
+  tmp_base_years <- c(tmp_base$baseline_year, tmp_base$target_years)
+  tmp_cond <- NULL
+  if (!is.null(r$cond_ibra)) tmp_cond <- readRDS(r$cond_ibra)
+
+  all_y_grp <- c()
+  for (reg in names(tmp_base$region_results)) {
+    if (!region_in_states(reg)) next
+    br <- tmp_base$region_results[[reg]]
+    if (is.null(br) || all(is.na(br$mat_sim))) next
+    base_mean_tmp <- c(1.0, colMeans(br$mat_sim, na.rm = TRUE))
+    all_y_grp <- c(all_y_grp, base_mean_tmp)
+    if (!is.null(tmp_cond) && reg %in% names(tmp_cond$region_results)) {
+      cr <- tmp_cond$region_results[[reg]]
+      if (!is.null(cr) && !all(is.na(cr$mat_sim))) {
+        cond_mean_tmp <- c(1.0, colMeans(cr$mat_sim, na.rm = TRUE))
+        align_idx_tmp <- which.min(abs(tmp_base_years - tmp_cond$baseline_year))
+        offset_tmp <- base_mean_tmp[align_idx_tmp] - 1.0
+        all_y_grp <- c(all_y_grp, cond_mean_tmp + offset_tmp)
+      }
+    }
+  }
+  yr <- range(all_y_grp, na.rm = TRUE)
+  pad <- diff(yr) * 0.05
+  group_ylims[[grp]] <- yr + c(-pad, pad)
+  cat(sprintf("  %s ylim: [%.4f, %.4f]\n", grp, group_ylims[[grp]][1], group_ylims[[grp]][2]))
+}
+cat("\n")
+
 for (grp in groups) {
   r <- registry[[grp]]
   if (is.null(r$base_ibra)) {
@@ -477,6 +512,9 @@ for (grp in groups) {
   ## Filter to eastern-state IBRA regions
   base_regions <- names(base_ibra$region_results)
   base_regions <- base_regions[sapply(base_regions, region_in_states)]
+
+  ## Use the pre-computed per-group ylim
+  grp_ylim <- group_ylims[[grp]]
 
   n_plotted <- 0L
   for (reg in base_regions) {
@@ -501,20 +539,13 @@ for (grp in groups) {
       }
     }
 
-    y_vals <- base_mean
-    if (cond_plotted) y_vals <- c(y_vals, cond_mean_offset)
-    y_range <- range(y_vals, na.rm = TRUE)
-    if (!all(is.finite(y_range)) || diff(y_range) == 0) next
-    pad <- diff(y_range) * 0.05
-    y_range <- y_range + c(-pad, pad)
-
     ## States label for this region
     reg_states <- paste(ibra_state_map[[reg]], collapse = ", ")
 
     par(mar = c(5, 5, 4, 2))
     plot(base_all_years, base_mean, type = "l", lwd = 3,
          col = group_colours[grp],
-         xlim = range(base_all_years), ylim = y_range,
+         xlim = range(base_all_years), ylim = grp_ylim,
          xlab = "Year", ylab = "Mean Temporal Similarity",
          main = sprintf("%s -- %s (%s)\nClimate-only vs Climate + Condition | %d sites",
                         group_full_names[grp], reg, reg_states, br$n_sites),
@@ -605,6 +636,16 @@ for (grp in groups) {
 all_ibra_regions <- sort(names(ibra_all_data))
 cat(sprintf("  Found %d IBRA regions in eastern states\n", length(all_ibra_regions)))
 
+## ---- Compute GLOBAL y-range across all IBRA regions and groups ----
+global_y_vals <- unlist(lapply(ibra_all_data, function(reg_data) {
+  unlist(lapply(reg_data, function(d) c(d$base_sim, d$cond_sim)))
+}))
+global_y_range <- range(global_y_vals, na.rm = TRUE)
+global_pad <- diff(global_y_range) * 0.05
+global_y_range <- global_y_range + c(-global_pad, global_pad)
+cat(sprintf("  Global y-range for IBRA plots: [%.4f, %.4f]\n",
+            global_y_range[1], global_y_range[2]))
+
 pdf_ibra_allgrp <- file.path(viz_dir, sprintf("combined_timeseries_IBRA_all_groups_%s.pdf", prefix))
 pdf(pdf_ibra_allgrp, width = 14, height = 8)
 
@@ -612,11 +653,8 @@ for (reg in all_ibra_regions) {
   reg_data <- ibra_all_data[[reg]]
   if (length(reg_data) == 0) next
 
-  all_y <- unlist(lapply(reg_data, function(d) c(d$base_sim, d$cond_sim)))
-  y_range <- range(all_y, na.rm = TRUE)
-  if (!all(is.finite(y_range)) || diff(y_range) == 0) next
-  pad <- diff(y_range) * 0.05
-  y_range <- y_range + c(-pad, pad)
+  ## Use global y range so all IBRA pages are comparable
+  y_range <- global_y_range
 
   reg_states <- paste(ibra_state_map[[reg]], collapse = ", ")
 

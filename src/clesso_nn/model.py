@@ -14,9 +14,36 @@ model, but with greater flexibility.
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+# --------------------------------------------------------------------------
+# Utilities
+# --------------------------------------------------------------------------
+
+def _sigmoid_clamp(x: torch.Tensor, shift: torch.Tensor,
+                   max_val: float = 10.0) -> torch.Tensor:
+    """Smooth bounded output: maps ℝ → (0, max_val) via shifted sigmoid.
+
+    Uses  max_val · σ(x − shift)  which:
+      - Has gradient  max_val · σ · (1−σ) > 0  everywhere.
+      - Peak gradient at σ=0.5 (x=shift), tapering symmetrically.
+      - Even at η = 0.99·max_val, gradient ≈ 0.1   (vs tanh ≈ 0.0002).
+      - Even at η = 0.999·max_val, gradient ≈ 0.01  (still trainable).
+
+    ``shift`` is a learnable parameter controlling the midpoint; initialised
+    so η starts near 1–2 (ecological mid-range, far from both boundaries).
+
+    Gradient comparison at η=9 (out of 10):
+      hard clamp:  0.0  (dead)
+      tanh clamp:  0.02 (dying)
+      sigmoid:     0.9  (healthy)
+    """
+    return max_val * torch.sigmoid(x - shift)
 
 
 # --------------------------------------------------------------------------
@@ -253,6 +280,11 @@ class AdditiveBetaNet(nn.Module):
         self.K_env = input_dim
         self.n_knots = n_knots
         self.no_intercept = no_intercept
+        self.eta_max = 10.0
+
+        # Learnable shift for sigmoid output: controls midpoint of η range.
+        # Init so η ≈ 1.5 when total ≈ 0 → sigmoid(0 − shift) = 0.15 → shift ≈ 1.73
+        self.sigmoid_shift = nn.Parameter(torch.tensor(1.75))
 
         # Per-dimension monotone transformation: scalar → n_knots → 1
         # Softplus activation instead of ReLU: no dead zone, gradual onset
@@ -267,6 +299,29 @@ class AdditiveBetaNet(nn.Module):
             ))
 
         self._init_knots()
+        self._calibrate_sigmoid_shift()
+
+    def _calibrate_sigmoid_shift(self, target_eta: float = 1.5):
+        """Set sigmoid_shift so η ≈ target_eta for typical standardised input.
+
+        Runs a no-grad forward pass with |Δx| = 0.5 (half a standard deviation)
+        to measure the raw network total, then solves for the shift that maps
+        that total to the desired initial η.
+        """
+        with torch.no_grad():
+            x = torch.ones(64, self.K_env) * 0.5
+            total = torch.zeros(64)
+            zero = torch.zeros(1, 1)
+            for k in range(self.K_env):
+                g_k = self.dim_nets[k](x[:, k:k+1])
+                g_k_0 = self.dim_nets[k](zero)
+                total += (g_k - g_k_0).squeeze(-1)
+            mean_raw = total.mean().item()
+            # sigmoid(mean_raw - shift) = target_eta / eta_max
+            # shift = mean_raw - logit(target_eta / eta_max)
+            t = target_eta / self.eta_max
+            logit_t = math.log(t / (1.0 - t))
+            self.sigmoid_shift.data.fill_(mean_raw - logit_t)
 
     def _init_knots(self):
         """Initialise per-dimension networks for gradual response onset.
@@ -314,11 +369,10 @@ class AdditiveBetaNet(nn.Module):
             g_k_0 = self.dim_nets[k](zero)         # (1, 1) — baseline at zero
             f_k = g_k - g_k_0                      # f_k(0) = 0 exactly
             total = total + f_k.squeeze(-1)         # (batch,)
-        # Clamp η to [0, η_max] to prevent runaway.
-        # η=10 → S=exp(-10)≈4.5e-5, more than enough for any ecological scenario.
-        # Without this clamp, the model can push η→∞ for all between-site pairs,
-        # learning the degenerate solution p≈0 everywhere.
-        return total.clamp(min=0.0, max=10.0)
+        # Sigmoid output: bounded to (0, eta_max) with healthy gradients
+        # everywhere, including near the ceiling.  The learnable shift controls
+        # where the midpoint of the sigmoid sits relative to the additive total.
+        return _sigmoid_clamp(total, self.sigmoid_shift, max_val=self.eta_max)
 
 
 class FactoredDeepBetaNet(nn.Module):
@@ -355,6 +409,10 @@ class FactoredDeepBetaNet(nn.Module):
         self.K_env = input_dim
         self.encoder_hidden = encoder_hidden
         self.no_intercept = no_intercept
+        self.eta_max = 10.0
+
+        # Learnable shift for sigmoid output (see AdditiveBetaNet for rationale)
+        self.sigmoid_shift = nn.Parameter(torch.tensor(1.75))
 
         if interaction_hidden is None:
             interaction_hidden = [32]
@@ -398,6 +456,41 @@ class FactoredDeepBetaNet(nn.Module):
         self.interaction_net = nn.Sequential(*interact_layers)
 
         self._init_weights()
+        self._calibrate_sigmoid_shift()
+
+    def _calibrate_sigmoid_shift(self, target_eta: float = 1.5):
+        """Set sigmoid_shift so η ≈ target_eta for typical standardised input.
+
+        Runs a no-grad forward pass with |Δx| = 0.5 (half a standard deviation)
+        to measure the raw network total, then solves for the shift that maps
+        that total to the desired initial η.
+        """
+        with torch.no_grad():
+            x = torch.ones(64, self.K_env) * 0.5
+            zero = torch.zeros(1, 1)
+
+            # Additive component
+            additive = torch.zeros(64)
+            encodings = []
+            for k in range(self.K_env):
+                h_k = self.encoders[k](x[:, k:k+1])
+                encodings.append(h_k)
+                s_k = self.dim_projectors[k](h_k).squeeze(-1)
+                s_k_0 = self.dim_projectors[k](self.encoders[k](zero)).squeeze(-1)
+                additive += (s_k - s_k_0)
+
+            # Interaction component
+            concat_h = torch.cat(encodings, dim=-1)
+            interaction = self.interaction_net(concat_h).squeeze(-1)
+            h_zeros = [self.encoders[k](zero) for k in range(self.K_env)]
+            concat_h0 = torch.cat(h_zeros, dim=-1)
+            interaction_0 = self.interaction_net(concat_h0).squeeze(-1)
+            interaction = interaction - interaction_0
+
+            mean_raw = (additive + interaction).mean().item()
+            t = target_eta / self.eta_max
+            logit_t = math.log(t / (1.0 - t))
+            self.sigmoid_shift.data.fill_(mean_raw - logit_t)
 
     def _init_weights(self):
         """Initialise for moderate initial eta values."""
@@ -469,7 +562,7 @@ class FactoredDeepBetaNet(nn.Module):
         # 3. Combine additive + interaction
         eta = additive + interaction
 
-        return eta.clamp(min=0.0, max=10.0)
+        return _sigmoid_clamp(eta, self.sigmoid_shift, max_val=self.eta_max)
 
 
 # --------------------------------------------------------------------------
@@ -505,6 +598,8 @@ def expand_model_for_geo(
         beta_dropout=config.beta_dropout,
         alpha_activation=config.alpha_activation,
         alpha_lb_lambda=config.alpha_lower_bound_lambda,
+        alpha_anchor_lambda=config.alpha_anchor_lambda,
+        alpha_anchor_tolerance=config.alpha_anchor_tolerance,
         alpha_regression_lambda=config.alpha_regression_lambda,
         beta_type=config.beta_type,
         beta_n_knots=config.beta_n_knots,
@@ -512,8 +607,10 @@ def expand_model_for_geo(
         K_effort=model_phase1.effort_net.net[0].in_features if model_phase1.effort_net else 0,
         effort_hidden=config.effort_hidden,
         effort_dropout=config.effort_dropout,
+        effort_mode=getattr(model_phase1, 'effort_mode', 'additive'),
     )
     model_new.eta_smoothness_lambda = config.eta_smoothness_lambda
+    model_new.eta_anti_collapse_lambda = config.eta_anti_collapse_lambda
 
     K_alpha_old = model_phase1.alpha_net.net[0].in_features
     K_env_old = model_phase1.beta_net.K_env
@@ -602,6 +699,8 @@ class CLESSONet(nn.Module):
         beta_dropout: float = 0.1,
         alpha_activation: str = "relu",
         alpha_lb_lambda: float = 10.0,
+        alpha_anchor_lambda: float = 1.0,
+        alpha_anchor_tolerance: float = 1.6,
         alpha_regression_lambda: float = 1.0,
         beta_type: str = "additive",
         beta_n_knots: int = 32,
@@ -609,12 +708,19 @@ class CLESSONet(nn.Module):
         K_effort: int = 0,
         effort_hidden: list[int] = (64, 32),
         effort_dropout: float = 0.1,
+        effort_mode: str = "additive",
         eps: float = 1e-7,
     ):
         super().__init__()
+        if effort_mode not in ("additive", "multiplicative", "completeness"):
+            raise ValueError(
+                f"effort_mode must be 'additive', 'multiplicative', or "
+                f"'completeness', got {effort_mode!r}"
+            )
+        self.effort_mode = effort_mode
         self.alpha_net = AlphaNet(K_alpha, alpha_hidden, alpha_dropout, alpha_activation)
 
-        # Effort / detectability subnetwork (additive decomposition)
+        # Effort / detectability subnetwork
         if K_effort > 0:
             self.effort_net = EffortNet(K_effort, effort_hidden, effort_dropout)
         else:
@@ -636,8 +742,11 @@ class CLESSONet(nn.Module):
                              "Use 'additive', 'factored', or 'deep'.")
 
         self.alpha_lb_lambda = alpha_lb_lambda
+        self.alpha_anchor_lambda = alpha_anchor_lambda
+        self.alpha_anchor_tolerance = alpha_anchor_tolerance
         self.alpha_regression_lambda = alpha_regression_lambda
         self.eta_smoothness_lambda = 0.0  # set by train() from config
+        self.eta_anti_collapse_lambda = 0.0  # set by train() from config
         self.eps = eps
 
         # Geographic parameter L2 penalty — set externally after construction.
@@ -648,6 +757,14 @@ class CLESSONet(nn.Module):
         self.K_alpha_env = 0   # number of non-geo alpha input columns
         self.K_env_env = 0     # number of non-geo beta env dimensions
         self.effort_penalty = 0.0  # L2 penalty on effort_net parameters
+
+        # Composite likelihood parameters — set externally from config
+        self.stratum_weights: list[float] = [0.25, 0.35, 0.25, 0.15]
+        self.match_boost_lambda: float = 0.1
+        # Per-stratum retention rates for retrospective correction.
+        # Keys: "within_r0", "within_r1", "between_tier1_r0", etc.
+        # Set after loading metadata.
+        self.retention_rates: dict[str, float] = {}
 
     def geo_param_penalty(self, K_alpha_env: int = 0, K_env_env: int = 0) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute separate L2 penalties on geographic parameters.
@@ -711,9 +828,24 @@ class CLESSONet(nn.Module):
         z: torch.Tensor,
         w: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Compute alpha with additive effort decomposition.
+        """Compute alpha with effort decomposition.
 
-        α = softplus(env_logit + effort_logit) + 1
+        Additive mode:
+            α = softplus(env_logit + effort_logit) + 1
+
+        Multiplicative mode:
+            α_obs = α_env · σ(effort_logit)
+            Effort acts as a general modifier ∈ (0, 1).
+            Can push apparent richness below α_env but also below 1
+            for very low capture fractions.
+
+        Completeness mode:
+            α_true = 1 + softplus(f_α(z))
+            c_i = σ(f_ω(w)) ∈ (0, 1)   -- capture / completeness fraction
+            α_obs = 1 + c_i · softplus(f_α(z)) = 1 + c_i · (α_true - 1)
+            Effort can only *reduce* apparent richness below true richness;
+            α_obs ≥ 1 is guaranteed.  When c → 1, α_obs → α_true.
+            At initialisation σ(0) = 0.5, so α_obs ≈ 1 + 0.5·(α_true - 1).
 
         Args:
             z: (B, K_alpha) standardised env site covariates
@@ -721,13 +853,27 @@ class CLESSONet(nn.Module):
         Returns:
             alpha: (B,) positive richness values > 1
         """
-        raw_env = self.alpha_net.logit(z)
-        if self.effort_net is not None and w is not None:
-            raw_effort = self.effort_net(w)
-            raw = raw_env + raw_effort
-        else:
-            raw = raw_env
-        return F.softplus(raw) + 1.0
+        if self.effort_mode == "completeness":
+            env_sp = F.softplus(self.alpha_net.logit(z))  # α_true − 1
+            if self.effort_net is not None and w is not None:
+                c = torch.sigmoid(self.effort_net(w))  # completeness ∈ (0,1)
+                return 1.0 + c * env_sp
+            return 1.0 + env_sp  # no effort → full completeness
+        elif self.effort_mode == "multiplicative":
+            alpha_env = F.softplus(self.alpha_net.logit(z)) + 1.0
+            if self.effort_net is not None and w is not None:
+                effort_logit = self.effort_net(w)
+                capture_frac = torch.sigmoid(effort_logit)  # range (0, 1)
+                return alpha_env * capture_frac
+            return alpha_env
+        else:  # additive
+            raw_env = self.alpha_net.logit(z)
+            if self.effort_net is not None and w is not None:
+                raw_effort = self.effort_net(w)
+                raw = raw_env + raw_effort
+            else:
+                raw = raw_env
+            return F.softplus(raw) + 1.0
 
     def _compute_alpha_env_only(self, z: torch.Tensor) -> torch.Tensor:
         """Compute alpha from env covariates only (effort zeroed).
@@ -759,12 +905,35 @@ class CLESSONet(nn.Module):
         eta = self.beta_net(env_diff)
         similarity = torch.exp(-eta)
 
-        # Match probability
-        p_within = 1.0 / alpha_i
-        p_between = similarity * (alpha_i + alpha_j) / (2.0 * alpha_i * alpha_j)
+        # --- Log-space match probability ---
+        # Computing log(p) directly avoids underflow when α is large.
+        # Critical for beta gradients: d[log(p_between)]/dη = -1 always,
+        # regardless of alpha magnitude (no more vanishing gradients).
+        #
+        # Within-site:  p = 1/α  →  log(p) = -log(α)
+        # Between-site: p = S·(α_i+α_j)/(2·α_i·α_j)
+        #               log(p) = -η + log(α_i+α_j) - log(2) - log(α_i) - log(α_j)
+        log_p_within = -torch.log(alpha_i)
+        log_p_between = (
+            -eta
+            + torch.log(alpha_i + alpha_j)
+            - math.log(2.0)
+            - torch.log(alpha_i)
+            - torch.log(alpha_j)
+        )
 
-        p_match = torch.where(is_within.bool(), p_within, p_between)
-        p_match = p_match.clamp(self.eps, 1.0 - self.eps)
+        is_w = is_within.bool()
+        log_p_match = torch.where(is_w, log_p_within, log_p_between)
+        # Clamp log(p) to [log(eps), log(1-eps)] for numerical safety
+        log_eps = math.log(self.eps)
+        log_1m_eps = math.log(1.0 - self.eps)
+        log_p_match = log_p_match.clamp(log_eps, log_1m_eps)
+
+        # Materialise p for diagnostics / other uses
+        p_match = log_p_match.exp()
+        # log(1-p): use log1p(-p) for numerical stability when p is small
+        log_1m_p = torch.log1p(-p_match)
+        log_1m_p = log_1m_p.clamp(min=log_eps)
 
         return {
             "alpha_i": alpha_i,
@@ -772,6 +941,8 @@ class CLESSONet(nn.Module):
             "eta": eta,
             "similarity": similarity,
             "p_match": p_match,
+            "log_p_match": log_p_match,
+            "log_1m_p": log_1m_p,
         }
 
     def compute_loss(
@@ -782,61 +953,167 @@ class CLESSONet(nn.Module):
         S_obs: torch.Tensor,      # (n_sites,) observed richness
         w_i: torch.Tensor | None = None,
         w_j: torch.Tensor | None = None,
+        weight_clamp_factor: float = 0.0,
+        weight_log_normalise: bool = False,
     ) -> dict[str, torch.Tensor]:
-        """Compute weighted BCE loss + alpha penalties.
+        """Composite likelihood loss with per-stratum weighting.
 
-        Loss = weighted_BCE + lb_penalty + alpha_regression + effort_penalty
+        Loss = Σ_s λ_s · L_s  +  λ_boost · L_boost  +  penalties
 
-        Where:
-          - weighted_BCE:     standard binary cross-entropy weighted by pair weights
-          - lb_penalty:       soft lower-bound: λ_lb * mean[softplus(S_obs-α)]²
-          - alpha_regression: direct MSE anchor: λ_reg * MSE(α, S_obs)
-            Prevents alpha from collapsing to degenerate values.
-          - effort_penalty:   L2 on effort_net parameters to keep effort effect small
+        ALL strata use the same retrospective Bernoulli correction:
+          p → p_samp = r₀·p / (r₀·p + r₁·(1−p))
+        using per-stratum retention rates (r₀, r₁) from the sampler.
+
+        The key insight is that this correction simultaneously fixes
+        the gradient asymmetry that causes eta collapse.  For between-site
+        pairs with α~100, the raw BCE has match gradient ~200× larger than
+        mismatch.  But when the sampler enforces ~50:50 quotas, r₀ ≈ 1.0
+        and r₁ << 1 (because mismatches are far more abundant in the
+        population).  The retrospective correction maps p ≈ 0.01 →
+        p_samp ≈ 0.5, making both match and mismatch BCE gradients O(1).
+
+        Strata:
+          0 = within-site (W)
+          1 = same-hex between-site (S)  — uses between_tier1_r0/r1
+          2 = neighbour-hex between-site (N)  — uses between_tier2_r0/r1
+          3 = distant-hex between-site (D)  — uses between_tier3_r0/r1
+          4 = match-boost (auxiliary, not in main composite likelihood)
 
         Args:
-            batch: dict from dataloader with y, is_within, weight, env_diff, site_i, site_j
-            z_i: (B, K_alpha) site covariates for site i
-            z_j: (B, K_alpha) site covariates for site j
-            S_obs: (n_sites,) observed species count per site
-            w_i: (B, K_effort) effort covariates for site i, or None
-            w_j: (B, K_effort) effort covariates for site j, or None
+            batch: dict with y, is_within, design_w, stratum, env_diff, site_i, site_j
+            z_i, z_j: (B, K_alpha) site covariates
+            S_obs: (n_sites,) observed richness per site
+            w_i, w_j: (B, K_effort) effort covariates or None
 
         Returns:
-            dict with loss, bce_loss, lb_penalty, alpha_reg_loss, and forward outputs
+            dict with loss components and forward outputs
         """
         fwd = self.forward(z_i, z_j, batch["env_diff"], batch["is_within"],
                            w_i=w_i, w_j=w_j)
 
         y = batch["y"]
-        w = batch["weight"]
+        design_w = batch["design_w"]
+        stratum = batch["stratum"]
         p = fwd["p_match"]
+        eps = 1e-7
 
-        # Weighted binary cross-entropy
-        # y=0 means match → log(p), y=1 means mismatch → log(1-p)
-        bce = -(1.0 - y) * torch.log(p) - y * torch.log(1.0 - p)
-        bce_loss = (w * bce).sum() / w.sum()
+        log_p = fwd["log_p_match"]
+        log_1m_p = fwd["log_1m_p"]
 
-        # Soft lower-bound penalty: discourage alpha < S_obs
+        # ------------------------------------------------------------------
+        # Per-element BCE on raw p (before any correction)
+        # ------------------------------------------------------------------
+        bce_per_pair = -(1.0 - y) * log_p - y * log_1m_p
+
+        # ------------------------------------------------------------------
+        # Retrospective correction for ALL strata:
+        #
+        # Every stratum uses p → p_samp = r₀·p / (r₀·p + r₁·(1−p))
+        # with per-stratum retention rates from the sampler.
+        #
+        # This simultaneously:
+        #   1. Corrects the sampling bias (quota 50:50 ≠ population freq)
+        #   2. Eliminates the between-site gradient asymmetry:
+        #      When r₀ ≈ 1.0 and r₁ << 1, p ≈ 0.01 maps to p_samp ≈ 0.5,
+        #      making d(BCE)/dη balanced for match and mismatch pairs.
+        # ------------------------------------------------------------------
+
+        lambda_s = self.stratum_weights  # [λ_W, λ_S, λ_N, λ_D]
+        total_bce = torch.tensor(0.0, device=p.device)
+        stratum_bce_parts = {}
+        weight_ess_parts = {}
+
+        # Retention rate keys per stratum
+        _rr_keys = {
+            0: ("within_r0", "within_r1"),
+            1: ("between_tier1_r0", "between_tier1_r1"),
+            2: ("between_tier2_r0", "between_tier2_r1"),
+            3: ("between_tier3_r0", "between_tier3_r1"),
+        }
+
+        rr = self.retention_rates
+
+        for s_idx in range(4):
+            mask_s = stratum == s_idx
+            if not mask_s.any():
+                continue
+
+            p_s = p[mask_s]
+            y_s = y[mask_s]
+            dw_s = design_w[mask_s]
+
+            r0_key, r1_key = _rr_keys[s_idx]
+            r0_s = rr.get(r0_key, 1.0)
+            r1_s = rr.get(r1_key, 1.0)
+
+            if r0_s != 1.0 or r1_s != 1.0:
+                # Retrospective p_samp = r0*p / (r0*p + r1*(1-p))
+                p_samp = r0_s * p_s / (r0_s * p_s + r1_s * (1.0 - p_s) + eps)
+                log_ps = torch.log(p_samp.clamp(min=eps))
+                log_1ps = torch.log((1.0 - p_samp).clamp(min=eps))
+                bce_s = -(1.0 - y_s) * log_ps - y_s * log_1ps
+            else:
+                bce_s = bce_per_pair[mask_s]
+
+            w_sum_s = dw_s.sum()
+            L_s = (dw_s * bce_s).sum() / w_sum_s.clamp(min=eps)
+            total_bce = total_bce + lambda_s[s_idx] * L_s
+            stratum_bce_parts[f"bce_s{s_idx}"] = L_s.detach()
+            ess_s = (w_sum_s ** 2 / (dw_s ** 2).sum()).item()
+            weight_ess_parts[f"ess_s{s_idx}"] = ess_s
+
+        # ------------------------------------------------------------------
+        # Match-boost auxiliary loss (stratum 4)
+        # ------------------------------------------------------------------
+        boost_loss = torch.tensor(0.0, device=p.device)
+        mask_boost = stratum == 4
+        if mask_boost.any() and self.match_boost_lambda > 0:
+            # Unweighted BCE on boosted match pairs (they are all y=0)
+            bce_boost = bce_per_pair[mask_boost]
+            boost_loss = self.match_boost_lambda * bce_boost.mean()
+            stratum_bce_parts["bce_boost"] = bce_boost.mean().detach()
+
+        bce_loss = total_bce + boost_loss
+
+        # Overall ESS (across all main strata)
+        main_mask = stratum < 4
+        if main_mask.any():
+            w_main = design_w[main_mask]
+            _sum_w = w_main.sum()
+            weight_ess = (_sum_w ** 2 / (w_main ** 2).sum()).item()
+        else:
+            weight_ess = 0.0
+
+        # ------------------------------------------------------------------
+        # Alpha penalties (unchanged)
+        # ------------------------------------------------------------------
+
+        # Pre-compute α_env (effort-stripped true richness) for lb + anchor penalties
+        alpha_env_i = alpha_env_j = None
+        if (self.alpha_lb_lambda > 0.0 or self.alpha_anchor_lambda > 0.0) and S_obs is not None:
+            alpha_env_i = self._compute_alpha_env_only(z_i)
+            alpha_env_j = self._compute_alpha_env_only(z_j)
+
+        # Soft lower-bound penalty on α_env: true richness must ≥ S_obs (log-space)
         lb_penalty = torch.tensor(0.0, device=p.device)
-        if self.alpha_lb_lambda > 0.0 and S_obs is not None:
-            alpha_i_obs = S_obs[batch["site_i"]]
-            alpha_j_obs = S_obs[batch["site_j"]]
+        if self.alpha_lb_lambda > 0.0 and alpha_env_i is not None:
+            s_i_lb = S_obs[batch["site_i"]]
+            s_j_lb = S_obs[batch["site_j"]]
 
-            # softplus(S_obs - alpha)^2 — only penalises when alpha < S_obs
-            violation_i = F.softplus(10.0 * (alpha_i_obs - fwd["alpha_i"])) / 10.0
-            violation_j = F.softplus(10.0 * (alpha_j_obs - fwd["alpha_j"])) / 10.0
+            eps_lb = 1.0
+            log_gap_i = torch.log(s_i_lb.clamp(min=eps_lb)) - torch.log(alpha_env_i)
+            log_gap_j = torch.log(s_j_lb.clamp(min=eps_lb)) - torch.log(alpha_env_j)
+            violation_i = F.softplus(10.0 * log_gap_i) / 10.0
+            violation_j = F.softplus(10.0 * log_gap_j) / 10.0
             lb_penalty = self.alpha_lb_lambda * (
                 violation_i.pow(2).mean() + violation_j.pow(2).mean()
             )
 
         # Direct alpha regression: MSE(alpha, S_obs)
-        # Anchors alpha to observed richness, breaking the p≈0.5 equilibrium
         alpha_reg_loss = torch.tensor(0.0, device=p.device)
         if self.alpha_regression_lambda > 0.0 and S_obs is not None:
             alpha_i_obs = S_obs[batch["site_i"]]
             alpha_j_obs = S_obs[batch["site_j"]]
-            # Only penalise sites with known richness (S_obs > 0)
             mask_i = alpha_i_obs > 0
             mask_j = alpha_j_obs > 0
             if mask_i.any():
@@ -849,8 +1126,7 @@ class CLESSONet(nn.Module):
                 reg_j = torch.tensor(0.0, device=p.device)
             alpha_reg_loss = self.alpha_regression_lambda * (reg_i + reg_j) / 2.0
 
-        # Eta smoothness penalty: penalise large eta to encourage gradual
-        # turnover ramps rather than step functions.
+        # Eta smoothness penalty (disabled by default; pushes η→0)
         eta_smooth_loss = torch.tensor(0.0, device=p.device)
         if self.eta_smoothness_lambda > 0.0:
             between_mask = batch["is_within"] == 0
@@ -858,15 +1134,45 @@ class CLESSONet(nn.Module):
                 eta_between = fwd["eta"][between_mask]
                 eta_smooth_loss = self.eta_smoothness_lambda * eta_between.pow(2).mean()
 
-        loss = bce_loss + lb_penalty + alpha_reg_loss + eta_smooth_loss
+        # Eta anti-collapse regularizer: -λ * mean(log(η + ε))
+        # Logarithmic barrier that strongly resists η→0 while exerting
+        # negligible force at moderate η (e.g. at η=2, gradient ≈ -0.005).
+        eta_ac_loss = torch.tensor(0.0, device=p.device)
+        if self.eta_anti_collapse_lambda > 0.0:
+            between_mask_ac = batch["is_within"] == 0
+            if between_mask_ac.any():
+                eta_between_ac = fwd["eta"][between_mask_ac]
+                eta_ac_loss = -self.eta_anti_collapse_lambda * torch.log(
+                    eta_between_ac + 1e-4
+                ).mean()
 
-        # Effort net L2 penalty (keep effort effect small / regularised)
+        # Alpha anchor penalty (log-normal prior with dead-zone tolerance)
+        # Applied to α_env (effort-stripped true richness), NOT α_obs.
+        # This lets EffortNet freely explain the gap between α_env and S_obs
+        # while preventing runaway α_env inflation.
+        anchor_penalty = torch.tensor(0.0, device=p.device)
+        if self.alpha_anchor_lambda > 0.0 and alpha_env_i is not None:
+            s_i = S_obs[batch["site_i"]].clamp(min=1.0)
+            s_j = S_obs[batch["site_j"]].clamp(min=1.0)
+
+            tau = self.alpha_anchor_tolerance
+            gap_i = (torch.log(alpha_env_i) - torch.log(s_i)).abs() - tau
+            gap_j = (torch.log(alpha_env_j) - torch.log(s_j)).abs() - tau
+            viol_i = F.relu(gap_i)
+            viol_j = F.relu(gap_j)
+            anchor_penalty = self.alpha_anchor_lambda * (
+                viol_i.pow(2).mean() + viol_j.pow(2).mean()
+            )
+
+        loss = bce_loss + lb_penalty + alpha_reg_loss + eta_smooth_loss + eta_ac_loss + anchor_penalty
+
+        # Effort net L2 penalty
         effort_loss = torch.tensor(0.0, device=p.device)
         if self.effort_penalty > 0 and self.effort_net is not None:
             effort_loss = self.effort_penalty * self.effort_param_penalty()
             loss = loss + effort_loss
 
-        # Geographic parameter L2 penalty (separate from weight decay)
+        # Geographic parameter L2 penalty
         geo_loss = torch.tensor(0.0, device=p.device)
         if (self.geo_penalty_alpha > 0 or self.geo_penalty_beta > 0) \
                 and (self.K_alpha_env > 0 or self.K_env_env > 0):
@@ -880,9 +1186,15 @@ class CLESSONet(nn.Module):
             "loss": loss,
             "bce_loss": bce_loss,
             "lb_penalty": lb_penalty,
+            "anchor_penalty": anchor_penalty,
             "alpha_reg_loss": alpha_reg_loss,
             "eta_smooth_loss": eta_smooth_loss,
+            "eta_ac_loss": eta_ac_loss,
             "effort_loss": effort_loss,
             "geo_loss": geo_loss,
+            "boost_loss": boost_loss,
+            "weight_ess": weight_ess,
+            **stratum_bce_parts,
+            **weight_ess_parts,
             **fwd,
         }

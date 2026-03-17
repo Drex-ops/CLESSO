@@ -10,9 +10,10 @@ Uses the trained CLESSO NN model checkpoint together with:
   - AWAP climate grids    (9 variables from geonpy .npy files)
   - Grid coordinates      (lon, lat derived from reference raster)
 
-All 17 alpha covariates match those used during training:
-    lon, lat, subs_1..6, mean_mean_PT, min_TNn, min_FWPT,
-    max_max_PT, max_FWPT, max_FD, max_TXx, max_TNn, max_PD
+The alpha covariates are determined dynamically from the checkpoint's
+alpha_cov_names — no hard-coded variable list. Climate variables are
+derived using the naming convention: column "{cstat}_{varname}" maps
+to geonpy file "{varname}_191101-201712.npy".
 
 The output is a single-band GeoTIFF at the same resolution and extent
 as the reference raster (0.05°, 670×813, WGS84).
@@ -44,12 +45,19 @@ import torch
 # ──────────────────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
+def _default_checkpoint():
+    """Prefer calibrated checkpoint when it exists."""
+    base = PROJECT_ROOT / "src" / "clesso_nn" / "output" / "VAS_hexBalance_nn" / "best_model.pt"
+    calibrated = base.parent / "best_model_calibrated.pt"
+    return calibrated if calibrated.exists() else base
+
+
 DEFAULTS = dict(
-    checkpoint=PROJECT_ROOT / "src" / "clesso_nn" / "output" / "VAS_nn" / "best_model.pt",
+    checkpoint=_default_checkpoint(),
     reference_raster=PROJECT_ROOT / "data" / "FWPT_mean_Cmax_mean_1946_1975.flt",
     substrate_raster=PROJECT_ROOT / "data" / "SUBS_brk_VAS.grd",
     npy_src="/Volumes/PortableSSD/CLIMATE/geonpy",
-    output=PROJECT_ROOT / "src" / "clesso_nn" / "output" / "VAS_nn" / "alpha_surface.tif",
+    output=None,  # derived from checkpoint dir at runtime
     batch_size=50_000,
     climate_year=2010,
     climate_month=6,
@@ -57,29 +65,47 @@ DEFAULTS = dict(
     geonpy_start_year=1911,
 )
 
-# Climate variable extraction groups
-# Each  entry: (cstat_name, mstat_func, cstat_func, [(npy_basename, output_col_name), ...])
-CLIMATE_GROUPS = [
-    ("mean", np.mean, np.mean, [
-        ("mean_PT_191101-201712", "mean_mean_PT"),
-    ]),
-    ("min", np.mean, np.min, [
-        ("TNn_191101-201712", "min_TNn"),
-        ("FWPT_191101-201712", "min_FWPT"),
-    ]),
-    ("max", np.mean, np.max, [
-        ("max_PT_191101-201712", "max_max_PT"),
-        ("FWPT_191101-201712", "max_FWPT"),
-    ]),
-    ("max", np.mean, np.max, [
-        ("FD_191101-201712", "max_FD"),
-        ("TXx_191101-201712", "max_TXx"),
-    ]),
-    ("max", np.mean, np.max, [
-        ("TNn_191101-201712", "max_TNn"),
-        ("PD_191101-201712", "max_PD"),
-    ]),
-]
+# Date-range suffix on geonpy .npy files (matches training data period)
+NPY_DATE_RANGE = "191101-201712"
+
+# Stat prefix → (mstat_func, cstat_func) mapping used by geonpy
+# mstat is always np.mean (monthly aggregation); cstat varies.
+CSTAT_FUNCS = {
+    "mean": (np.mean, np.mean),
+    "min":  (np.mean, np.min),
+    "max":  (np.mean, np.max),
+}
+
+
+def derive_climate_vars(alpha_cov_names: list[str]) -> list[tuple[str, str, callable, callable]]:
+    """Derive climate extraction specs from the checkpoint's alpha_cov_names.
+
+    Convention (matching run_clesso.R):
+        column name  = "{cstat}_{varname}"
+        npy file     = "{varname}_{NPY_DATE_RANGE}.npy"
+        mstat        = np.mean  (always)
+        cstat        = np.mean / np.min / np.max  (from prefix)
+
+    Non-climate names (lon, lat, subs_*, fourier_*) are skipped.
+
+    Returns: list of (col_name, npy_basename, mstat_func, cstat_func)
+    """
+    skip_prefixes = ("lon", "lat", "subs_", "fourier_")
+    specs = []
+    for col in alpha_cov_names:
+        if any(col == pfx or col.startswith(pfx) for pfx in skip_prefixes):
+            continue
+        # Split on first underscore: cstat_prefix, varname
+        parts = col.split("_", 1)
+        if len(parts) != 2 or parts[0] not in CSTAT_FUNCS:
+            raise ValueError(
+                f"Cannot derive climate extraction for column '{col}'. "
+                f"Expected format '{{mean|min|max}}_{{varname}}'.")
+        cstat_prefix, varname = parts
+        mstat_func, cstat_func = CSTAT_FUNCS[cstat_prefix]
+        npy_basename = f"{varname}_{NPY_DATE_RANGE}"
+        specs.append((col, npy_basename, mstat_func, cstat_func))
+    return specs
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -154,9 +180,10 @@ def extract_substrate(path: str | Path, mask: np.ndarray) -> np.ndarray:
 # ──────────────────────────────────────────────────────────────────────────
 
 def extract_climate(npy_src: str | Path, lons: np.ndarray, lats: np.ndarray,
+                    climate_specs: list[tuple[str, str, callable, callable]],
                     climate_year: int, climate_month: int,
                     climate_window: int, start_year: int) -> dict[str, np.ndarray]:
-    """Extract all 9 climate variables at land cell coordinates.
+    """Extract climate variables at land cell coordinates.
 
     Uses geonpy read_points + calc_climatology_window — identical to pyper.py
     so that the extraction exactly matches how training data was produced.
@@ -164,6 +191,8 @@ def extract_climate(npy_src: str | Path, lons: np.ndarray, lats: np.ndarray,
     Args:
         npy_src:         directory containing geonpy .npy files
         lons, lats:      (n_valid,) coordinate arrays of land cells
+        climate_specs:   list of (col_name, npy_basename, mstat_func, cstat_func)
+                         as returned by derive_climate_vars()
         climate_year:    centre year for climate window (2010)
         climate_month:   centre month (6)
         climate_window:  window length in years (30)
@@ -194,33 +223,30 @@ def extract_climate(npy_src: str | Path, lons: np.ndarray, lats: np.ndarray,
     print(f"  Points: {n_pts:,}")
 
     results = {}
-    n_vars = sum(len(group[3]) for group in CLIMATE_GROUPS)
-    done = 0
+    n_vars = len(climate_specs)
 
-    for _, mstat, cstat, variables in CLIMATE_GROUPS:
-        for npy_name, col_name in variables:
-            done += 1
-            npy_path = npy_src / f"{npy_name}.npy"
-            if not npy_path.exists():
-                raise FileNotFoundError(f"Climate file not found: {npy_path}")
+    for i, (col_name, npy_name, mstat, cstat) in enumerate(climate_specs, 1):
+        npy_path = npy_src / f"{npy_name}.npy"
+        if not npy_path.exists():
+            raise FileNotFoundError(f"Climate file not found: {npy_path}")
 
-            print(f"    [{done}/{n_vars}] {col_name} ← {npy_name}", end="  ")
-            t0 = time.time()
+        print(f"    [{i}/{n_vars}] {col_name} ← {npy_name}", end="  ")
+        t0 = time.time()
 
-            g = Geonpy(str(npy_path))
+        g = Geonpy(str(npy_path))
 
-            # Extract raw time-series at each point: (n_pts, 360)
-            raw = g.read_points(pts, dim_idx=dim_idx)
+        # Extract raw time-series at each point: (n_pts, 360)
+        raw = g.read_points(pts, dim_idx=dim_idx)
 
-            # Compute climatology: monthly stat → yearly stat
-            vals = calc_climatology_window(raw, mstat, cstat)
-            results[col_name] = vals.astype(np.float32)
+        # Compute climatology: monthly stat → yearly stat
+        vals = calc_climatology_window(raw, mstat, cstat)
+        results[col_name] = vals.astype(np.float32)
 
-            dt = time.time() - t0
-            print(f"range: {np.nanmin(vals):.4f} – {np.nanmax(vals):.4f}  "
-                  f"({dt:.1f}s)")
+        dt = time.time() - t0
+        print(f"range: {np.nanmin(vals):.4f} – {np.nanmax(vals):.4f}  "
+              f"({dt:.1f}s)")
 
-            del g  # release memory-mapped file
+        del g  # release memory-mapped file
 
     return results
 
@@ -404,13 +430,158 @@ def write_geotiff(output_path: str | Path, alpha: np.ndarray,
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# Step 6: Generate PDF map
+# Step 6a: Generate covariate diagnostic PDF
+# ──────────────────────────────────────────────────────────────────────────
+
+def plot_covariate_maps(covariate_arrays: dict, cov_names: list[str],
+                        grid: dict, pdf_path: str | Path,
+                        shapefile_path: str | Path | None = None,
+                        ncols: int = 3):
+    """Produce a multi-page PDF with a map of every env covariate.
+
+    Each page shows up to ncols × 3 panels (default 3×3 = 9 per page).
+    Each panel shows the raw (unstandardised) covariate on a diverging or
+    sequential colour scale, with summary stats in the title.
+    """
+    import math
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_pdf import PdfPages
+    from matplotlib.colors import Normalize
+
+    pdf_path = Path(pdf_path)
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+
+    height, width = grid["height"], grid["width"]
+    mask = grid["mask"]
+    transform = grid["transform"]
+
+    x_min = transform.c
+    y_max = transform.f
+    x_max = x_min + width * transform.a
+    y_min = y_max + height * transform.e
+    extent = [x_min, x_max, y_min, y_max]
+
+    # Read IBRA boundaries if available
+    boundary_shapes = None
+    if shapefile_path is not None:
+        shapefile_path = Path(shapefile_path)
+        if shapefile_path.exists():
+            try:
+                import shapefile as shp
+                sf = shp.Reader(str(shapefile_path))
+                boundary_shapes = sf.shapes()
+            except Exception:
+                pass
+
+    def _draw_boundaries(ax):
+        if boundary_shapes is None:
+            return
+        for shape in boundary_shapes:
+            pts = np.array(shape.points)
+            parts = list(shape.parts) + [len(pts)]
+            for k in range(len(parts) - 1):
+                seg = pts[parts[k]:parts[k + 1]]
+                ax.plot(seg[:, 0], seg[:, 1], color="#444444",
+                        linewidth=0.25, alpha=0.5)
+
+    nrows_per_page = 3
+    panels_per_page = nrows_per_page * ncols
+    n_covs = len(cov_names)
+    n_pages = math.ceil(n_covs / panels_per_page)
+
+    print(f"  Covariate diagnostic PDF: {n_covs} covariates, "
+          f"{n_pages} page(s) → {pdf_path.name}")
+
+    with PdfPages(str(pdf_path)) as pdf:
+        for page_idx in range(n_pages):
+            start = page_idx * panels_per_page
+            end = min(start + panels_per_page, n_covs)
+            page_names = cov_names[start:end]
+            n_on_page = len(page_names)
+            n_rows = math.ceil(n_on_page / ncols)
+
+            fig, axes = plt.subplots(
+                n_rows, ncols,
+                figsize=(5.5 * ncols, 4.5 * n_rows),
+                squeeze=False,
+            )
+            fig.suptitle(
+                f"CLESSO NN — Input Covariates (page {page_idx + 1}/{n_pages})",
+                fontsize=14, fontweight="bold", y=0.995,
+            )
+
+            for k, name in enumerate(page_names):
+                row, col = divmod(k, ncols)
+                ax = axes[row, col]
+
+                vals_1d = covariate_arrays[name]
+                arr_2d = np.full((height, width), np.nan, dtype=np.float32)
+                arr_2d[mask] = vals_1d
+
+                valid = vals_1d[~np.isnan(vals_1d)]
+                if len(valid) == 0:
+                    ax.set_title(f"{name}\n(all NaN)", fontsize=9)
+                    ax.axis("off")
+                    continue
+
+                p1, p99 = np.nanpercentile(valid, [1, 99])
+                vmin, vmax = p1, p99
+                if vmin == vmax:
+                    vmin -= 1
+                    vmax += 1
+
+                # Use diverging cmap if data spans zero, sequential otherwise
+                if vmin < 0 < vmax:
+                    abs_v = max(abs(vmin), abs(vmax))
+                    cmap = plt.cm.RdBu_r.copy()
+                    vmin, vmax = -abs_v, abs_v
+                else:
+                    cmap = plt.cm.viridis.copy()
+                cmap.set_bad(color="#e8e8e8")
+
+                im = ax.imshow(
+                    arr_2d, extent=extent, origin="upper",
+                    cmap=cmap, norm=Normalize(vmin=vmin, vmax=vmax),
+                    interpolation="nearest", aspect="equal",
+                )
+                _draw_boundaries(ax)
+                fig.colorbar(im, ax=ax, shrink=0.75, pad=0.02)
+
+                n_nan = np.isnan(vals_1d).sum()
+                title = (f"{name}\n"
+                         f"mean={np.nanmean(valid):.2f}  "
+                         f"sd={np.nanstd(valid):.2f}  "
+                         f"NaN={n_nan:,}")
+                ax.set_title(title, fontsize=8)
+                ax.set_xlim(x_min, x_max)
+                ax.set_ylim(y_min, y_max)
+                ax.set_aspect("equal")
+                ax.tick_params(labelsize=6)
+
+            # Turn off unused panels
+            for k in range(n_on_page, n_rows * ncols):
+                row, col = divmod(k, ncols)
+                axes[row, col].axis("off")
+
+            fig.tight_layout(rect=[0, 0, 1, 0.97])
+            pdf.savefig(fig, dpi=150)
+            plt.close(fig)
+
+    print(f"  Written: {pdf_path}")
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Step 6b: Generate PDF map
 # ──────────────────────────────────────────────────────────────────────────
 
 def plot_alpha_map(alpha_raster: np.ndarray, grid: dict,
                    pdf_path: str | Path, nodata: float = -9999.0,
                    shapefile_path: str | Path | None = None,
-                   epoch: int = 0, val_loss: float = 0.0):
+                   epoch: int = 0, val_loss: float = 0.0,
+                   alpha_full: np.ndarray | None = None,
+                   alpha_effort: np.ndarray | None = None):
     """Produce a publication-quality PDF map of the alpha surface.
 
     Includes:
@@ -418,6 +589,7 @@ def plot_alpha_map(alpha_raster: np.ndarray, grid: dict,
       - IBRA bioregion boundaries (if shapefile provided)
       - Histogram of alpha distribution
       - Summary statistics
+      - (If effort present) Full alpha map, effort logit map, difference map
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -584,6 +756,184 @@ def plot_alpha_map(alpha_raster: np.ndarray, grid: dict,
         pdf.savefig(fig, dpi=150)
         plt.close(fig)
 
+        # ─────────────────────────────────────────────────────────────
+        # Pages 3–5: Effort decomposition (if effort surfaces provided)
+        # ─────────────────────────────────────────────────────────────
+        if alpha_full is not None or alpha_effort is not None:
+            print("  Adding effort pages to PDF...")
+
+            # Helper: build 2D raster from flat valid-pixel array
+            def _to_2d(flat_arr):
+                arr_2d = np.full((height, width), np.nan, dtype=np.float32)
+                arr_2d[mask] = flat_arr
+                return arr_2d
+
+            # Helper: draw IBRA boundaries on an axes
+            def _draw_boundaries(ax):
+                if boundary_shapes is not None:
+                    for shape in boundary_shapes:
+                        for i_part in range(len(shape.parts)):
+                            i_start = shape.parts[i_part]
+                            i_end = (shape.parts[i_part + 1]
+                                     if i_part + 1 < len(shape.parts)
+                                     else len(shape.points))
+                            pts = np.array(shape.points[i_start:i_end])
+                            if len(pts) > 2:
+                                ax.plot(pts[:, 0], pts[:, 1],
+                                        color="#333333", linewidth=0.25, alpha=0.5)
+
+            # ── Page 3: Full alpha (env + effort) map ────────────────
+            if alpha_full is not None:
+                full_2d = _to_2d(alpha_full)
+                full_valid = alpha_full[~np.isnan(alpha_full)]
+
+                fig, ax = plt.subplots(figsize=(12, 10))
+                im = ax.imshow(
+                    full_2d, extent=extent, origin="upper",
+                    cmap=cmap,
+                    norm=Normalize(vmin=vmin, vmax=vmax),
+                    interpolation="nearest", aspect="equal",
+                )
+                _draw_boundaries(ax)
+                cbar = fig.colorbar(im, ax=ax, shrink=0.75, pad=0.02, aspect=30)
+                cbar.set_label("Predicted α (env + effort)", fontsize=11)
+                ax.set_xlim(x_min, x_max)
+                ax.set_ylim(y_min, y_max)
+                ax.set_xlabel("Longitude (°E)", fontsize=11)
+                ax.set_ylabel("Latitude (°S)", fontsize=11)
+                ax.set_title(
+                    f"CLESSO NN — α (env + effort)\n"
+                    f"Mean {np.nanmean(full_valid):.1f} | "
+                    f"Median {np.nanmedian(full_valid):.1f} | "
+                    f"Range [{np.nanmin(full_valid):.1f}, {np.nanmax(full_valid):.1f}]",
+                    fontsize=13, fontweight="bold",
+                )
+                ax.grid(True, linewidth=0.3, alpha=0.4, color="grey")
+                fig.tight_layout()
+                pdf.savefig(fig, dpi=200)
+                plt.close(fig)
+
+            # ── Page 4: Effort logit map ─────────────────────────────
+            if alpha_effort is not None:
+                eff_2d = _to_2d(alpha_effort)
+                eff_valid = alpha_effort[~np.isnan(alpha_effort)]
+
+                # Diverging colour map centred on 0
+                eff_abs = max(abs(np.nanpercentile(eff_valid, 1)),
+                              abs(np.nanpercentile(eff_valid, 99)))
+                eff_abs = max(eff_abs, 0.01)  # avoid zero range
+                eff_cmap = plt.cm.RdBu_r.copy()
+                eff_cmap.set_bad(color="#e8e8e8")
+
+                fig, ax = plt.subplots(figsize=(12, 10))
+                im = ax.imshow(
+                    eff_2d, extent=extent, origin="upper",
+                    cmap=eff_cmap,
+                    norm=Normalize(vmin=-eff_abs, vmax=eff_abs),
+                    interpolation="nearest", aspect="equal",
+                )
+                _draw_boundaries(ax)
+                cbar = fig.colorbar(im, ax=ax, shrink=0.75, pad=0.02, aspect=30)
+                cbar.set_label("Effort logit (EffortNet output)", fontsize=11)
+                ax.set_xlim(x_min, x_max)
+                ax.set_ylim(y_min, y_max)
+                ax.set_xlabel("Longitude (°E)", fontsize=11)
+                ax.set_ylabel("Latitude (°S)", fontsize=11)
+                ax.set_title(
+                    f"CLESSO NN — Effort Logit Surface\n"
+                    f"Mean {np.nanmean(eff_valid):.3f} | "
+                    f"SD {np.nanstd(eff_valid):.3f} | "
+                    f"Range [{np.nanmin(eff_valid):.3f}, {np.nanmax(eff_valid):.3f}]",
+                    fontsize=13, fontweight="bold",
+                )
+                ax.grid(True, linewidth=0.3, alpha=0.4, color="grey")
+                fig.tight_layout()
+                pdf.savefig(fig, dpi=200)
+                plt.close(fig)
+
+            # ── Page 5: Side-by-side env-only vs full + histogram ────
+            if alpha_full is not None and alpha_effort is not None:
+                fig, axes = plt.subplots(2, 2, figsize=(16, 14))
+
+                # Top-left: env-only alpha
+                ax = axes[0, 0]
+                im = ax.imshow(
+                    alpha_2d, extent=extent, origin="upper",
+                    cmap=cmap,
+                    norm=Normalize(vmin=vmin, vmax=vmax),
+                    interpolation="nearest", aspect="equal",
+                )
+                fig.colorbar(im, ax=ax, shrink=0.7, pad=0.02)
+                ax.set_title("α env-only (true richness)", fontsize=11, fontweight="bold")
+                ax.set_xlim(x_min, x_max); ax.set_ylim(y_min, y_max)
+                ax.set_aspect("equal")
+
+                # Top-right: full alpha (env + effort)
+                ax = axes[0, 1]
+                full_2d = _to_2d(alpha_full)
+                im = ax.imshow(
+                    full_2d, extent=extent, origin="upper",
+                    cmap=cmap,
+                    norm=Normalize(vmin=vmin, vmax=vmax),
+                    interpolation="nearest", aspect="equal",
+                )
+                fig.colorbar(im, ax=ax, shrink=0.7, pad=0.02)
+                ax.set_title("α full (env + effort)", fontsize=11, fontweight="bold")
+                ax.set_xlim(x_min, x_max); ax.set_ylim(y_min, y_max)
+                ax.set_aspect("equal")
+
+                # Bottom-left: effort logit
+                ax = axes[1, 0]
+                eff_2d = _to_2d(alpha_effort)
+                eff_valid = alpha_effort[~np.isnan(alpha_effort)]
+                eff_abs_v = max(abs(np.nanpercentile(eff_valid, 1)),
+                                abs(np.nanpercentile(eff_valid, 99)), 0.01)
+                eff_cmap2 = plt.cm.RdBu_r.copy()
+                eff_cmap2.set_bad(color="#e8e8e8")
+                im = ax.imshow(
+                    eff_2d, extent=extent, origin="upper",
+                    cmap=eff_cmap2,
+                    norm=Normalize(vmin=-eff_abs_v, vmax=eff_abs_v),
+                    interpolation="nearest", aspect="equal",
+                )
+                fig.colorbar(im, ax=ax, shrink=0.7, pad=0.02)
+                ax.set_title("Effort logit", fontsize=11, fontweight="bold")
+                ax.set_xlim(x_min, x_max); ax.set_ylim(y_min, y_max)
+                ax.set_aspect("equal")
+
+                # Bottom-right: difference map (full − env-only), own colour scale
+                ax = axes[1, 1]
+                diff_arr = alpha_full - alpha_raster  # absolute difference
+                diff_2d = _to_2d(diff_arr)
+                diff_valid = diff_arr[~np.isnan(diff_arr)]
+                diff_abs_v = max(abs(np.nanpercentile(diff_valid, 1)),
+                                 abs(np.nanpercentile(diff_valid, 99)), 0.01)
+                diff_cmap = plt.cm.PuOr_r.copy()
+                diff_cmap.set_bad(color="#e8e8e8")
+                im = ax.imshow(
+                    diff_2d, extent=extent, origin="upper",
+                    cmap=diff_cmap,
+                    norm=Normalize(vmin=-diff_abs_v, vmax=diff_abs_v),
+                    interpolation="nearest", aspect="equal",
+                )
+                fig.colorbar(im, ax=ax, shrink=0.7, pad=0.02)
+                diff_mean = np.nanmean(diff_valid)
+                diff_std  = np.nanstd(diff_valid)
+                ax.set_title(
+                    f"Δα (full − env-only)  μ={diff_mean:+.1f}  σ={diff_std:.1f}",
+                    fontsize=10, fontweight="bold",
+                )
+                ax.set_xlim(x_min, x_max); ax.set_ylim(y_min, y_max)
+                ax.set_aspect("equal")
+
+                fig.suptitle(
+                    f"CLESSO NN — Effort Decomposition (Epoch {epoch})",
+                    fontsize=14, fontweight="bold",
+                )
+                fig.tight_layout(rect=[0, 0, 1, 0.97])
+                pdf.savefig(fig, dpi=200)
+                plt.close(fig)
+
     print(f"  Written: {pdf_path}")
 
 
@@ -608,19 +958,24 @@ def main():
                         default=str(DEFAULTS["npy_src"]),
                         help="Directory containing geonpy .npy climate files")
     parser.add_argument("--output", type=str,
-                        default=str(DEFAULTS["output"]),
-                        help="Output GeoTIFF path")
+                        default=None,
+                        help="Output GeoTIFF path (default: <checkpoint_dir>/alpha_surface.tif)")
     parser.add_argument("--batch-size", type=int,
                         default=DEFAULTS["batch_size"],
                         help="Prediction batch size")
     parser.add_argument("--device", type=str, default="cpu",
                         help="Torch device (cpu, mps, cuda)")
-    parser.add_argument("--effort-raster-dir", type=str, default=None,
-                        help="Directory containing effort rasters (.flt). "
-                             "Required if model was trained with effort features.")
+    parser.add_argument("--effort-input-dir", type=str, default=None,
+                        help="Directory containing effort INPUT rasters (.flt). "
+                             "Output surfaces are written alongside --output.")
     args = parser.parse_args()
 
     t_start = time.time()
+
+    # Derive output path from checkpoint dir if not explicitly provided
+    if args.output is None:
+        args.output = str(Path(args.checkpoint).parent / "alpha_surface.tif")
+
     print("=" * 70)
     print("  CLESSO NN — Alpha Surface Prediction")
     print("=" * 70)
@@ -654,9 +1009,15 @@ def main():
     # Substrate PCA
     subs_vals = extract_substrate(args.substrate_raster, mask)
 
+    # Derive which climate variables to extract from the checkpoint
+    climate_specs = derive_climate_vars(cov_names)
+    print(f"  Climate variables to extract ({len(climate_specs)}): "
+          f"{[s[0] for s in climate_specs]}")
+
     # Climate
     climate = extract_climate(
         args.npy_src, lons_valid, lats_valid,
+        climate_specs=climate_specs,
         climate_year=DEFAULTS["climate_year"],
         climate_month=DEFAULTS["climate_month"],
         climate_window=DEFAULTS["climate_window"],
@@ -707,7 +1068,21 @@ def main():
     effort_names = stats.get("effort_cov_names", [])
     has_effort = model.effort_net is not None and len(effort_names) > 0
     if has_effort:
-        effort_dir = args.effort_raster_dir
+        effort_dir = args.effort_input_dir
+
+        # Auto-detect effort input dir if not explicitly supplied
+        if not effort_dir:
+            _search_paths = [
+                Path.home() / "Library/Mobile Documents/com~apple~CloudDocs"
+                    "/CODE/Effort_data_preper/outputs",
+                PROJECT_ROOT / "data" / "effort",
+            ]
+            for candidate in _search_paths:
+                if candidate.is_dir():
+                    effort_dir = str(candidate)
+                    print(f"  [effort] Auto-detected input dir: {effort_dir}")
+                    break
+
         if effort_dir:
             print(f"  Extracting {len(effort_names)} effort rasters...")
             W_raw = extract_effort_rasters(effort_dir, effort_names, mask)
@@ -717,8 +1092,8 @@ def main():
             np.nan_to_num(W, copy=False, nan=0.0)
             print(f"  Effort matrix: {W.shape} (cells × effort features)")
         else:
-            print("  WARNING: Model has effort_net but --effort-raster-dir "
-                  "not supplied. Effort component will be zeroed.")
+            print("  WARNING: Model has effort_net but no effort input dir "
+                  "found. Effort component will be zeroed.")
 
     # ── Predict ──────────────────────────────────────────────────────
     # Always produce env_only surface (true richness)
@@ -769,13 +1144,23 @@ def main():
 
     # ── Generate PDF map ─────────────────────────────────────────────
     pdf_path = output_path.with_suffix(".pdf")
-    print("\n[6/6] Generating PDF map...")
+    print("\n[6/7] Generating PDF map...")
     shapefile_path = PROJECT_ROOT / "data" / "ibra51_reg" / "ibra51_regions.shp"
     plot_alpha_map(
         alpha, grid, pdf_path,
         shapefile_path=shapefile_path,
         epoch=ckpt["epoch"],
         val_loss=ckpt["val_loss"],
+        alpha_full=alpha_full,
+        alpha_effort=alpha_effort,
+    )
+
+    # ── Generate covariate diagnostic PDF ────────────────────────────
+    cov_pdf_path = output_path.with_stem(output_path.stem + "_covariates").with_suffix(".pdf")
+    print("\n[7/7] Generating covariate diagnostic PDF...")
+    plot_covariate_maps(
+        covariate_arrays, cov_names, grid, cov_pdf_path,
+        shapefile_path=shapefile_path,
     )
 
     dt = time.time() - t_start
@@ -787,6 +1172,7 @@ def main():
     if alpha_effort is not None:
         print(f"  GeoTIFF (effort):   {effort_path}")
     print(f"  PDF map: {pdf_path}")
+    print(f"  PDF covariates: {cov_pdf_path}")
 
 
 if __name__ == "__main__":

@@ -128,9 +128,11 @@ def run_diagnostics(
     # 0. Resolve paths
     # ------------------------------------------------------------------
     if checkpoint_path is None:
-        # Default: look in standard NN output location
+        # Default: prefer calibrated > base checkpoint
         cfg = CLESSONNConfig()
-        checkpoint_path = cfg.output_dir / "best_model.pt"
+        calibrated = cfg.output_dir / "best_model_calibrated.pt"
+        base = cfg.output_dir / "best_model.pt"
+        checkpoint_path = calibrated if calibrated.exists() else base
     checkpoint_path = Path(checkpoint_path)
 
     if not checkpoint_path.exists():
@@ -161,10 +163,13 @@ def run_diagnostics(
     has_geo = any("geo" in n for n in stats.get("env_cov_names", []))
     data["metadata"]["include_geo_in_beta"] = has_geo
 
-    # Pass through geo distance and Fourier settings from checkpoint
+    # Pass through geo distance, Fourier, and coord-exclusion settings from checkpoint
     data["metadata"]["include_geo_dist_in_beta"] = stats.get("include_geo_dist_in_beta", False)
     data["metadata"]["fourier_n_frequencies"] = stats.get("fourier_n_frequencies", 0)
     data["metadata"]["fourier_max_wavelength"] = stats.get("fourier_max_wavelength", 40.0)
+    # If lon/lat are NOT in the checkpoint's alpha_cov_names, they were excluded during training
+    ckpt_alpha_names = stats.get("alpha_cov_names", [])
+    data["metadata"]["exclude_coords_from_alpha"] = ("lon" not in ckpt_alpha_names and "lat" not in ckpt_alpha_names)
 
     site_data = SiteData(
         site_covariates=data["site_covariates"],
@@ -334,6 +339,9 @@ def run_diagnostics(
             s2_final_auc = float(stage2_log["val_auc"].iloc[-1]) if (
                 stage2_log is not None and "val_auc" in stage2_log.columns
             ) else float("nan")
+            s2_final_auc_s123 = float(stage2_log["val_auc_s123"].iloc[-1]) if (
+                stage2_log is not None and "val_auc_s123" in stage2_log.columns
+            ) else float("nan")
             s2_final_eta = float(stage2_log["val_eta_mean"].iloc[-1]) if (
                 stage2_log is not None and "val_eta_mean" in stage2_log.columns
             ) else float("nan")
@@ -342,8 +350,9 @@ def run_diagnostics(
                 f"--- Two-Stage Training ---",
                 f"Stage 1 (alpha-only, within-site):  {s1_epochs} epochs",
                 f"Stage 2 (beta-only, between-site):  {s2_epochs} epochs",
-                f"Stage 2 final AUC:    {s2_final_auc:.4f}",
-                f"Stage 2 final η mean: {s2_final_eta:.4f}",
+                f"Stage 2 final AUC:        {s2_final_auc:.4f}",
+                f"Stage 2 final AUC s1-3:   {s2_final_auc_s123:.4f}",
+                f"Stage 2 final η mean:     {s2_final_eta:.4f}",
             ]
 
         # Cyclic specific summary lines
@@ -353,6 +362,7 @@ def run_diagnostics(
             _nc = cyclic_log["cycle"].nunique()
             # Best beta AUC across all cycles
             _best_auc = float(cyc_beta["val_auc"].max()) if "val_auc" in cyc_beta.columns else float("nan")
+            _best_auc_s123 = float(cyc_beta["val_auc_s123"].max()) if "val_auc_s123" in cyc_beta.columns else float("nan")
             _best_cycle = int(cyc_beta.loc[cyc_beta["val_loss"].idxmin(), "cycle"]) if len(cyc_beta) > 0 else 0
             summary += [
                 "",
@@ -360,21 +370,24 @@ def run_diagnostics(
                 f"Total cycles:       {_nc}",
                 f"Alpha epochs/cycle: {len(cyc_alpha) // max(_nc, 1)}",
                 f"Beta epochs/cycle:  {len(cyc_beta) // max(_nc, 1)}",
-                f"Best beta AUC:      {_best_auc:.4f}",
-                f"Best cycle:         {_best_cycle}",
+                f"Best beta AUC:        {_best_auc:.4f}",
+                f"Best beta AUC s1-3:   {_best_auc_s123:.4f}",
+                f"Best cycle:           {_best_cycle}",
             ]
 
         # Cyclic finetune Phase 2 summary
         if is_cyclic_finetune and finetune_log is not None:
             ft_epochs = len(finetune_log)
             ft_best_auc = float(finetune_log["val_auc"].max()) if "val_auc" in finetune_log.columns else float("nan")
+            ft_best_auc_s123 = float(finetune_log["val_auc_s123"].max()) if "val_auc_s123" in finetune_log.columns else float("nan")
             ft_best_loss = float(finetune_log["val_loss"].min()) if "val_loss" in finetune_log.columns else float("nan")
             summary += [
                 "",
                 f"--- Phase 2: Geographic Fine-tuning ---",
-                f"Finetune epochs:     {ft_epochs}",
-                f"Best finetune AUC:   {ft_best_auc:.4f}",
-                f"Best finetune loss:  {ft_best_loss:.6f}",
+                f"Finetune epochs:       {ft_epochs}",
+                f"Best finetune AUC:     {ft_best_auc:.4f}",
+                f"Best finetune AUC s1-3:{ft_best_auc_s123:.4f}",
+                f"Best finetune loss:    {ft_best_loss:.6f}",
             ]
 
         summary += [
@@ -387,6 +400,24 @@ def run_diagnostics(
             f"beta_net={sum(p.numel() for p in model.beta_net.parameters()):,}  "
             f"total={sum(p.numel() for p in model.parameters()):,}",
         ]
+
+        # Effort network info
+        effort_names_ckpt = stats.get("effort_cov_names") or []
+        K_effort = cfg_model.get("K_effort", 0)
+        has_effort = model.effort_net is not None and K_effort > 0
+        if has_effort:
+            effort_n_params = sum(p.numel() for p in model.effort_net.parameters())
+            summary += [
+                "",
+                f"--- Effort / Detectability Decomposition ---",
+                f"K_effort:         {K_effort}",
+                f"  Columns: {', '.join(effort_names_ckpt)}",
+                f"Effort network:   {cfg_model.get('effort_hidden', [])}  "
+                f"(dropout={cfg_model.get('effort_dropout', 0.0)})",
+                f"Effort penalty:   {cfg_model.get('effort_penalty', 0.0)}",
+                f"Effort params:    {effort_n_params:,}",
+                f"Architecture:     α = softplus(EnvNet(z) + EffortNet(w)) + 1",
+            ]
 
         ax.text(0.05, 0.95, "\n".join(summary), transform=ax.transAxes,
                 fontsize=10, verticalalignment="top", fontfamily="monospace")
@@ -476,13 +507,25 @@ def run_diagnostics(
 
                 # Beta AUC per cycle
                 ax2 = fig.add_subplot(gs[0, 1])
+                _has_s123 = "val_auc_s123" in cyc_beta.columns
                 if "val_auc" in cyc_beta.columns:
                     for c in sorted(cyc_beta["cycle"].unique()):
                         sub = cyc_beta[cyc_beta["cycle"] == c]
+                        _lbl = f"C{c}" if not _has_s123 else None
                         ax2.plot(sub["phase_epoch"], sub["val_auc"],
-                                 color=cmap(c - 1), lw=1.2, alpha=0.8, label=f"C{c}")
+                                 color=cmap(c - 1), lw=0.8, alpha=0.3,
+                                 ls="--", label=_lbl)
                     ax2.axhline(0.5, color=PAL_GREY, ls=":", lw=1)
-                    ax2.set_ylim(0.45, max(0.85, cyc_beta["val_auc"].max() + 0.05))
+                if _has_s123:
+                    for c in sorted(cyc_beta["cycle"].unique()):
+                        sub = cyc_beta[cyc_beta["cycle"] == c]
+                        ax2.plot(sub["phase_epoch"], sub["val_auc_s123"],
+                                 color=cmap(c - 1), lw=1.4, alpha=0.9, label=f"C{c} s1-3")
+                _auc_cols = ["val_auc"]
+                if _has_s123:
+                    _auc_cols.append("val_auc_s123")
+                _auc_ymax = cyc_beta[_auc_cols].max().max()
+                ax2.set_ylim(0.45, max(0.85, _auc_ymax + 0.05))
                 ax2.set_xlabel("Phase epoch"); ax2.set_ylabel("AUC")
                 ax2.set_title("Beta Phase: Between-Site AUC per Cycle")
                 ax2.legend(fontsize=6, ncol=2)
@@ -511,16 +554,22 @@ def run_diagnostics(
                 best_aucs = [cyc_beta[cyc_beta["cycle"] == c]["val_auc"].max()
                              if "val_auc" in cyc_beta.columns else 0
                              for c in cycles_list]
+                best_aucs_s123 = [cyc_beta[cyc_beta["cycle"] == c]["val_auc_s123"].max()
+                                  if "val_auc_s123" in cyc_beta.columns else 0
+                                  for c in cycles_list]
                 ax4.bar(cycles_list, best_losses, color=PAL_BLUE, alpha=0.7,
                         label="Best val_loss")
                 ax4.set_xlabel("Cycle"); ax4.set_ylabel("Best val_loss")
-                ax4.set_title("Per-Cycle Best Beta Loss")
+                ax4.set_title("Per-Cycle Best Beta Loss & AUC")
                 ax4b = ax4.twinx()
-                ax4b.plot(cycles_list, best_aucs, color=PAL_GREEN, lw=2,
-                          marker="o", ms=5, label="Best AUC")
+                ax4b.plot(cycles_list, best_aucs, color=PAL_GREY, lw=1.2,
+                          marker="o", ms=4, alpha=0.5, label="Best AUC (all)")
+                if "val_auc_s123" in cyc_beta.columns:
+                    ax4b.plot(cycles_list, best_aucs_s123, color=PAL_GREEN, lw=2,
+                              marker="s", ms=5, label="Best AUC s1-3")
                 ax4b.set_ylabel("Best AUC", color=PAL_GREEN)
                 ax4.legend(loc="upper left", fontsize=8)
-                ax4b.legend(loc="upper right", fontsize=8)
+                ax4b.legend(loc="upper right", fontsize=7)
 
                 fig.suptitle(f"Cyclic Training: Beta Phases -- {species}", fontsize=13)
                 pdf.savefig(fig); plt.close(fig)
@@ -545,8 +594,16 @@ def run_diagnostics(
                 # Finetune AUC
                 ax2 = fig.add_subplot(gs[0, 1])
                 if "val_auc" in ft.columns:
+                    _ft_s123 = "val_auc_s123" in ft.columns
                     ax2.plot(ft["epoch"], ft["val_auc"],
-                             color=PAL_GREEN, lw=1.5)
+                             color=PAL_GREY if _ft_s123 else PAL_GREEN,
+                             lw=1.0 if _ft_s123 else 1.5,
+                             alpha=0.5 if _ft_s123 else 1.0,
+                             label="AUC (all)")
+                    if _ft_s123:
+                        ax2.plot(ft["epoch"], ft["val_auc_s123"],
+                                 color=PAL_GREEN, lw=1.5, label="AUC s1-3")
+                    ax2.legend(fontsize=8)
                 ax2.set_xlabel("Epoch"); ax2.set_ylabel("AUC")
                 ax2.set_title("Phase 2: Between-Site AUC")
 
@@ -1203,6 +1260,237 @@ def run_diagnostics(
                 f"Beta Interaction: {all_env_names[d1]} × {all_env_names[d2]} -- {species}",
                 fontsize=12)
             fig.tight_layout(rect=[0, 0, 1, 0.95])
+            pdf.savefig(fig); plt.close(fig)
+
+        # ==============================================================
+        # D. Effort / Detectability Diagnostics (if effort net present)
+        # ==============================================================
+        if has_effort:
+            print("  Generating effort diagnostics...")
+            w_mean = np.array(stats.get("w_mean", []), dtype=np.float32)
+            w_std = np.array(stats.get("w_std", []), dtype=np.float32)
+
+            # Get effort data for all sites
+            W_raw = site_data.W_raw if hasattr(site_data, "W_raw") else None
+            W_std = site_data.W  # standardised effort matrix (n_sites, K_effort)
+
+            # If W_raw not stored, recover from standardised
+            if W_raw is None and W_std is not None:
+                W_raw_np = W_std.numpy() * w_std + w_mean
+            elif W_raw is not None:
+                W_raw_np = W_raw.numpy() if isinstance(W_raw, torch.Tensor) else W_raw
+            else:
+                W_raw_np = None
+
+            # Compute effort logit for all sites
+            with torch.no_grad():
+                if W_std is not None:
+                    effort_logit_all = model.effort_net(W_std).squeeze(-1).cpu().numpy()
+                else:
+                    effort_logit_all = np.zeros(n_sites, dtype=np.float32)
+
+            # Compute env logit and full alpha for comparison
+            Z_all = site_data.Z
+            with torch.no_grad():
+                env_logit_all = model.alpha_net.logit(Z_all).cpu().numpy()
+                alpha_env_only = model._compute_alpha_env_only(Z_all).cpu().numpy()
+                if W_std is not None:
+                    alpha_full = model._compute_alpha(Z_all, W_std).cpu().numpy()
+                else:
+                    alpha_full = alpha_env_only.copy()
+
+            # ----------------------------------------------------------
+            # D1. Effort partial-dependence plots
+            # ----------------------------------------------------------
+            n_effort = K_effort
+            n_cols_e = min(n_effort, 3)
+            n_rows_e = int(np.ceil(n_effort / n_cols_e))
+
+            fig, axes = plt.subplots(n_rows_e, n_cols_e,
+                                     figsize=(5 * n_cols_e, 4 * n_rows_e),
+                                     squeeze=False)
+
+            for k in range(n_effort):
+                ax = axes[k // n_cols_e, k % n_cols_e]
+
+                if W_raw_np is not None:
+                    x_lo, x_hi = np.nanpercentile(W_raw_np[:, k], [1, 99])
+                else:
+                    x_lo, x_hi = -3, 3
+                x_grid = np.linspace(x_lo, x_hi, 300)
+
+                # Standardise: vary dimension k, hold others at mean (=0)
+                W_grid = np.zeros((300, K_effort), dtype=np.float32)
+                W_grid[:, k] = (x_grid - w_mean[k]) / w_std[k]
+
+                with torch.no_grad():
+                    eff_pred = model.effort_net(
+                        torch.from_numpy(W_grid)).squeeze(-1).cpu().numpy()
+
+                ax.plot(x_grid, eff_pred, color=PAL_RED, lw=2.5)
+                ax.axhline(0, color=PAL_GREY, ls=":", lw=1)
+                ax.set_xlabel(effort_names_ckpt[k] if k < len(effort_names_ckpt) else f"effort_{k}")
+                ax.set_ylabel("Effort logit")
+                ax.set_title(f"Effort PD: {effort_names_ckpt[k] if k < len(effort_names_ckpt) else f'effort_{k}'}",
+                             fontsize=9)
+
+                # Rug plot
+                if W_raw_np is not None:
+                    rug_vals = W_raw_np[:, k]
+                    rug_sub = rug_vals[::max(1, len(rug_vals) // 500)]
+                    rug_y = ax.get_ylim()[0]
+                    ax.plot(rug_sub, np.full(len(rug_sub), rug_y),
+                            "|", color="k", alpha=0.05, ms=5)
+
+            for i in range(n_effort, n_rows_e * n_cols_e):
+                axes[i // n_cols_e, i % n_cols_e].set_visible(False)
+
+            fig.suptitle(f"Effort Partial-Dependence (others at mean) -- {species}",
+                         fontsize=13)
+            fig.tight_layout(rect=[0, 0, 1, 0.96])
+            pdf.savefig(fig); plt.close(fig)
+
+            # ----------------------------------------------------------
+            # D2. Effort logit distribution + env vs effort decomposition
+            # ----------------------------------------------------------
+            fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+            # Effort logit histogram
+            ax = axes[0, 0]
+            ax.hist(effort_logit_all, bins=80, color=PAL_RED, alpha=0.6, edgecolor="none")
+            ax.axvline(0, color=PAL_GREY, ls="--", lw=1)
+            ax.axvline(effort_logit_all.mean(), color="k", ls="--", lw=2,
+                       label=f"mean={effort_logit_all.mean():.3f}")
+            ax.set_xlabel("Effort logit")
+            ax.set_ylabel("Sites")
+            ax.set_title("Distribution of Effort Logit (All Sites)")
+            ax.legend(fontsize=8)
+            ax.text(0.98, 0.95,
+                    f"sd={effort_logit_all.std():.3f}\n"
+                    f"range=[{effort_logit_all.min():.3f}, "
+                    f"{effort_logit_all.max():.3f}]",
+                    transform=ax.transAxes, fontsize=8, ha="right", va="top")
+
+            # Env logit histogram
+            ax = axes[0, 1]
+            ax.hist(env_logit_all, bins=80, color=PAL_BLUE, alpha=0.6, edgecolor="none")
+            ax.axvline(0, color=PAL_GREY, ls="--", lw=1)
+            ax.axvline(env_logit_all.mean(), color="k", ls="--", lw=2,
+                       label=f"mean={env_logit_all.mean():.3f}")
+            ax.set_xlabel("Env logit")
+            ax.set_ylabel("Sites")
+            ax.set_title("Distribution of Env Logit (All Sites)")
+            ax.legend(fontsize=8)
+
+            # Env-only vs full alpha scatter
+            ax = axes[1, 0]
+            rng = np.random.default_rng(99)
+            n_sub = min(10000, n_sites)
+            idx_sub = rng.choice(n_sites, n_sub, replace=False)
+            ax.scatter(alpha_env_only[idx_sub], alpha_full[idx_sub],
+                       s=2, alpha=0.2, color=PAL_BLUE, rasterized=True)
+            lims = [min(alpha_env_only.min(), alpha_full.min()),
+                    max(alpha_env_only.max(), alpha_full.max())]
+            ax.plot(lims, lims, color=PAL_RED, ls="--", lw=1.5)
+            ax.set_xlabel("α (env-only)")
+            ax.set_ylabel("α (env + effort)")
+            ax.set_title("Env-Only vs Full Alpha")
+            corr = np.corrcoef(alpha_env_only, alpha_full)[0, 1]
+            ax.text(0.05, 0.95, f"r = {corr:.4f}",
+                    transform=ax.transAxes, fontsize=10, va="top")
+
+            # Effort logit vs env logit scatter
+            ax = axes[1, 1]
+            ax.scatter(env_logit_all[idx_sub], effort_logit_all[idx_sub],
+                       s=2, alpha=0.2, color=PAL_GREEN, rasterized=True)
+            ax.axhline(0, color=PAL_GREY, ls=":", lw=1)
+            ax.axvline(env_logit_all.mean(), color=PAL_GREY, ls=":", lw=1)
+            ax.set_xlabel("Env logit")
+            ax.set_ylabel("Effort logit")
+            ax.set_title("Env vs Effort Logit")
+            eff_env_corr = np.corrcoef(env_logit_all, effort_logit_all)[0, 1]
+            ax.text(0.05, 0.95, f"r = {eff_env_corr:.4f}",
+                    transform=ax.transAxes, fontsize=10, va="top")
+
+            fig.suptitle(f"Effort Decomposition -- {species}", fontsize=13)
+            fig.tight_layout(rect=[0, 0, 1, 0.96])
+            pdf.savefig(fig); plt.close(fig)
+
+            # ----------------------------------------------------------
+            # D3. Spatial map of effort logit
+            # ----------------------------------------------------------
+            if "lon" in data["site_covariates"].columns:
+                fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+
+                lons_e = data["site_covariates"]["lon"].values
+                lats_e = data["site_covariates"]["lat"].values
+
+                # Effort logit map
+                ax = axes[0]
+                vmin_e, vmax_e = np.percentile(effort_logit_all, [2, 98])
+                sc = ax.scatter(lons_e, lats_e, c=effort_logit_all, s=1.5,
+                                cmap="RdBu_r", vmin=vmin_e, vmax=vmax_e,
+                                rasterized=True)
+                fig.colorbar(sc, ax=ax, shrink=0.7, label="Effort logit")
+                ax.set_xlabel("Longitude"); ax.set_ylabel("Latitude")
+                ax.set_title("Effort Logit (spatial)")
+                ax.set_aspect("equal")
+
+                # Env-only alpha map
+                ax = axes[1]
+                vmin_a, vmax_a = np.percentile(alpha_env_only, [2, 98])
+                sc = ax.scatter(lons_e, lats_e, c=alpha_env_only, s=1.5,
+                                cmap="YlOrRd", vmin=vmin_a, vmax=vmax_a,
+                                rasterized=True)
+                fig.colorbar(sc, ax=ax, shrink=0.7, label="α (env-only)")
+                ax.set_xlabel("Longitude"); ax.set_ylabel("Latitude")
+                ax.set_title("α Env-Only")
+                ax.set_aspect("equal")
+
+                # Full alpha map
+                ax = axes[2]
+                sc = ax.scatter(lons_e, lats_e, c=alpha_full, s=1.5,
+                                cmap="YlOrRd", vmin=vmin_a, vmax=vmax_a,
+                                rasterized=True)
+                fig.colorbar(sc, ax=ax, shrink=0.7, label="α (full)")
+                ax.set_xlabel("Longitude"); ax.set_ylabel("Latitude")
+                ax.set_title("α Full (env + effort)")
+                ax.set_aspect("equal")
+
+                fig.suptitle(f"Effort Spatial Maps -- {species}", fontsize=13)
+                fig.tight_layout(rect=[0, 0, 1, 0.95])
+                pdf.savefig(fig); plt.close(fig)
+
+            # ----------------------------------------------------------
+            # D4. Effort variable importance (by PD range)
+            # ----------------------------------------------------------
+            eff_importance = np.zeros(n_effort)
+            for k in range(n_effort):
+                if W_raw_np is not None:
+                    x_lo, x_hi = np.nanpercentile(W_raw_np[:, k], [5, 95])
+                else:
+                    x_lo, x_hi = -2, 2
+                W_lo = np.zeros((1, K_effort), dtype=np.float32)
+                W_hi = np.zeros((1, K_effort), dtype=np.float32)
+                W_lo[0, k] = (x_lo - w_mean[k]) / w_std[k]
+                W_hi[0, k] = (x_hi - w_mean[k]) / w_std[k]
+                with torch.no_grad():
+                    e_lo = model.effort_net(torch.from_numpy(W_lo)).item()
+                    e_hi = model.effort_net(torch.from_numpy(W_hi)).item()
+                eff_importance[k] = abs(e_hi - e_lo)
+
+            fig, ax = plt.subplots(figsize=(10, max(3, n_effort * 0.5)))
+            order_e = np.argsort(eff_importance)
+            colors_e = plt.cm.Reds(np.linspace(0.3, 0.9, n_effort))
+            names_e = [effort_names_ckpt[i] if i < len(effort_names_ckpt)
+                       else f"effort_{i}" for i in order_e]
+            ax.barh(range(n_effort), eff_importance[order_e],
+                    color=colors_e, edgecolor="none")
+            ax.set_yticks(range(n_effort))
+            ax.set_yticklabels(names_e, fontsize=8)
+            ax.set_xlabel("Effort logit range (PD effect)")
+            ax.set_title(f"Effort Variable Importance -- {species}")
+            fig.tight_layout()
             pdf.savefig(fig); plt.close(fig)
 
         # ==============================================================

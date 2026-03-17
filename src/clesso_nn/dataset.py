@@ -130,6 +130,7 @@ class SiteData:
         site_obs_richness: Optional[pd.DataFrame],
         metadata: dict,
         effort_cov_names: Optional[list[str]] = None,
+        exclude_cov_names: Optional[list[str]] = None,
     ):
         # -- Site ID → contiguous 0-based index mapping --
         site_ids = site_covariates["site_id"].values
@@ -160,10 +161,13 @@ class SiteData:
 
         # -- Alpha covariates (site-level features for richness model) --
         # Use all numeric columns except site_id as alpha covariates.
-        # Exclude effort columns (they go through EffortNet separately).
+        # Exclude effort columns (they go through EffortNet separately)
+        # AND any additional columns listed in exclude_cov_names (e.g.
+        # effort columns when EffortNet is disabled but we still don't
+        # want them in the env/alpha network).
         # Optionally exclude raw lon/lat (when using Fourier encoding instead).
         exclude_coords = metadata.get("exclude_coords_from_alpha", False)
-        _effort_set = set(self.effort_cov_names)
+        _effort_set = set(self.effort_cov_names) | set(exclude_cov_names or [])
         alpha_cols = [c for c in site_covariates.columns
                       if c != "site_id"
                       and c not in _effort_set
@@ -317,7 +321,8 @@ class CLESSOPairDataset(Dataset):
     """
 
     def __init__(self, pairs: pd.DataFrame, site_data: SiteData,
-                 use_unit_weights: bool = False):
+                 use_unit_weights: bool = False,
+                 use_design_weights: bool = True):
         self.n = len(pairs)
         self.site_data = site_data
 
@@ -328,6 +333,23 @@ class CLESSOPairDataset(Dataset):
                                dtype=np.int64)
         self.y = pairs["y"].values.astype(np.float32)
         self.is_within = pairs["is_within"].values.astype(np.float32)
+
+        # Design weights from sampler (proposal-probability correction)
+        if use_design_weights and "design_w" in pairs.columns:
+            self.design_w = pairs["design_w"].values.astype(np.float32)
+        else:
+            self.design_w = np.ones(self.n, dtype=np.float32)
+
+        # Stratum index: 0=within, 1=same-hex, 2=neighbour, 3=distant, 4=match-boost
+        if "stratum" in pairs.columns:
+            self.stratum = pairs["stratum"].values.astype(np.int64)
+        else:
+            # Fallback: infer from is_within
+            self.stratum = np.where(
+                pairs["is_within"].values == 1, 0, 1
+            ).astype(np.int64)
+
+        # Legacy weight column (kept for backward compat)
         if use_unit_weights:
             self.weight = np.ones(self.n, dtype=np.float32)
         else:
@@ -365,6 +387,8 @@ class CLESSOPairDataset(Dataset):
             "y": self.y[idx],
             "is_within": self.is_within[idx],
             "weight": self.weight[idx],
+            "design_w": self.design_w[idx],
+            "stratum": self.stratum[idx],
             "env_diff": self.env_diff[idx],
         }
 
@@ -381,6 +405,8 @@ def collate_fn(batch: list[dict]) -> dict[str, torch.Tensor]:
         "y": torch.tensor([b["y"] for b in batch], dtype=torch.float32),
         "is_within": torch.tensor([b["is_within"] for b in batch], dtype=torch.float32),
         "weight": torch.tensor([b["weight"] for b in batch], dtype=torch.float32),
+        "design_w": torch.tensor([b["design_w"] for b in batch], dtype=torch.float32),
+        "stratum": torch.tensor([b["stratum"] for b in batch], dtype=torch.long),
         "env_diff": torch.tensor(
             np.stack([b["env_diff"] for b in batch]),
             dtype=torch.float32,
@@ -396,6 +422,7 @@ def make_dataloaders(
     seed: int = 42,
     num_workers: int = 0,
     use_unit_weights: bool = False,
+    use_design_weights: bool = True,
 ) -> tuple[DataLoader, DataLoader, CLESSOPairDataset, CLESSOPairDataset]:
     """Split pairs into train/val and return DataLoaders."""
 
@@ -409,18 +436,21 @@ def make_dataloaders(
     train_pairs = pairs.iloc[train_idx].reset_index(drop=True)
     val_pairs = pairs.iloc[val_idx].reset_index(drop=True)
 
-    train_ds = CLESSOPairDataset(train_pairs, site_data, use_unit_weights)
-    val_ds = CLESSOPairDataset(val_pairs, site_data, use_unit_weights)
+    train_ds = CLESSOPairDataset(train_pairs, site_data, use_unit_weights,
+                                 use_design_weights=use_design_weights)
+    val_ds = CLESSOPairDataset(val_pairs, site_data, use_unit_weights,
+                               use_design_weights=use_design_weights)
 
+    _pin = torch.cuda.is_available()  # pin_memory only helps CUDA, not MPS
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,
         collate_fn=collate_fn, num_workers=num_workers,
-        pin_memory=True, drop_last=False,
+        pin_memory=_pin, drop_last=False,
     )
     val_loader = DataLoader(
         val_ds, batch_size=batch_size, shuffle=False,
         collate_fn=collate_fn, num_workers=num_workers,
-        pin_memory=True, drop_last=False,
+        pin_memory=_pin, drop_last=False,
     )
 
     return train_loader, val_loader, train_ds, val_ds
@@ -610,13 +640,14 @@ class HardPairMiner:
         # Wrap dataset to inject mining_iw
         wrapped = _MinedDatasetWrapper(self.dataset, self.iw)
 
+        _pin = torch.cuda.is_available()
         return DataLoader(
             wrapped,
             batch_size=batch_size,
             sampler=sampler,
             collate_fn=_mined_collate_fn,
             num_workers=num_workers,
-            pin_memory=True,
+            pin_memory=_pin,
             drop_last=False,
         )
 

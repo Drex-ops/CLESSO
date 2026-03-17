@@ -22,12 +22,13 @@ The motivation for this variant is computational. The TMB implementation relies 
 
 \section{Pair constructs and likelihood}
 
-The data pipeline is shared with the TMB variant. We sample a set of observation pairs $P = P_{\text{within}} \cup P_{\text{between}}$ from species occurrence records. For each pair $p$ we record:
+We sample a set of observation pairs $P = P_W \cup P_S \cup P_N \cup P_D$ from species occurrence records using the hex-balanced sampler described in Section~\ref{sec:pair-sampling}. For each pair $p$ we record:
 
 \begin{itemize}
     \item $i_p, j_p$: the sites involved
     \item $y_p = 0$ if the species identities match, $y_p = 1$ otherwise
-    \item $w_p$: a weight that balances the four cells \{within-match, within-mismatch, between-match, between-mismatch\}
+    \item $d_p$: a design weight correcting for unequal selection probability
+    \item $s_p \in \{W, S, N, D\}$: the sampling stratum
 \end{itemize}
 
 Under the equal-draw assumption from Hoskins et al.\ (2020), the match probability decomposes as:
@@ -41,13 +42,130 @@ Under the equal-draw assumption from Hoskins et al.\ (2020), the match probabili
 
 where $\alpha_i > 1$ is the species richness at site $i$ and $S_{i,j} = \exp(-\eta_{i,j}) \in [0,1]$ is the S\o rensen-type similarity derived from turnover $\eta_{i,j} \geq 0$.
 
-The loss function is the weighted negative log-likelihood of the Bernoulli model plus a regularisation penalty:
+\section{Pair sampling}
+\label{sec:pair-sampling}
+
+The sampling design directly influences model identifiability, computational efficiency, and the quality of the fitted turnover surface. Na\"ive random pair sampling from large occurrence databases produces a geographically biased sample: well-surveyed regions (e.g.\ Sydney Basin) contribute orders of magnitude more pairs per site than remote regions (e.g.\ northern Australia). Without correction, the model effectively ignores ecology in data-sparse regions.
+
+The implementation uses a \textbf{hex-grid balanced sampler} that ensures every geographic region contributes training pairs across all spatial scales.
+
+\subsection{Hex-grid construction}
+
+A regular hexagonal grid of configurable cell size (default $2^\circ$) is overlaid on all site locations using \texttt{sf::st\_make\_grid(square=FALSE)}. Each site is assigned to its containing hex via spatial join. Only occupied hexes (those containing at least one site) are retained. For the Australian vascular plant dataset, this yields approximately 256 occupied hexes from $\sim$55,900 sites.
+
+\subsection{Sampling strata}
+
+Pairs are drawn into four strata, each with a 50/50 match:mismatch target quota:
+
+\begin{description}
+    \item[Stratum~$W$: Within-site] Both observations from the same site. Anchors the richness model via $p = 1/\alpha_i$. Each hex receives an equal quota; within each hex, sites are sampled with probability proportional to $m_i^2$ (the number of possible within-site observation pairs), where $m_i$ is the observed species count at site~$i$.
+    
+    \item[Stratum~$S$: Same-hex between-site] Both sites in the same hex cell. Captures local beta diversity.
+    
+    \item[Stratum~$N$: Neighbour-hex between-site] Sites in adjacent hex cells (sharing an edge). Captures regional turnover ($\sim$2--4$^\circ$).
+    
+    \item[Stratum~$D$: Distant-hex between-site] Sites in non-adjacent hexes. Captures continental turnover and anchors asymptotic $\eta$.
+\end{description}
+
+An auxiliary \textbf{match-boost} set supplements the between-site sample by drawing species-stratified match pairs. These are tagged separately and handled as an auxiliary shaping loss (Section~\ref{sec:composite-loss}).
+
+\subsection{Design weights}
+
+Each pair carries a \textbf{design weight} $d_p = G(x_p) / q(x_p)$, where $G$ is the target population measure and $q$ is the known proposal probability under the sampler's scheme. These weights are fixed at sampling time and do not depend on model parameters.
+
+\paragraph{Within-site design weights.} For a pair from site~$i$ in hex~$h$:
+\begin{equation}
+    d_p^W = \frac{\sum_{j \in h} m_j^2}{n_h^{\text{elig}} \cdot m_i^2}
+\end{equation}
+where $n_h^{\text{elig}}$ is the number of eligible hexes and $m_j$ is the observed species count at site~$j$. This corrects for the equal-quota-per-hex scheme oversampling sparse hexes.
+
+\paragraph{Between-site design weights.} For a pair from site~$i$ in hex~$h_a$ and site~$j$ in hex~$h_b$:
+\begin{equation}
+    d_p^B = \frac{N_{h_a} \cdot N_{h_b}}{n_{h_a}^{\text{samp}} \cdot n_{h_b}^{\text{samp}} \cdot m_i \cdot m_j}
+\end{equation}
+where $N_h$ is the total number of observations in hex~$h$ and $n_h^{\text{samp}}$ is the number of sampled observations from hex~$h$ within the tier. Design weights are normalised to mean~1 within each stratum.
+
+\section{Composite likelihood loss}
+\label{sec:composite-loss}
+
+\subsection{Motivation}
+
+The sampler draws an approximately 50/50 match:mismatch ratio within each stratum, regardless of the true population frequency. This ``quota sampling'' produces a training set whose label distribution does not match the population. A na\"ive BCE loss would learn biased probabilities. Similarly, the four strata represent different pair populations with different ecological signals; their relative contribution to the loss must be explicitly controlled.
+
+A key challenge is the extreme \textbf{gradient asymmetry} for between-site pairs. The population match probability for a between-site pair is $p = S \cdot (\alpha_i + \alpha_j) / (2\alpha_i\alpha_j)$. For typical richness values ($\alpha \sim 100$), $p \approx 0.005$--$0.02$. The BCE match gradient ($-\log p$) is $\sim$200$\times$ larger in magnitude than the mismatch gradient ($-\log(1 - p)$). With a 50/50 match:mismatch sample, the net gradient w.r.t.\ $\eta$ is overwhelmingly driven by match pairs, pushing $\eta \to 0$ irrespective of the true turnover. Within-site pairs do not suffer this problem because both match and mismatch gradients scale as $1/\alpha$.
+
+The loss therefore uses a \textbf{universal retrospective Bernoulli correction} across all strata, applying the same case--control adjustment (Equation~\ref{eq:retro-correction}) with per-stratum retention rates computed during sampling. For between-site pairs with $p \approx 0.01$, the retention-rate ratio ($r_0 \approx 1$, $r_1 \ll 1$) maps $p$ to $p^{\text{samp}} \approx 0.5$, which naturally balances the match and mismatch gradient magnitudes without requiring ad-hoc class-balanced normalisation.
+
+\subsection{Per-stratum loss}
+
+The composite loss sums per-stratum BCE terms with explicit weights $\lambda_s$:
+\begin{equation}
+    \mathcal{L}_{\text{main}} = \sum_{s \in \{W,S,N,D\}} \lambda_s \cdot L_s
+    \label{eq:composite-loss}
+\end{equation}
+Default stratum weights are $\bm{\lambda} = (0.25, 0.35, 0.25, 0.15)$ for $(W, S, N, D)$, and $\ell(y, q) = -(1-y)\log q - y\log(1-q)$ is the binary cross-entropy. The per-stratum loss $L_s$ is computed differently for within-site and between-site strata, as described below.
+
+\subsection{Within-site loss: retrospective Bernoulli correction}
+
+For within-site pairs (stratum~$W$), the sampler's 50/50 quota means that the retention rate for matches ($r_{W,0}$) differs from that for mismatches ($r_{W,1}$). If the population match rate is $p$ but the sampler retains matches at rate $r_{W,0}$ and mismatches at rate $r_{W,1}$, the probability of observing $y=0$ in the sample is:
 
 \begin{equation}
-    \mathcal{L} = -\frac{1}{\sum_p w_p}\sum_{p \in P} w_p \Big[(1-y_p)\log p_p + y_p \log(1-p_p)\Big] + \lambda_{\text{lb}} \cdot \mathcal{R}_{\alpha}
+    p^{\text{samp}} = \frac{r_{W,0} \cdot p}{r_{W,0} \cdot p + r_{W,1} \cdot (1-p)}
+    \label{eq:retro-correction}
 \end{equation}
 
-This is identical to the TMB formulation. The difference lies entirely in \textit{how $\alpha_i$ and $\eta_{i,j}$ are parameterised}.
+This is the standard retrospective likelihood correction for case--control designs. The retention rates are computed during sampling as the ratio of retained to drawn pairs for each class, and stored in the export metadata. For within-site pairs, the match and mismatch gradients w.r.t.\ $\alpha$ both scale as $1/\alpha$, so the retrospective correction produces balanced gradient signal without further adjustment.
+
+\begin{equation}
+    L_W = \frac{\sum_{p \in P_W} d_p \cdot \ell(y_p, p_p^{\text{samp}})}{\sum_{p \in P_W} d_p}
+\end{equation}
+
+When retention rates are unavailable (e.g.\ legacy exports), $r_{W,0} = r_{W,1} = 1$ is assumed, recovering the standard BCE.
+
+\subsection{Between-site loss: retrospective Bernoulli correction}
+\label{sec:between-loss}
+
+For between-site pairs (strata $S$, $N$, $D$), the same retrospective Bernoulli correction used for within-site pairs is applied, but with per-tier retention rates. The sampler records separate retention rates $(r_{s,0}, r_{s,1})$ for each stratum $s$, reflecting the fraction of match and mismatch pairs retained from those drawn. The corrected probability is:
+
+\begin{equation}
+    p_s^{\text{samp}} = \frac{r_{s,0} \cdot p}{r_{s,0} \cdot p + r_{s,1} \cdot (1-p)}
+\end{equation}
+
+For a typical between-site pair with $p \approx 0.01$ and sampler quota yielding $r_0 \approx 1$, $r_1 \ll 1$ (say $r_1 \approx 0.01$), the correction maps $p^{\text{samp}} \approx 0.01/(0.01 + 0.01 \cdot 0.99) \approx 0.5$. At $p^{\text{samp}} \approx 0.5$, the match and mismatch BCE gradient magnitudes are equal, naturally resolving the gradient asymmetry that causes $\eta$ collapse --- without requiring explicit class-balanced normalisation or alpha-dependent weight corrections.
+
+The between-site per-stratum loss has the same form as the within-site loss:
+\begin{equation}
+    L_s = \frac{\sum_{p \in P_s} d_p \cdot \ell(y_p, p_{s,p}^{\text{samp}})}{\sum_{p \in P_s} d_p}, \quad s \in \{S, N, D\}
+\end{equation}
+where $d_p$ is the design weight (hex-IPW) and the BCE is evaluated on the corrected probability $p^{\text{samp}}$ rather than the raw model prediction~$p$. When retention rates are unavailable, $r_{s,0} = r_{s,1} = 1$ is assumed.
+
+\paragraph{Anti-collapse regulariser.} As a safety net against $\eta$ collapse during early training (when retention rate estimates or the $\alpha$ model may be imprecise), an anti-collapse barrier term is added:
+\begin{equation}
+    \mathcal{R}_\eta = -\lambda_{\text{ac}} \cdot \frac{1}{|P_{\text{btw}}|} \sum_{p \in P_{\text{btw}}} \log(\eta_p + \epsilon)
+\end{equation}
+with $\lambda_{\text{ac}} = 0.1$ and $\epsilon = 10^{-4}$. The sum is over all between-site pairs in the batch. This term diverges as $\eta \to 0$, creating a soft lower bound that prevents degenerate solutions while adding negligible bias when $\eta$ is at ecologically reasonable values ($\eta \gtrsim 1$). It replaces the earlier $\eta^2$ smoothness penalty, which inadvertently contributed to $\eta$ collapse by penalising large values.
+
+\subsection{Match-boost auxiliary loss}
+
+Species-stratified match-boost pairs (stratum~4) are \emph{not} part of the main composite likelihood because they are drawn from a different proposal distribution (species-conditional). Instead, they contribute an auxiliary shaping loss:
+\begin{equation}
+    \mathcal{L}_{\text{boost}} = \lambda_{\text{boost}} \cdot \frac{1}{|P_{\text{boost}}|} \sum_{p \in P_{\text{boost}}} \ell(y_p, p_p)
+\end{equation}
+with $\lambda_{\text{boost}} = 0.1$ by default. This helps the model see rare match pairs from distant sites without distorting the design-correct main loss.
+
+\paragraph{Default: excluded.} In the current default configuration, match-boost pairs are excluded entirely from training (\texttt{exclude\_match\_boost=True}). When excluded, stratum-4 pairs are removed from the pairs DataFrame during preprocessing so they never enter any dataloader or loss computation. The match-boost auxiliary loss is only active when \texttt{exclude\_match\_boost=False}.
+
+\subsection{Calibration phase}
+
+After the main training phases (cyclic env-only + fine-tune), a short \textbf{calibration phase} fine-tunes all parameters using only the design-weighted composite loss (no mining, no boost, no anchor penalties). This de-biases estimated probabilities and ensures the model's $p$ predictions are well-calibrated for the population. Default settings: 50~epochs, learning rate $10^{-4}$, patience 20~epochs. The calibrated model is saved separately as \texttt{best\_model\_calibrated.pt} and is preferred over the pre-calibration checkpoint by all downstream scripts (diagnostics, alpha/beta surface prediction).
+
+\subsection{Effective sample size}
+
+The effective sample size (ESS) is monitored per stratum:
+\begin{equation}
+    \text{ESS}_s = \frac{\left(\sum_{p \in P_s} \tilde{w}_p\right)^2}{\sum_{p \in P_s} \tilde{w}_p^2} \in [1, |P_s|]
+\end{equation}
+For all strata, $\tilde{w}_p = d_p$ (design weights only), since the retrospective correction is applied to the predicted probability rather than the pair weight. The ESS is typically 50--70\% of the stratum sample size.
 
 \section{Alpha sub-model: richness network}
 
@@ -98,13 +216,22 @@ This encoding allows the network to learn spatially structured richness patterns
 
 \subsection{Alpha lower-bound penalty}
 
-As in the TMB model, a soft one-sided penalty discourages $\alpha_i < S_{\text{obs},i}$ (the observed species count):
+A soft one-sided penalty discourages $\alpha_i^{\text{env}} < S_{\text{obs},i}$ (i.e.\ predicted true richness falling below observed species count).  The penalty is applied to $\alpha^{\text{env}}$ (effort-stripped true richness, not $\alpha^{\text{obs}}$) because true richness must always be at least as large as the number of species actually recorded:
 
 \begin{equation}
-    \mathcal{R}_\alpha = \frac{1}{|B|}\sum_{i \in B}\left[\frac{\log(1 + e^{\kappa(S_{\text{obs},i} - \alpha_i)})}{\kappa}\right]^2
+    \mathcal{R}_\alpha = \frac{\lambda_{\text{lb}}}{|B|}\sum_{i \in B}\left[\frac{\log(1 + e^{\kappa(\log S_{\text{obs},i} - \log \alpha_i^{\text{env}})})}{\kappa}\right]^2
 \end{equation}
 
-where $\kappa = 10$ sharpens the hinge boundary and $B$ is the current mini-batch. This is the same softplus-squared penalty used in the TMB model, applied to both $\alpha_i$ and $\alpha_j$ in each pair by indexing into the observed-richness vector.
+where $\kappa = 10$ sharpens the hinge boundary and $B$ is the current mini-batch.  The penalty operates in log-space for scale invariance.  Because the completeness model guarantees $\alpha^{\text{obs}} \le \alpha^{\text{env}}$, penalising $\alpha^{\text{env}} < S_{\text{obs}}$ also ensures $\alpha^{\text{obs}}$ is anchored to a plausible true richness.  Setting $\lambda_{\text{lb}} = 0$ disables the penalty entirely (current default).
+
+\subsection{Alpha anchor penalty}
+\label{sec:alpha-anchor}
+
+To prevent the runaway $\alpha$ inflation that kills beta gradients during block-coordinate training, a log-normal anchor penalty encourages the environment-only richness $\alpha_i^{\text{env}}$ (with effort zeroed) to stay within a tolerance of the observed species count $S_{\text{obs},i}$:
+\begin{equation}
+    \mathcal{R}_{\text{anchor}} = \lambda_{\text{anchor}} \cdot \frac{1}{|B|} \sum_{i \in B} \max\!\Big(0,\; \big|\log \alpha_i^{\text{env}} - \log S_{\text{obs},i}\big| - \tau\Big)^2
+\end{equation}
+where $\tau = 0.7 \approx \log 2$ is a dead-zone tolerance and $\lambda_{\text{anchor}} = 1.0$. Within the dead zone ($\alpha_i^{\text{env}}$ between roughly $S_{\text{obs}}/2$ and $2 S_{\text{obs}}$), the penalty is zero. Beyond it, a quadratic penalty pushes back. The penalty is applied to $\alpha^{\text{env}}$ (not $\alpha^{\text{obs}}$) so that the EffortNet can independently explain the gap between true and apparent richness. Setting $\lambda_{\text{anchor}} = 0$ disables the penalty entirely.
 
 \subsection{Effort/detectability decomposition}
 \label{sec:effort-decomposition}
@@ -122,31 +249,49 @@ where $\mathbf{z}_i$ is the vector of environmental and substrate covariates (as
     \item[EffortNet] $f_\omega(\mathbf{w})$: a smaller MLP (default hidden layers $[64, 32]$, SiLU activation, dropout) mapping effort covariates to a scalar \emph{effort logit}. The output bias is initialised to zero so that the effort contribution is neutral at the start of training, i.e.\ $f_\omega(\mathbf{w}) \approx 0$ initially.
 \end{description}
 
-The additive decomposition has several desirable properties:
+Three composition modes are supported, controlled by \texttt{effort\_mode}:
+\begin{description}
+    \item[``additive'':] $\alpha_i = \text{softplus}(f_\alpha(\mathbf{z}_i) + f_\omega(\mathbf{w}_i)) + 1$.\\  Effort adds or subtracts effective species on the logit scale.
+    \item[``multiplicative'':] $\alpha_i^{\text{obs}} = (\text{softplus}(f_\alpha(\mathbf{z}_i)) + 1) \cdot \sigma(f_\omega(\mathbf{w}_i))$.\\  Effort acts as a general $(0,1)$ modifier on environment-predicted richness. Can push $\alpha$ below~1 for very low capture fractions.
+    \item[``completeness'' (default):] Defines \emph{true richness} $\alpha_i^{\text{true}} = 1 + \text{softplus}(f_\alpha(\mathbf{z}_i))$ and a \emph{completeness fraction} $c_i = \sigma(f_\omega(\mathbf{w}_i)) \in (0,1)$:
+    \begin{equation}
+        \alpha_i^{\text{obs}} = 1 + c_i \cdot \text{softplus}(f_\alpha(\mathbf{z}_i)) = 1 + c_i \cdot (\alpha_i^{\text{true}} - 1).
+    \end{equation}
+    Effort can only \emph{reduce} apparent richness below true richness; $\alpha_i^{\text{obs}} \geq 1$ is guaranteed. At initialisation $\sigma(0) = 0.5$, so $\alpha^{\text{obs}} \approx 1 + \tfrac{1}{2}(\alpha^{\text{true}} - 1)$. The completeness mode is algebraically similar to the multiplicative mode but with two key constraints: (i) the factor of~2 is absent, restricting $c_i$ to be a strict down-scaling fraction, and (ii) the $+1$ is outside the product, ensuring $\alpha^{\text{obs}} \geq 1$ regardless of the capture fraction. This makes it a proper \emph{capture-completeness model}: $c_i$ represents the fraction of true species that have been detected at site~$i$, not a general multiplicative adjustment.
+\end{description}
+In either mode, the ``true richness'' at prediction time is obtained by zeroing the effort component.
+
+The decomposition has several desirable properties:
 \begin{enumerate}
     \item \textbf{Clean separation at prediction time.} To predict true ecological richness (uncontaminated by sampling artefacts), we simply zero-out the effort logit: $\alpha_i^{\text{env}} = \text{softplus}(f_\alpha(\mathbf{z}_i)) + 1$. No EffortNet evaluation is needed.
     \item \textbf{Diagnostic mappability.} The effort logit $f_\omega(\mathbf{w}_i)$ can be mapped spatially to visualise where sampling effort inflates or deflates apparent richness.
     \item \textbf{Neutral initialisation.} Because $f_\omega$ starts near zero, the model begins training as if effort covariates were absent. The effort signal is learned only if it improves the likelihood.
     \item \textbf{Backward compatibility.} When no effort covariates are supplied ($K_\omega = 0$), the EffortNet is not instantiated and the model reduces to the original architecture.
+    \item \textbf{Master switch.} A global \texttt{use\_effort} flag (default \texttt{True}) can disable the EffortNet even when the dataset contains effort columns. When disabled, effort columns are still excluded from the alpha covariate set (preventing leakage into EnvNet) but no EffortNet is created.
 \end{enumerate}
 
 \paragraph{Effort covariates.}
-Six raster-derived effort layers are extracted at each site location:
+Six raster-derived effort layers are available at each site location:
 
 \begin{center}
-\begin{tabular}{ll}
+\begin{tabular}{lll}
     \toprule
-    Covariate & Description \\
+    Covariate & Description & Status \\
     \midrule
-    \texttt{ala\_record\_count} & Total ALA occurrence records per grid cell \\
-    \texttt{ala\_record\_smoothed} & Gaussian-smoothed record density \\
-    \texttt{dist\_to\_nearest\_institution} & Distance (km) to nearest collection/museum \\
-    \texttt{hub\_influence\_unweighted} & Gravity-weighted influence of all institutions \\
-    \texttt{hub\_influence\_ecology\_weighted} & As above, weighted by ecology-relevant collections \\
-    \texttt{road\_density\_km\_per\_km2} & Road network density (km road per km$^2$) \\
+    \texttt{ala\_record\_count} & Total ALA occurrence records per grid cell & \textit{dropped} \\
+    \texttt{ala\_record\_smoothed} & Gaussian-smoothed record density & \textit{dropped} \\
+    \texttt{dist\_to\_nearest\_institution} & Distance (km) to nearest collection/museum & active \\
+    \texttt{hub\_influence\_unweighted} & Gravity-weighted influence of all institutions & active \\
+    \texttt{hub\_influence\_ecology\_weighted} & As above, weighted by ecology-relevant collections & active \\
+    \texttt{road\_density\_km\_per\_km2} & Road network density (km road per km$^2$) & active \\
     \bottomrule
 \end{tabular}
 \end{center}
+
+\paragraph{Endogenous covariate exclusion.}
+After site$\times$species deduplication, record-count covariates (\texttt{ala\_record\_count}, \texttt{ala\_record\_smoothed}) become endogenous: a site with 200 species surveyed once produces $\sim$200 records regardless of total survey effort. Feeding these into EffortNet gives it a noisy copy of the response variable ($\alpha$), defeating the environment/effort decomposition. In multiplicative mode the problem is particularly acute: the network learns a capture fraction that correlates with apparent richness rather than true survey completeness, systematically inflating richness predictions in genuinely species-poor regions.
+
+The \texttt{effort\_drop\_cov\_names} config field (default: \texttt{["ala\_record\_count", "ala\_record\_smoothed"]}) removes these endogenous covariates from the EffortNet input while \emph{still excluding them from the EnvNet covariate set}. This ensures dropped covariates cannot leak into either sub-network. The remaining four covariates (institutional proximity, hub influence, road density) are genuinely exogenous landscape properties independent of biology.
 
 All layers share the same 0.05$^\circ$ grid as the environmental covariates (670$\times$813 pixels). Values are standardised (zero-mean, unit-variance) before input to EffortNet.
 
@@ -275,7 +420,7 @@ The geographic distance feature is typically introduced in Phase~2 of the cyclic
 \end{tabular}
 \end{center}
 
-The additive network is the default (\texttt{beta\_type=``additive''}) as it most closely mirrors the GDM/TMB structure and produces directly interpretable per-variable response curves. The factored variant is available when cross-variable interactions are suspected.
+The factored network is the default (\texttt{beta\_type=``factored''}) as it combines per-variable interpretability with the ability to capture cross-dimension interactions. The additive variant (\texttt{beta\_type=``additive''}) is available when strict additivity and maximal interpretability are preferred.
 
 \section{Optimisation}
 
@@ -298,7 +443,7 @@ The neural network is fitted via mini-batch stochastic gradient descent using Ad
 Training details:
 \begin{itemize}
     \item \textbf{Learning rate scheduling}: Cosine annealing with warm restarts ($T_0 = 30$ epochs, $T_{\text{mult}} = 2$), giving cycle lengths of 30, 60, 120,\ldots\ epochs. The minimum LR is $10^{-6}$.
-    \item \textbf{Early stopping}: halt training if validation loss does not improve for a configurable number of epochs (default 40).
+    \item \textbf{Early stopping}: halt training if validation loss does not improve for a configurable number of epochs (default 40 for full-phase training; 5 within each beta phase of cyclic training).
     \item \textbf{Gradient clipping}: max norm of 5.0 on all parameters to prevent exploding gradients.
     \item \textbf{Weight decay}: $L_2$ penalty of $10^{-5}$ on alpha parameters and beta bias parameters. \textit{No weight decay} on beta \texttt{weight\_raw} parameters (see Section~\ref{sec:additive-beta}).
     \item \textbf{Dropout}: applied between hidden layers (default rate 0.1) to reduce overfitting.
@@ -318,14 +463,11 @@ Differentiating the log-likelihood with respect to $\eta$ introduces a factor of
 Three mechanisms address this imbalance:
 
 \begin{enumerate}
-    \item \textbf{Beta LR multiplier}: The beta network receives a higher base learning rate than alpha (default $10\times$), implemented via separate Adam parameter groups.
+    \item \textbf{Beta LR multiplier}: The beta network receives a higher base learning rate than alpha (default $50\times$), implemented via separate Adam parameter groups.
     
-    \item \textbf{Gradient amplification hooks}: PyTorch backward hooks on beta parameters scale their gradients by a configurable factor (default $100\times$ in joint training, $10\times$ in two-stage/cyclic modes). This is applied \textit{before} gradient clipping.
+    \item \textbf{Gradient amplification hooks}: PyTorch backward hooks on beta parameters scale their gradients by a configurable factor (default $100\times$ in joint training, $1\times$ in cyclic/two-stage modes where the retrospective correction provides sufficient signal). This is applied \textit{before} gradient clipping.
     
-    \item \textbf{Importance weighting} (in Stage~2 / beta phases): Match pairs ($y=0$) are reweighted by $1/\alpha_h$ where $\alpha_h = 2\alpha_i\alpha_j/(\alpha_i + \alpha_j)$ is the harmonic mean richness. This balances the gradient contributions of match vs.\ mismatch pairs:
-    \begin{equation}
-        \mathcal{L}_{\text{beta}} = \frac{\sum_p \tilde{w}_p \cdot \text{BCE}(y_p, p_p)}{\sum_p \tilde{w}_p}, \qquad \tilde{w}_p = \begin{cases} 1/\alpha_h & \text{if } y_p = 0 \text{ (match)} \\ 1 & \text{if } y_p = 1 \text{ (mismatch)} \end{cases}
-    \end{equation}
+    \item \textbf{Retrospective Bernoulli correction}: All strata use case--control retrospective correction (Section~\ref{sec:between-loss}), mapping the model's predicted $p$ to a sampling-corrected $p^{\text{samp}}$ using per-stratum retention rates from the sampler. This naturally balances match and mismatch gradient magnitudes without ad-hoc weight manipulation.
 \end{enumerate}
 
 \subsection{Training modes}
@@ -360,7 +502,7 @@ Mirrors \texttt{clesso\_iterative.R}: alternating block-coordinate optimisation 
 (B) freeze $\alpha$, train $\beta$ for $N_\beta$ epochs
 \end{center}
 
-Default settings use $N_\alpha = 5$ and $N_\beta = 10$ (small alpha steps, 2$\times$ beta steps), keeping alpha changes incremental so beta can adapt without oscillation. Convergence is declared when the relative change in best beta validation loss between cycles falls below a threshold ($10^{-4}$).
+Default settings use $N_\alpha = 5$ and $N_\beta = 20$ (small alpha steps, $4\times$ beta steps), keeping alpha changes incremental so beta can adapt without oscillation. Each beta phase also has its own \textbf{within-phase patience} (default 5~epochs): if the beta validation loss does not improve for 5~consecutive epochs within a cycle, that beta phase terminates early rather than running all $N_\beta$~epochs. This prevents wasted computation when beta has converged for the current alpha state. Convergence across cycles is declared when the relative change in best beta validation loss between cycles falls below a threshold ($10^{-4}$).
 
 Key differences from two-stage:
 \begin{itemize}
@@ -370,30 +512,27 @@ Key differences from two-stage:
     \item Step-based LR decay (halve every 200 global epochs) replaces per-stage cosine annealing.
 \end{itemize}
 
-Cyclic training is the default mode (\texttt{training\_mode=``cyclic''}).
-
-\subsubsection{Cyclic + geographic fine-tuning (\texttt{mode=``cyclic\_finetune''})}
+\subsubsection{Cyclic + fine-tuning (\texttt{mode=``cyclic\_finetune''})}
 \label{sec:cyclic-finetune}
 
-A two-phase procedure that separates environmental and geographic signal learning:
+This is the \textbf{default training mode}. A two-phase procedure where Phase~1 learns the core ecological signal via damped cyclic training, and Phase~2 refines the fit with a configurable fine-tuning strategy.
 
 \begin{description}
     \item[Phase 1:] Damped cyclic training on \textit{environmental and substrate covariates only} (no Fourier features, no geographic distance). This learns the core ecological signal without geographic confounding.
     
-    \item[Phase 2:] Expand the model architecture to accommodate new input dimensions:
-    \begin{itemize}
-        \item Alpha: add Fourier positional encoding features (zero-initialised weights so Phase~1 predictions are initially unchanged).
-        \item Beta: add a geographic distance dimension (new per-dimension monotone sub-network with fresh random initialisation).
-    \end{itemize}
-    Fine-tune with a smaller learning rate. Optionally, Phase~1 parameters can be frozen (\texttt{finetune\_freeze\_existing=True}) so only the new geographic parameters are trained.
+    \item[Phase 2:] Controlled by \texttt{finetune\_mode}:
+    \begin{description}
+        \item[``joint'' (default):] Joint alpha+beta training on the \textit{same} environmental/effort variables used in Phase~1. No model expansion. Both sub-networks are trainable with separate learning rates (alpha at \texttt{finetune\_lr}, beta at \texttt{finetune\_lr} $\times$ \texttt{finetune\_joint\_beta\_lr\_mult}, default $10\times$). This allows the two sub-models to co-adapt after the alternating Phase~1 has stabilised their individual domains.
+        \item[``geo'':] Expand the model architecture to accommodate new geographic input dimensions: Fourier positional encoding for alpha (zero-initialised weights so Phase~1 predictions are initially unchanged) and haversine distance for beta (new per-dimension monotone sub-network). Fine-tune with a smaller learning rate. Optionally, Phase~1 parameters can be frozen (\texttt{finetune\_freeze\_existing=True}) so only the new geographic parameters are trained. Strong $L_2$ penalties on geographic parameters (\texttt{geo\_penalty\_alpha}, \texttt{geo\_penalty\_beta}) ensure the model only uses spatial information when site-level covariates cannot explain the pattern.
+    \end{description}
 \end{description}
 
-This mirrors the intuition from spatial ecology that environmental variables should explain most compositional turnover, with geographic distance capturing residual dispersal limitation.
+The two-phase structure mirrors the intuition from spatial ecology that environmental variables should explain most compositional turnover, with Phase~2 refining the joint fit or adding geographic residual signal as needed.
 
 \subsection{Hard-pair mining with importance correction}
 \label{sec:hard-mining}
 
-The pairwise likelihood in equation~(2) is defined with respect to a \emph{target pair distribution} over the sampled pair set~$P$, represented by the existing cell-balancing weights~$w_p$. Na\"ive hard-pair mining changes this training distribution by over-sampling difficult pairs, which can improve optimisation speed but distort the resulting fitted probabilities. To retain the original probabilistic target while focusing optimisation on informative pairs, hard-pair mining is introduced as a \emph{proposal distribution} with importance correction.
+The pairwise likelihood in equation~(2) is defined with respect to a \emph{target pair distribution} over the sampled pair set~$P$, represented by the hex-IPW weights~$w_p$ (Section~\ref{sec:hex-ipw}). Na\"ive hard-pair mining changes this training distribution by over-sampling difficult pairs, which can improve optimisation speed but distort the resulting fitted probabilities. To retain the original probabilistic target while focusing optimisation on informative pairs, hard-pair mining is introduced as a \emph{proposal distribution} with importance correction.
 
 \paragraph{Target and proposal distributions.}
 Let $\pi(p)$ denote the target sampling probability for pair~$p$, corresponding to the original pair-construction design, and let $q(p)$ denote the actual probability that pair~$p$ is selected into a mini-batch under the mining scheme. The training loss uses an importance-corrected weight:
@@ -401,22 +540,23 @@ Let $\pi(p)$ denote the target sampling probability for pair~$p$, corresponding 
     w_p^\star = w_p \cdot \frac{\pi(p)}{q(p)}
 \end{equation}
 
-In practice, three layers of importance correction are composed multiplicatively. For a between-site pair in a mined mini-batch, the effective weight is:
+In practice, multiple layers of importance correction are composed. For a between-site pair in a mined mini-batch, the effective weight is:
 \begin{equation}
-    w_p^{\text{eff}} = \underbrace{w_p\vphantom{\frac{1}{\alpha_h}}}_{\substack{\text{population}\\\text{proportion}}} \;\cdot\; \underbrace{\frac{1}{\alpha_h}}_{\substack{\text{gradient}\\\text{balance}}} \;\cdot\; \underbrace{\frac{\pi(p)}{q(p)}}_{\substack{\text{mining}\\\text{correction}}}
+    \tilde{w}_p^{\text{eff}} = \underbrace{d_p\vphantom{\frac{1}{\alpha_h}}}_{\substack{\text{hex-IPW}\\\text{weight}}} \;\cdot\; \underbrace{\frac{\pi(p)}{q(p)}}_{\substack{\text{mining}\\\text{correction}}}
 \end{equation}
-where $\alpha_h = 2\alpha_i\alpha_j/(\alpha_i + \alpha_j)$ is the harmonic mean richness from Section~\ref{sec:grad-imbalance}. The first factor corrects for the 50/50 match/mismatch sampling design, the second balances the gradient attenuation from Section~\ref{sec:grad-imbalance}, and the third corrects for the non-uniform mini-batch sampling introduced by mining. When $q(p) = \pi(p)$, the mining correction is unity and the loss reduces to the original importance-weighted likelihood.
+where $d_p$ is the design weight (hex-IPW) from Section~\ref{sec:training-weights}. The mining ratio corrects for the non-uniform mini-batch sampling introduced by difficulty-based re-sampling. When $q(p) = \pi(p)$, the mining correction is unity and the loss reduces to the standard retrospectively corrected likelihood.
 
 The mini-batch loss is:
 \begin{equation}
     \widehat{\mathcal{L}}_B
     =
-    -\frac{1}{\sum_{p \in B} w_p^{\text{eff}}}
+    -\frac{1}{\sum_{p \in B} \tilde{w}_p^{\text{eff}}}
     \sum_{p \in B}
-    w_p^{\text{eff}}
+    \tilde{w}_p^{\text{eff}}
     \Big[(1-y_p)\log p_p + y_p \log(1-p_p)\Big]
     + \lambda_{\text{lb}} \cdot \mathcal{R}_\alpha
 \end{equation}
+where $\tilde{w}_p^{\text{eff}}$ is the design weight from Section~\ref{sec:training-weights} further corrected by the mining importance ratio.
 
 \paragraph{Coarse pair strata.}
 Hard-pair mining is applied only to \emph{between-site} pairs during beta training phases, since within-site pairs anchor the alpha model and have a fundamentally different loss surface ($p = 1/\alpha$, no $\eta$ dependence). Between-site pairs are divided into two coarse cells:
@@ -481,10 +621,10 @@ The neural network variant is not a different model in the ecological sense. The
     Component & TMB & Neural network \\
     \hline
     $\alpha_i$ & Linear + P-spline + random effect & MLP (SiLU) with softplus output \\
-    Effort separation & Not modelled & Additive EffortNet decomposition \\
+    Effort separation & Not modelled & Additive/multiplicative EffortNet \\
     $\eta_{i,j}$ & I-spline + non-negative coefficients & Additive/factored monotone network \\
     $p_p$ & Same formula & Same formula \\
-    $\mathcal{L}$ & Same weighted Bernoulli NLL & Same (+ importance weighting for $\beta$) \\
+    $\mathcal{L}$ & Same weighted Bernoulli NLL & Same (+ retrospective correction) \\
     $\mathcal{R}_\alpha$ & Same softplus$^2$ lower-bound penalty & Same softplus$^2$ lower-bound penalty \\
     Training & \texttt{nlminb}, two-stage, iterative & Adam, two-stage/cyclic block-coordinate \\
     Geography & I-spline on geo distance & Fourier encoding ($\alpha$) + haversine dim ($\beta$) \\
@@ -515,7 +655,7 @@ A comprehensive diagnostic PDF (mirroring the R script \texttt{clesso\_diagnosti
 
 \subsection{Alpha surface}
 
-Species richness is predicted across all of Australia using the trained alpha network applied to a gridded covariate stack (0.05$^\circ$ resolution, 670$\times$813 cells). The covariates include 6 substrate PCA bands, 9 AWAP climate variables (matching training columns), and optionally Fourier positional features.
+Species richness is predicted across all of Australia using the trained alpha network applied to a gridded covariate stack (0.05$^\circ$ resolution, 670$\times$813 cells). The covariates include 6 substrate PCA bands, 9 AWAP climate variables (matching training columns), and optionally Fourier positional features. Output files are saved to the same directory as the model checkpoint.
 
 When the effort decomposition is active (Section~\ref{sec:effort-decomposition}), three alpha surfaces are produced:
 \begin{enumerate}
@@ -527,7 +667,7 @@ All three are saved as separate GeoTIFF files.
 
 \subsection{Beta surface (community composition map)}
 
-A spatial map of biological community composition is generated using Landmark MDS:
+A spatial map of biological community composition is generated using Landmark MDS, with output saved alongside the model checkpoint:
 \begin{enumerate}
     \item Select $k$ landmark pixels via spatial $k$-means (default $k = 500$)
     \item Compute pairwise $\eta$ between all landmark pairs using the trained beta network ($k \times k$ matrix)
@@ -612,21 +752,24 @@ The additive structure on the logit scale means that effort acts as a multiplica
 
 Where richer site-level biodiversity summaries are available, a further improvement is to include an auxiliary loss or penalty that encourages \(\alpha\) to remain consistent with externally estimated richness-like quantities.
 
-\subsection{Pair design and training strategy (not yet implemented)}
+\subsection{Pair design and training strategy}
 
-Identifiability is also influenced by which pairs are seen during fitting. Pairs are most informative when they help break the correlation between geography, environment, and expected turnover. In particular, it is helpful to include:
+Identifiability is also influenced by which pairs are seen during fitting. Pairs are most informative when they help break the correlation between geography, environment, and expected turnover. The hex-balanced 3-tier sampling scheme (Section~\ref{sec:pair-sampling}) is designed to address this directly:
 \begin{itemize}
-    \item pairs spanning small, moderate, and large environmental distances,
-    \item geographically distant but environmentally similar pairs,
-    \item geographically close but environmentally distinct pairs,
-    \item and sufficient repeated within-site information to stabilise \(\alpha\).
+    \item \textbf{Same-hex pairs} (Tier~1, 50\%) provide geographically close pairs spanning small environmental distances --- these anchor the near-zero end of the turnover response curves.
+    \item \textbf{Neighbour-hex pairs} (Tier~2, 30\%) span moderate ($\sim$2--4$^\circ$) distances, capturing regional turnover where environmental gradients begin to diverge.
+    \item \textbf{Distant-hex pairs} (Tier~3, 20\%) span continental distances including environmentally similar but geographically distant site pairs, which are critical for separating distance decay from environmental turnover.
+    \item \textbf{Within-site pairs} provide sufficient repeated within-site information to stabilise $\alpha$, with equal quotas per hex ensuring geographic coverage.
 \end{itemize}
-From an optimisation perspective, staged fitting can further improve stability. A practical sequence is:
+
+The hex-balanced design also ensures that data-sparse regions contribute meaningfully to training rather than being overwhelmed by densely sampled urban areas. The IPW correction (Section~\ref{sec:hex-ipw}) restores population-level correctness so that the fitted model reflects the true ecological landscape rather than the geography of recording effort.
+
+From an optimisation perspective, staged fitting further improves stability. The implemented sequence is:
 \begin{enumerate}
-    \item fit \(\alpha\) primarily from within-site pairs and any richness constraints,
-    \item fit \(\beta\) conditional on that \(\alpha\) baseline,
-    \item jointly fine-tune both components,
-    \item and introduce any spatial residual term only after the non-spatial model is stable.
+    \item fit $\alpha$ primarily from within-site pairs and richness constraints (cyclic alpha phase),
+    \item fit $\beta$ conditional on that $\alpha$ baseline (cyclic beta phase),
+    \item repeat alternating alpha/beta cycles until convergence,
+    \item and introduce geographic distance as a beta input only after the environmental model is stable (Phase~2 fine-tuning).
 \end{enumerate}
 This does not change the statistical model, but helps preserve the intended functional roles of the two components during training.
 
@@ -650,9 +793,54 @@ These considerations are important regardless of whether the sub-models are spec
     \item The network's richness predictions should be compared against the TMB P-spline predictions on the same data to assess consistency between the two approaches.
     \item If uncertainty quantification is needed (which the TMB \texttt{sdreport} provides), options include MC dropout at prediction time, deep ensembles, or training multiple models with different random seeds.
     \item The data pipeline (Steps 1--4 of the R pipeline) is shared between both approaches, so switching between TMB and NN fitting requires only an export step (\texttt{export\_for\_nn.R}) and a single Python command.
-    \item The cyclic block-coordinate descent training (default mode) most closely mirrors the iterative R pipeline (\texttt{clesso\_iterative.R}), alternating alpha and beta optimisation until convergence.
-    \item The two-phase cyclic fine-tuning procedure (\texttt{cyclic\_finetune}) provides a principled way to separate environmental signal from geographic distance decay, reducing the risk of geographic confounding during initial model fitting.
+    \item The hex-balanced 3-tier sampling scheme (Section~\ref{sec:pair-sampling}) ensures geographic coverage across the continent while the IPW weights and retrospective Bernoulli correction (Section~\ref{sec:training-weights}) keep the loss surface well-conditioned. The sampler produces a diagnostic PDF summarising geographic balance, tier breakdowns, weight distributions, and ESS.
+    \item The default training mode is \texttt{cyclic\_finetune}, which combines damped cyclic block-coordinate descent (Phase~1) with a joint or geographic fine-tuning pass (Phase~2), followed by a short calibration phase. This most closely mirrors the iterative R pipeline (\texttt{clesso\_iterative.R}) while adding principled co-adaptation and probability calibration.
     \item The observed-richness lower-bound penalty should use \textit{corrected} $S_{\text{obs}}$ values (true species counts from raw data) rather than the subsampled pair-source richness, which underestimates true counts.
+\end{itemize}
+
+
+\section{Thing to try}
+
+\begin{itemize}
+    \item Add an auxiliary loss to encourage alpha predictions to align with observed richness at the training sites, using a soft penalty that allows some deviation but discourages extreme mismatches.
+    \item Confirm use of train-test split, look to see if we have done this incorrectly, make sure it''s maintaining the spatial structure of the data (e.g.\ no leakage of nearby sites between train and test).
+    \item Try training with and without the beta LR multiplier and gradient amplification to see how much they help with the gradient imbalance issue.
+    \item Experiment with different cyclic training schedules (e.g. varying $N_\alpha$ and $N_\beta$) to find a good balance between allowing alpha to adapt and giving beta enough time to learn.
+    \item Try the ``geo'' fine-tuning mode to see if adding geographic distance as a beta input improves the fit, and check the resulting geographic response to ensure it is interpretable and not just absorbing residual noise.
+    \item Experiment with different hard-pair mining strengths ($\lambda_{\text{hm}}$) and binning strategies to see how they affect convergence speed and final performance.
+    \item Look at temperature / platt scaling calibration instead of the full tuning happening now
+    \item Reduce alphanet complexity (e.g.\ smaller network, stronger regularisation) to see if it helps with identifiability and prevents it from absorbing turnover signal.
+    \item Go back to additive betanet and see if it can learn a reasonable fit without the beta LR multiplier and gradient amplification, especially with the retrospective correction in place.
+    \item Explore adding stopping on blocked AUC or other classification metrics in addition to the validation loss, to ensure the model is not just improving likelihood but also predictive performance on the match/mismatch task.
+    \item 
+\end{itemize}
+
+\begin{itemize}
+    \item Compare pair-level splitting versus \emph{site-first} splitting (generate pairs only after splitting sites), to confirm that no site-level leakage is inflating validation performance.
+    \item Try a stricter \emph{blocked spatial cross-validation} design (e.g.\ hold out whole hexes / neighbouring hex clusters / bioregions) and compare AUC against the current validation scheme.
+    \item Save and compare checkpoints \emph{before} and \emph{after} the calibration phase to test whether the calibration step is improving calibration but damaging ranking performance (AUC).
+    \item Stop on \emph{blocked validation AUC} rather than only the weighted validation loss, and compare the selected checkpoint to the current best-loss checkpoint.
+    \item Report AUC separately for strata \(W, S, N, D\), and also by geographic region / held-out block, to identify whether the performance drop is concentrated in particular pair types or regions.
+    \item Remove the joint fine-tuning stage and compare against the best Phase~1 cyclic checkpoint, to see whether the later co-adaptation of alpha and beta is undoing the separation learned during cyclic training.
+    \item Freeze alpha during Phase~2 fine-tuning and train only beta, then compare against joint fine-tuning to test whether alpha is re-absorbing turnover structure late in training.
+    \item Try training with the anti-collapse regulariser turned off, reduced, or annealed to zero late in training, to see whether it is preventing \(\eta\) collapse early but hurting generalisation once training stabilises.
+    \item Train with no hard-pair mining at all, and compare against mined runs, to test whether mining is improving optimisation speed at the cost of worse generalisation.
+    \item Train with match-boost excluded, included only in warm-up, and included throughout, to check whether rare-match shaping is helping beta learn or instead biasing the representation.
+    \item Try removing the retrospective correction entirely in a simple ablation, or using a coarser / finer version of the retention-rate correction, to test whether the current correction is stabilising training or introducing mismatch with the true sampling process.
+    \item Check whether the retention rates \(r_{s,0}, r_{s,1}\) should vary at finer resolution than just stratum (e.g.\ by tier, region, or proposal bucket), and test whether this improves fit.
+    \item Experiment with \emph{uniform within-hex site sampling} instead of \(m_i^2\)-weighted within-site sampling, to see whether the current proposal is making alpha too dependent on observed support size.
+    \item Compare the current between-site design weights against a simpler site-pair-weighted target, to test whether the exact weighting scheme is part of the validation--test gap.
+    \item Try training with different stratum weights \(\bm{\lambda}\), especially increasing the weight on distant pairs or within-site pairs, to see how sensitive fit and test AUC are to the composite-likelihood balance.
+    \item Remove Fourier positional encoding from alpha, and separately remove geographic distance from beta, to test which spatial pathway is carrying most of the apparent predictive signal.
+    \item Try keeping geography in only one sub-model at a time (alpha-only spatial, beta-only spatial, neither), to check whether the two components are competing to explain the same spatial gradient.
+    \item Compare additive versus multiplicative effort models, and also a run with \texttt{use\_effort=False}, to test whether the effort pathway is improving realism or simply adding variance / identifiability problems.
+    \item Make EffortNet linear or very shallow, to see whether a simpler effort correction generalises better than the current flexible effort network.
+    \item Reduce beta complexity as well as alpha complexity (e.g.\ fewer hidden units per monotone function, shallower factored interaction network) to see whether the current beta model is fitting validation idiosyncrasies.
+    \item Add a small auxiliary \emph{ranking loss} (or other AUC-oriented surrogate) alongside the corrected BCE, to test whether optimising likelihood alone is misaligned with the evaluation metric.
+    \item Check batch-size sensitivity (smaller versus larger batches), because very large batches can reduce gradient noise but sometimes worsen generalisation.
+    \item Run multiple random seeds for the same configuration and quantify variability in validation and test AUC, to determine whether the current performance gap is partly due to optimisation variance rather than systematic model failure.
+    \item Try a simple seed ensemble of the best few models, to see whether averaging predictions improves test AUC and stabilises the ranking.
+    \item Compare the neural network fit against a deliberately simpler baseline (e.g.\ additive beta + small alpha net, or even a spline / shallow model) to establish whether the current extra flexibility is actually buying test performance.
 \end{itemize}
 
 \end{document}

@@ -98,6 +98,8 @@ def test_compute_loss_with_effort():
         "y": torch.randint(0, 2, (8,)).float(),
         "is_within": torch.tensor([1, 0, 1, 0, 1, 0, 1, 0], dtype=torch.float32),
         "weight": torch.ones(8),
+        "design_w": torch.ones(8),
+        "stratum": torch.zeros(8, dtype=torch.long),
         "env_diff": torch.rand(8, 15),
     }
     S_obs = torch.ones(8) * 50
@@ -131,6 +133,56 @@ def test_effort_net_zero_init():
     print("PASS: EffortNet zero init")
 
 
+def test_completeness_mode():
+    """Completeness mode: α_obs = 1 + c · softplus(env_logit), c ∈ (0,1)."""
+    m = CLESSONet(
+        K_alpha=17, K_env=15, beta_type="additive", beta_n_knots=32,
+        K_effort=6, effort_hidden=[64, 32], effort_dropout=0.1,
+        effort_mode="completeness",
+    )
+    m.eval()
+    z = torch.randn(32, 17)
+    w = torch.randn(32, 6)
+
+    alpha_true = m._compute_alpha_env_only(z)  # 1 + softplus(logit)
+    alpha_obs = m._compute_alpha(z, w)
+
+    assert (alpha_true >= 1.0).all(), "α_true must be ≥ 1"
+    assert (alpha_obs >= 1.0).all(), "α_obs must be ≥ 1 (completeness guarantee)"
+    assert (alpha_obs <= alpha_true + 1e-5).all(), (
+        "α_obs must be ≤ α_true (completeness can only reduce richness)")
+
+    # Without effort, α should equal α_true
+    alpha_no_effort = m._compute_alpha(z, w=None)
+    assert torch.allclose(alpha_no_effort, alpha_true), (
+        "Without effort covariates, completeness mode should give α_true")
+    print(f"  α_true range: [{alpha_true.min():.2f}, {alpha_true.max():.2f}]")
+    print(f"  α_obs  range: [{alpha_obs.min():.2f}, {alpha_obs.max():.2f}]")
+    print("PASS: Completeness mode")
+
+
+def test_multiplicative_mode():
+    """Multiplicative mode: α_obs = (softplus(logit)+1) · σ(effort_logit)."""
+    m = CLESSONet(
+        K_alpha=17, K_env=15, beta_type="additive", beta_n_knots=32,
+        K_effort=6, effort_hidden=[64, 32], effort_dropout=0.1,
+        effort_mode="multiplicative",
+    )
+    m.eval()
+    z = torch.randn(32, 17)
+    w = torch.randn(32, 6)
+
+    alpha_env = m._compute_alpha_env_only(z)
+    alpha_obs = m._compute_alpha(z, w)
+
+    assert (alpha_env >= 1.0).all(), "α_env must be ≥ 1"
+    # Multiplicative can go below 1 (no +1 outside product)
+    assert (alpha_obs > 0.0).all(), "α_obs must be > 0 in multiplicative mode"
+    print(f"  α_env range: [{alpha_env.min():.2f}, {alpha_env.max():.2f}]")
+    print(f"  α_obs range: [{alpha_obs.min():.2f}, {alpha_obs.max():.2f}]")
+    print("PASS: Multiplicative mode")
+
+
 def test_gradient_flow():
     """Gradients should flow through effort_net during backprop."""
     m = CLESSONet(
@@ -149,6 +201,8 @@ def test_gradient_flow():
         "y": torch.randint(0, 2, (8,)).float(),
         "is_within": torch.tensor([1, 0, 1, 0, 1, 0, 1, 0], dtype=torch.float32),
         "weight": torch.ones(8),
+        "design_w": torch.ones(8),
+        "stratum": torch.zeros(8, dtype=torch.long),
         "env_diff": torch.rand(8, 15),
     }
     S_obs = torch.ones(8) * 50
@@ -173,5 +227,7 @@ if __name__ == "__main__":
     test_forward_with_effort()
     test_compute_loss_with_effort()
     test_effort_net_zero_init()
+    test_completeness_mode()
+    test_multiplicative_mode()
     test_gradient_flow()
     print("\nALL TESTS PASSED")

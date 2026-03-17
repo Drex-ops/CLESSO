@@ -8,6 +8,40 @@ Handles:
   - Model checkpointing
   - Two-stage training (alpha-only → beta-only) for gradient stability
   - Cyclic block-coordinate descent (alpha↔beta alternating cycles)
+
+Importance Weighting (class-balanced hex-IPW scheme)
+=====================================================
+Every per-pair loss term is weighted by w_final to correct for sampling biases.
+
+1. **Hex-IPW weight** (``w_ipw = batch["weight"]``):
+   Comes from the R sampler (``clesso_sampler_optimised.R``).  The hex-
+   balanced sampler gives equal quotas to each hex, so dense hexes are
+   under-sampled relative to their population contribution.  The IPW
+   weight = hex_capacity / mean(hex_capacity), normalised so mean ~1
+   per stratum (pair_type × y).  This corrects geographic imbalance
+   while keeping the weight scale stable.
+
+2. **Alpha-harmonic-mean correction** (``w_alpha = 1/ā_h`` for matches,
+   ``1`` for mismatches):
+   Within a given cell, pairs from high-richness sites are over-
+   represented because the probability of drawing a *match* pair is
+   proportional to ``m_s(m_s-1)/α²``.  Dividing by the harmonic mean
+   of the two site alphas corrects this conditional bias.
+
+3. **Class-balanced normalisation**:
+   After combining factors 1+2, the y=0 (match) and y=1 (mismatch)
+   weight groups are normalised separately so each contributes equally
+   to the BCE loss.  Without this, the 1/alpha correction (~150×
+   down-weight on matches) would make the model learn almost entirely
+   from mismatches.  Within each class, relative weights still reflect
+   geographic and richness corrections.
+
+4. **Hard-pair mining weight** (``w_mining = batch["mining_iw"]``, optional):
+   When hard-pair mining is active, the miner re-samples the training set
+   to over-represent hard examples.  ``mining_iw`` is the inverse of the
+   over-sampling ratio, preserving unbiasedness.
+
+``compute_loss()`` in model.py applies factors 1-3.
 """
 
 from __future__ import annotations
@@ -26,6 +60,46 @@ from torch.utils.data import DataLoader
 from .config import CLESSONNConfig
 from .dataset import SiteData, make_dataloaders, HardPairMiner
 from .model import CLESSONet
+
+
+# --------------------------------------------------------------------------
+# Weight stabilisation helpers
+# --------------------------------------------------------------------------
+
+def _stabilise_weights(
+    w: torch.Tensor,
+    clamp_factor: float = 0.0,
+    log_normalise: bool = False,
+) -> tuple[torch.Tensor, float]:
+    """Optional stabilisation of combined importance weights.
+
+    Args:
+        w: raw combined importance weights (pop × alpha × mining), shape (B,)
+        clamp_factor: if > 0, clamp to median(w) × clamp_factor to limit
+            the influence of outlier pairs.  Typical values: 5–20.
+        log_normalise: if True, project weights into log-space and softmax
+            back, which compresses heavy tails.  The resulting weights sum
+            to 1, so loss = sum(w * bce) (no division by sum(w)).
+
+    Returns:
+        (w_stable, ess) where ess = (sum w)^2 / sum(w^2)  ∈ [1, B].
+        ESS near B means weights are roughly uniform; ESS << B means a
+        few pairs dominate the batch.
+    """
+    if clamp_factor > 0:
+        cap = w.median() * clamp_factor
+        w = w.clamp(max=cap.item())
+
+    if log_normalise:
+        # Softmax in log-space: preserves ordering, compresses magnitude
+        log_w = torch.log(w + 1e-12)
+        w = torch.softmax(log_w, dim=0) * w.numel()  # scale so mean ≈ 1
+
+    # Effective sample size: (Σw)² / Σ(w²)
+    sum_w = w.sum()
+    ess = (sum_w ** 2 / (w ** 2).sum()).item()
+
+    return w, ess
 
 
 # --------------------------------------------------------------------------
@@ -54,6 +128,8 @@ def train_one_epoch(
     site_data: SiteData,
     device: str,
     log_every: int = 10,
+    weight_clamp_factor: float = 0.0,
+    weight_log_normalise: bool = False,
 ) -> dict:
     """Train for one epoch. Returns dict of mean metrics."""
     model.train()
@@ -64,10 +140,14 @@ def train_one_epoch(
     total_loss = 0.0
     total_bce = 0.0
     total_lb = 0.0
+    total_anchor = 0.0
     total_alpha_reg = 0.0
     total_eta_smooth = 0.0
+    total_eta_ac = 0.0
+    total_effort = 0.0
     total_beta_grad = 0.0
     total_alpha_grad = 0.0
+    total_ess = 0.0
     n_batches = 0
 
     for i, batch in enumerate(loader):
@@ -78,7 +158,9 @@ def train_one_epoch(
         w_i = W[batch["site_i"]] if W is not None else None
         w_j = W[batch["site_j"]] if W is not None else None
 
-        result = model.compute_loss(batch, z_i, z_j, S_obs, w_i=w_i, w_j=w_j)
+        result = model.compute_loss(batch, z_i, z_j, S_obs, w_i=w_i, w_j=w_j,
+                                    weight_clamp_factor=weight_clamp_factor,
+                                    weight_log_normalise=weight_log_normalise)
         loss = result["loss"]
 
         optimizer.zero_grad()
@@ -100,8 +182,12 @@ def train_one_epoch(
         total_loss += loss.item()
         total_bce += result["bce_loss"].item()
         total_lb += result["lb_penalty"].item()
+        total_anchor += result["anchor_penalty"].item()
         total_alpha_reg += result["alpha_reg_loss"].item()
         total_eta_smooth += result["eta_smooth_loss"].item()
+        total_eta_ac += result["eta_ac_loss"].item()
+        total_effort += result["effort_loss"].item()
+        total_ess += result["weight_ess"]
         n_batches += 1
 
         if log_every > 0 and (i + 1) % log_every == 0:
@@ -109,16 +195,21 @@ def train_one_epoch(
                   f"loss={loss.item():.4f}  "
                   f"bce={result['bce_loss'].item():.4f}  "
                   f"lb={result['lb_penalty'].item():.4f}  "
+                  f"anc={result['anchor_penalty'].item():.4f}  "
                   f"areg={result['alpha_reg_loss'].item():.4f}")
 
     return {
         "loss": total_loss / n_batches,
         "bce_loss": total_bce / n_batches,
         "lb_penalty": total_lb / n_batches,
+        "anchor_penalty": total_anchor / n_batches,
         "alpha_reg_loss": total_alpha_reg / n_batches,
         "eta_smooth_loss": total_eta_smooth / n_batches,
+        "eta_ac_loss": total_eta_ac / n_batches,
+        "effort_loss": total_effort / n_batches,
         "beta_grad_norm": total_beta_grad / n_batches,
         "alpha_grad_norm": total_alpha_grad / n_batches,
+        "weight_ess": total_ess / n_batches,
     }
 
 
@@ -128,6 +219,8 @@ def validate(
     loader: DataLoader,
     site_data: SiteData,
     device: str,
+    weight_clamp_factor: float = 0.0,
+    weight_log_normalise: bool = False,
 ) -> dict:
     """Evaluate on validation set. Returns dict of mean metrics."""
     model.eval()
@@ -138,8 +231,12 @@ def validate(
     total_loss = 0.0
     total_bce = 0.0
     total_lb = 0.0
+    total_anchor = 0.0
     total_alpha_reg = 0.0
     total_eta_smooth = 0.0
+    total_eta_ac = 0.0
+    total_effort = 0.0
+    total_ess = 0.0
     n_batches = 0
 
     # Also track prediction stats
@@ -154,13 +251,19 @@ def validate(
         w_i = W[batch["site_i"]] if W is not None else None
         w_j = W[batch["site_j"]] if W is not None else None
 
-        result = model.compute_loss(batch, z_i, z_j, S_obs, w_i=w_i, w_j=w_j)
+        result = model.compute_loss(batch, z_i, z_j, S_obs, w_i=w_i, w_j=w_j,
+                                    weight_clamp_factor=weight_clamp_factor,
+                                    weight_log_normalise=weight_log_normalise)
 
         total_loss += result["loss"].item()
         total_bce += result["bce_loss"].item()
         total_lb += result["lb_penalty"].item()
+        total_anchor += result["anchor_penalty"].item()
         total_alpha_reg += result["alpha_reg_loss"].item()
         total_eta_smooth += result["eta_smooth_loss"].item()
+        total_eta_ac += result["eta_ac_loss"].item()
+        total_effort += result["effort_loss"].item()
+        total_ess += result["weight_ess"]
         n_batches += 1
 
         all_alpha_i.append(result["alpha_i"].cpu())
@@ -179,13 +282,17 @@ def validate(
         "loss": total_loss / n_batches,
         "bce_loss": total_bce / n_batches,
         "lb_penalty": total_lb / n_batches,
+        "anchor_penalty": total_anchor / n_batches,
         "alpha_reg_loss": total_alpha_reg / n_batches,
         "eta_smooth_loss": total_eta_smooth / n_batches,
+        "eta_ac_loss": total_eta_ac / n_batches,
+        "effort_loss": total_effort / n_batches,
         "accuracy": accuracy,
         "alpha_mean": all_alpha_i.mean().item(),
         "alpha_std": all_alpha_i.std().item(),
         "alpha_min": all_alpha_i.min().item(),
         "alpha_max": all_alpha_i.max().item(),
+        "weight_ess": total_ess / n_batches,
     }
 
 
@@ -220,7 +327,7 @@ def train(
     beta_other = [p for n, p in model.beta_net.named_parameters()
                   if "weight_raw" not in n]
 
-    optimizer = Adam([
+    param_groups = [
         {"params": alpha_params,
          "lr": config.learning_rate,
          "weight_decay": config.weight_decay},
@@ -230,7 +337,16 @@ def train(
         {"params": beta_other,
          "lr": beta_lr,
          "weight_decay": config.weight_decay},
-    ])
+    ]
+    if model.effort_net is not None:
+        param_groups.append({
+            "params": list(model.effort_net.parameters()),
+            "lr": config.resolved_effort_lr,
+            "weight_decay": config.resolved_effort_wd,
+        })
+        print(f"  EffortNet LR: {config.resolved_effort_lr:.2e}  "
+              f"WD: {config.resolved_effort_wd:.2e}")
+    optimizer = Adam(param_groups)
     # Cosine annealing with warm restarts:
     # T_0 = 30 epochs per cycle, T_mult = 2 (double cycle length each restart)
     # Gives cycles of 30, 60, 120, ... epochs — avoids premature LR death
@@ -255,10 +371,13 @@ def train(
     log_path = config.output_dir / "training_progress.log"
     log_file = open(log_path, "w", newline="")
     log_writer = csv.DictWriter(log_file, fieldnames=[
-        "epoch", "train_loss", "train_bce", "train_lb", "train_areg",
-        "val_loss", "val_bce", "val_lb", "val_areg", "val_accuracy",
+        "epoch", "train_loss", "train_bce", "train_lb", "train_anchor", "train_areg",
+        "train_effort",
+        "val_loss", "val_bce", "val_lb", "val_anchor", "val_areg", "val_effort",
+        "val_accuracy",
         "alpha_mean", "alpha_std", "alpha_min", "alpha_max",
         "lr", "beta_grad_norm", "alpha_grad_norm",
+        "weight_ess",
         "elapsed_sec", "timestamp",
     ])
     log_writer.writeheader()
@@ -279,10 +398,14 @@ def train(
             train_metrics = train_one_epoch(
                 model, train_loader, optimizer, site_data,
                 device, log_every=config.log_every,
+                weight_clamp_factor=config.weight_clamp_factor,
+                weight_log_normalise=config.weight_log_normalise,
             )
 
             # Validate
-            val_metrics = validate(model, val_loader, site_data, device)
+            val_metrics = validate(model, val_loader, site_data, device,
+                                   weight_clamp_factor=config.weight_clamp_factor,
+                                   weight_log_normalise=config.weight_log_normalise)
 
             # Learning rate scheduling (cosine annealing steps per epoch)
             scheduler.step(epoch)
@@ -315,11 +438,15 @@ def train(
                 "train_loss": f"{train_metrics['loss']:.6f}",
                 "train_bce": f"{train_metrics['bce_loss']:.6f}",
                 "train_lb": f"{train_metrics['lb_penalty']:.6f}",
+                "train_anchor": f"{train_metrics['anchor_penalty']:.6f}",
                 "train_areg": f"{train_metrics['alpha_reg_loss']:.6f}",
+                "train_effort": f"{train_metrics['effort_loss']:.6f}",
                 "val_loss": f"{val_metrics['loss']:.6f}",
                 "val_bce": f"{val_metrics['bce_loss']:.6f}",
                 "val_lb": f"{val_metrics['lb_penalty']:.6f}",
+                "val_anchor": f"{val_metrics['anchor_penalty']:.6f}",
                 "val_areg": f"{val_metrics['alpha_reg_loss']:.6f}",
+                "val_effort": f"{val_metrics['effort_loss']:.6f}",
                 "val_accuracy": f"{val_metrics['accuracy']:.4f}",
                 "alpha_mean": f"{val_metrics['alpha_mean']:.2f}",
                 "alpha_std": f"{val_metrics['alpha_std']:.2f}",
@@ -328,6 +455,7 @@ def train(
                 "lr": f"{current_lr:.2e}",
                 "beta_grad_norm": f"{train_metrics['beta_grad_norm']:.6f}",
                 "alpha_grad_norm": f"{train_metrics['alpha_grad_norm']:.6f}",
+                "weight_ess": f"{train_metrics['weight_ess']:.1f}",
                 "elapsed_sec": f"{elapsed:.0f}",
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
             })
@@ -408,6 +536,8 @@ def _stage2_validate(
     site_data: SiteData,
     device: str,
     eps: float = 1e-7,
+    weight_clamp_factor: float = 0.0,
+    weight_log_normalise: bool = False,
 ) -> dict:
     """Stage 2: validate beta on between-site pairs."""
     model.eval()
@@ -418,7 +548,16 @@ def _stage2_validate(
     all_eta = []
     all_p = []
     all_y = []
+    all_stratum = []
     n_batches = 0
+
+    # Retention rate keys for retrospective correction
+    _rr_keys = {
+        1: ("between_tier1_r0", "between_tier1_r1"),
+        2: ("between_tier2_r0", "between_tier2_r1"),
+        3: ("between_tier3_r0", "between_tier3_r1"),
+    }
+    rr = model.retention_rates
 
     for batch in loader:
         batch = {k: v.to(device) for k, v in batch.items()}
@@ -432,25 +571,46 @@ def _stage2_validate(
         p = fwd["p_match"].clamp(eps, 1.0 - eps)
         y = batch["y"]
         eta = fwd["eta"]
+        stratum = batch["stratum"]
 
-        # Same importance weighting for consistent loss metric
-        alpha_i = fwd["alpha_i"]
-        alpha_j = fwd["alpha_j"]
-        alpha_h = 2.0 * alpha_i * alpha_j / (alpha_i + alpha_j + eps)
-        imp_w = torch.where(y < 0.5, 1.0 / alpha_h, torch.ones_like(alpha_h))
+        # ---- Retrospective Bernoulli correction per stratum ----
+        p_corr = p.clone()
+        for s_idx, (r0_key, r1_key) in _rr_keys.items():
+            mask_s = stratum == s_idx
+            if not mask_s.any():
+                continue
+            r0 = rr.get(r0_key, 1.0)
+            r1 = rr.get(r1_key, 1.0)
+            if r0 != 1.0 or r1 != 1.0:
+                p_s = p[mask_s]
+                p_corr[mask_s] = (
+                    r0 * p_s / (r0 * p_s + r1 * (1.0 - p_s) + eps)
+                ).clamp(eps, 1.0 - eps)
 
-        bce = -(1.0 - y) * torch.log(p) - y * torch.log(1.0 - p)
+        log_p_corr = torch.log(p_corr)
+        log_1m_p_corr = torch.log(1.0 - p_corr)
+        bce = -(1.0 - y) * log_p_corr - y * log_1m_p_corr
+
+        # Design weights (proper IPW from sampler)
+        imp_w = batch["design_w"].clone()
+
+        # Stabilise and compute ESS
+        imp_w, _ess = _stabilise_weights(
+            imp_w, weight_clamp_factor, weight_log_normalise)
+
         loss = (imp_w * bce).sum() / imp_w.sum()
 
         total_loss += loss.item()
         all_eta.append(eta.cpu())
         all_p.append(p.cpu())
         all_y.append(y.cpu())
+        all_stratum.append(stratum.cpu())
         n_batches += 1
 
     all_eta = torch.cat(all_eta)
     all_p = torch.cat(all_p)
     all_y = torch.cat(all_y)
+    all_stratum = torch.cat(all_stratum)
 
     # AUC for between-site classification
     try:
@@ -459,6 +619,19 @@ def _stage2_validate(
     except (ValueError, ImportError):
         auc = 0.5
 
+    # Per-stratum AUC: strata 1-3 only (excludes match-boost stratum 4)
+    auc_s123 = 0.5
+    try:
+        from sklearn.metrics import roc_auc_score as _roc
+        mask_s123 = (all_stratum >= 1) & (all_stratum <= 3)
+        if mask_s123.any():
+            y_s123 = all_y[mask_s123].numpy()
+            p_s123 = all_p[mask_s123].numpy()
+            if len(np.unique(y_s123)) == 2:
+                auc_s123 = _roc(y_s123, 1 - p_s123)
+    except (ValueError, ImportError):
+        pass
+
     return {
         "loss": total_loss / max(n_batches, 1),
         "eta_mean": all_eta.mean().item(),
@@ -466,6 +639,7 @@ def _stage2_validate(
         "eta_min": all_eta.min().item(),
         "eta_max": all_eta.max().item(),
         "auc": auc,
+        "auc_s123": auc_s123,
     }
 
 
@@ -486,6 +660,8 @@ def _save_checkpoint(model, optimizer, epoch, val_loss, site_data, config, path)
             "beta_dropout": config.beta_dropout,
             "alpha_activation": config.alpha_activation,
             "alpha_lb_lambda": config.alpha_lower_bound_lambda,
+            "alpha_anchor_lambda": config.alpha_anchor_lambda,
+            "alpha_anchor_tolerance": config.alpha_anchor_tolerance,
             "alpha_regression_lambda": config.alpha_regression_lambda,
             "beta_type": config.beta_type,
             "beta_n_knots": config.beta_n_knots,
@@ -495,6 +671,7 @@ def _save_checkpoint(model, optimizer, epoch, val_loss, site_data, config, path)
             "geo_penalty_beta": getattr(config, "geo_penalty_beta", 0.0),
             "effort_hidden": list(config.effort_hidden),
             "effort_dropout": config.effort_dropout,
+            "effort_mode": config.effort_mode,
         },
         "site_data_stats": {
             "z_mean": site_data.z_mean.tolist(),
@@ -555,26 +732,40 @@ def train_two_stage(
     print("  STAGE 1: Training alpha on within-site pairs")
     print("=" * 60)
 
-    # Freeze beta, unfreeze alpha
+    # Freeze beta, unfreeze alpha (+ effort_net)
     for p in model.beta_net.parameters():
         p.requires_grad = False
     for p in model.alpha_net.parameters():
         p.requires_grad = True
+    if model.effort_net is not None:
+        for p in model.effort_net.parameters():
+            p.requires_grad = True
 
-    # Dataloaders (within-site only, unit weights)
+    # Dataloaders (within-site only, population weights from sampler)
     s1_train, s1_val, _, _ = make_dataloaders(
         within_pairs, site_data,
         val_fraction=config.val_fraction,
         batch_size=config.batch_size,
         seed=config.seed,
-        use_unit_weights=True,
+        use_unit_weights=False,
+        use_design_weights=getattr(config, 'use_design_weights', True),
     )
 
-    s1_optimizer = Adam(
-        model.alpha_net.parameters(),
-        lr=config.learning_rate,
-        weight_decay=config.weight_decay,
-    )
+    s1_alpha_params = list(model.alpha_net.parameters())
+    s1_param_groups = [
+        {"params": s1_alpha_params,
+         "lr": config.learning_rate,
+         "weight_decay": config.weight_decay},
+    ]
+    if model.effort_net is not None:
+        s1_param_groups.append({
+            "params": list(model.effort_net.parameters()),
+            "lr": config.resolved_effort_lr,
+            "weight_decay": config.resolved_effort_wd,
+        })
+        print(f"  EffortNet LR: {config.resolved_effort_lr:.2e}  "
+              f"WD: {config.resolved_effort_wd:.2e}")
+    s1_optimizer = Adam(s1_param_groups)
     s1_scheduler = CosineAnnealingWarmRestarts(
         s1_optimizer, T_0=30, T_mult=2, eta_min=1e-6,
     )
@@ -583,10 +774,11 @@ def train_two_stage(
     s1_log_path = config.output_dir / "training_progress_stage1.log"
     s1_log_file = open(s1_log_path, "w", newline="")
     s1_log_writer = csv.DictWriter(s1_log_file, fieldnames=[
-        "epoch", "train_loss", "train_bce", "train_lb",
-        "val_loss", "val_bce", "val_accuracy",
+        "epoch", "train_loss", "train_bce", "train_lb", "train_anchor", "train_effort",
+        "val_loss", "val_bce", "val_effort", "val_accuracy",
         "alpha_mean", "alpha_std", "alpha_min", "alpha_max",
-        "lr", "alpha_grad_norm", "elapsed_sec", "timestamp",
+        "lr", "alpha_grad_norm", "weight_ess",
+        "elapsed_sec", "timestamp",
     ])
     s1_log_writer.writeheader()
     s1_log_file.flush()
@@ -604,8 +796,12 @@ def train_two_stage(
             train_m = train_one_epoch(
                 model, s1_train, s1_optimizer, site_data,
                 device, log_every=config.log_every,
+                weight_clamp_factor=config.weight_clamp_factor,
+                weight_log_normalise=config.weight_log_normalise,
             )
-            val_m = validate(model, s1_val, site_data, device)
+            val_m = validate(model, s1_val, site_data, device,
+                             weight_clamp_factor=config.weight_clamp_factor,
+                             weight_log_normalise=config.weight_log_normalise)
             s1_scheduler.step(epoch)
             lr = s1_optimizer.param_groups[0]["lr"]
             elapsed = time.time() - t_start
@@ -622,8 +818,11 @@ def train_two_stage(
                 "train_loss": f"{train_m['loss']:.6f}",
                 "train_bce": f"{train_m['bce_loss']:.6f}",
                 "train_lb": f"{train_m['lb_penalty']:.6f}",
+                "train_anchor": f"{train_m['anchor_penalty']:.6f}",
+                "train_effort": f"{train_m['effort_loss']:.6f}",
                 "val_loss": f"{val_m['loss']:.6f}",
                 "val_bce": f"{val_m['bce_loss']:.6f}",
+                "val_effort": f"{val_m['effort_loss']:.6f}",
                 "val_accuracy": f"{val_m['accuracy']:.4f}",
                 "alpha_mean": f"{val_m['alpha_mean']:.2f}",
                 "alpha_std": f"{val_m['alpha_std']:.2f}",
@@ -631,6 +830,7 @@ def train_two_stage(
                 "alpha_max": f"{val_m['alpha_max']:.2f}",
                 "lr": f"{lr:.2e}",
                 "alpha_grad_norm": f"{train_m['alpha_grad_norm']:.6f}",
+                "weight_ess": f"{train_m['weight_ess']:.1f}",
                 "elapsed_sec": f"{elapsed:.0f}",
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
             })
@@ -677,19 +877,23 @@ def train_two_stage(
     print("  STAGE 2: Training beta on between-site pairs (alpha frozen)")
     print("=" * 60)
 
-    # Freeze alpha, unfreeze beta
+    # Freeze alpha (+ effort_net), unfreeze beta
     for p in model.alpha_net.parameters():
         p.requires_grad = False
+    if model.effort_net is not None:
+        for p in model.effort_net.parameters():
+            p.requires_grad = False
     for p in model.beta_net.parameters():
         p.requires_grad = True
 
-    # Dataloaders (between-site only, unit weights — importance applied in loss)
+    # Dataloaders (between-site only, population weights from sampler)
     s2_train, s2_val, s2_train_ds, _ = make_dataloaders(
         between_pairs, site_data,
         val_fraction=config.val_fraction,
         batch_size=config.batch_size,
         seed=config.seed,
-        use_unit_weights=True,
+        use_unit_weights=False,
+        use_design_weights=getattr(config, 'use_design_weights', True),
     )
 
     # Hard-pair mining
@@ -731,7 +935,8 @@ def train_two_stage(
     s2_log_writer = csv.DictWriter(s2_log_file, fieldnames=[
         "epoch", "train_loss", "train_eta_mean",
         "val_loss", "val_eta_mean", "val_eta_std", "val_eta_min", "val_eta_max",
-        "val_auc", "lr", "beta_grad_norm", "elapsed_sec", "timestamp",
+        "val_auc", "lr", "beta_grad_norm", "eta_ac_loss", "weight_ess",
+        "elapsed_sec", "timestamp",
     ])
     s2_log_writer.writeheader()
     s2_log_file.flush()
@@ -775,9 +980,19 @@ def train_two_stage(
 
             total_loss_t = 0.0
             total_eta_t = 0.0
+            total_eta_ac_t = 0.0
             total_bg = 0.0
+            total_ess_t = 0.0
             nb = 0
             eps = 1e-7
+
+            # Retention rate keys for retrospective correction
+            _rr_keys = {
+                1: ("between_tier1_r0", "between_tier1_r1"),
+                2: ("between_tier2_r0", "between_tier2_r1"),
+                3: ("between_tier3_r0", "between_tier3_r1"),
+            }
+            rr = model.retention_rates
 
             for bi, batch in enumerate(s2_train_active):
                 batch = {k: v.to(device) for k, v in batch.items()}
@@ -791,19 +1006,47 @@ def train_two_stage(
                 p = fwd["p_match"].clamp(eps, 1.0 - eps)
                 y = batch["y"]
                 eta = fwd["eta"]
+                stratum = batch["stratum"]
 
-                # Importance weights (alpha-harmonic-mean correction)
-                ai = fwd["alpha_i"].detach()
-                aj = fwd["alpha_j"].detach()
-                ah = 2.0 * ai * aj / (ai + aj + eps)
-                imp_w = torch.where(y < 0.5, 1.0 / ah, torch.ones_like(ah))
+                # ---- Retrospective Bernoulli correction per stratum ----
+                p_corr = p.clone()
+                for s_idx, (r0_key, r1_key) in _rr_keys.items():
+                    mask_s = stratum == s_idx
+                    if not mask_s.any():
+                        continue
+                    r0 = rr.get(r0_key, 1.0)
+                    r1 = rr.get(r1_key, 1.0)
+                    if r0 != 1.0 or r1 != 1.0:
+                        p_s = p[mask_s]
+                        p_corr[mask_s] = (
+                            r0 * p_s / (r0 * p_s + r1 * (1.0 - p_s) + eps)
+                        ).clamp(eps, 1.0 - eps)
 
-                # Hard-pair mining importance correction
+                log_p_corr = torch.log(p_corr)
+                log_1m_p_corr = torch.log(1.0 - p_corr)
+                bce = -(1.0 - y) * log_p_corr - y * log_1m_p_corr
+
+                # Design weights (proper IPW from sampler) + optional mining correction
+                imp_w = batch["design_w"].clone()
                 if mining_active and "mining_iw" in batch:
                     imp_w = imp_w * batch["mining_iw"]
 
-                bce = -(1.0 - y) * torch.log(p) - y * torch.log(1.0 - p)
+                # Stabilise and compute ESS
+                imp_w, batch_ess = _stabilise_weights(
+                    imp_w, config.weight_clamp_factor,
+                    config.weight_log_normalise)
+                total_ess_t += batch_ess
+
                 loss = (imp_w * bce).sum() / imp_w.sum()
+
+                # Anti-collapse regularizer: -λ · mean(log(η + ε))
+                eta_ac_loss = torch.tensor(0.0, device=p.device)
+                if model.eta_anti_collapse_lambda > 0:
+                    eta_ac_loss = (
+                        -model.eta_anti_collapse_lambda
+                        * torch.log(eta + 1e-4).mean()
+                    )
+                    loss = loss + eta_ac_loss
 
                 # Geographic parameter L2 penalty (beta only during Stage 2)
                 if model.geo_penalty_beta > 0 and model.K_env_env > 0:
@@ -824,6 +1067,7 @@ def train_two_stage(
 
                 total_loss_t += loss.item()
                 total_eta_t += eta.mean().item()
+                total_eta_ac_t += eta_ac_loss.item()
                 nb += 1
 
                 if config.log_every > 0 and (bi + 1) % config.log_every == 0:
@@ -835,11 +1079,15 @@ def train_two_stage(
             train_m2 = {
                 "loss": total_loss_t / max(nb, 1),
                 "eta_mean": total_eta_t / max(nb, 1),
+                "eta_ac_loss": total_eta_ac_t / max(nb, 1),
                 "beta_grad_norm": total_bg / max(nb, 1),
+                "weight_ess": total_ess_t / max(nb, 1),
             }
 
             # ---- Validate ----
-            val_m2 = _stage2_validate(model, s2_val, site_data, device)
+            val_m2 = _stage2_validate(model, s2_val, site_data, device,
+                                     weight_clamp_factor=config.weight_clamp_factor,
+                                     weight_log_normalise=config.weight_log_normalise)
             s2_scheduler.step(epoch)
             lr = s2_optimizer.param_groups[0]["lr"]
             elapsed = time.time() - t_start2
@@ -864,6 +1112,8 @@ def train_two_stage(
                 "val_auc": f"{val_m2['auc']:.4f}",
                 "lr": f"{lr:.2e}",
                 "beta_grad_norm": f"{train_m2['beta_grad_norm']:.6f}",
+                "eta_ac_loss": f"{train_m2['eta_ac_loss']:.6f}",
+                "weight_ess": f"{train_m2['weight_ess']:.1f}",
                 "elapsed_sec": f"{elapsed:.0f}",
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
             })
@@ -959,12 +1209,14 @@ def train_cyclic(
     s1_train, s1_val, _, _ = make_dataloaders(
         within_pairs, site_data,
         val_fraction=config.val_fraction, batch_size=config.batch_size,
-        seed=config.seed, use_unit_weights=True,
+        seed=config.seed, use_unit_weights=False,
+        use_design_weights=getattr(config, 'use_design_weights', True),
     )
     s2_train, s2_val, s2_train_ds, _ = make_dataloaders(
         between_pairs, site_data,
         val_fraction=config.val_fraction, batch_size=config.batch_size,
-        seed=config.seed, use_unit_weights=True,
+        seed=config.seed, use_unit_weights=False,
+        use_design_weights=getattr(config, 'use_design_weights', True),
     )
 
     # Hard-pair mining (between-site pairs only)
@@ -991,14 +1243,16 @@ def train_cyclic(
         "cycle", "phase", "phase_epoch", "global_epoch",
         "train_loss", "val_loss",
         # Alpha phase columns
-        "train_bce", "train_lb", "val_bce", "val_accuracy",
+        "train_bce", "train_lb", "train_anchor", "train_effort",
+        "val_bce", "val_effort", "val_accuracy",
         "alpha_mean", "alpha_std", "alpha_min", "alpha_max",
         "alpha_grad_norm",
         # Beta phase columns
         "train_eta_mean", "val_eta_mean", "val_eta_std",
-        "val_eta_min", "val_eta_max", "val_auc",
-        "beta_grad_norm",
+        "val_eta_min", "val_eta_max", "val_auc", "val_auc_s123",
+        "beta_grad_norm", "eta_ac_loss",
         # Common
+        "weight_ess",
         "lr", "elapsed_sec", "timestamp",
     ])
     log_writer.writeheader()
@@ -1008,12 +1262,22 @@ def train_cyclic(
 
     # ---- Set up optimizers (persistent across cycles for momentum state) ----
 
-    # Alpha optimizer
-    alpha_optimizer = Adam(
-        model.alpha_net.parameters(),
-        lr=config.learning_rate,
-        weight_decay=config.weight_decay,
-    )
+    # Alpha optimizer (effort_net gets its own param group with higher LR)
+    alpha_opt_params = list(model.alpha_net.parameters())
+    alpha_param_groups = [
+        {"params": alpha_opt_params,
+         "lr": config.learning_rate,
+         "weight_decay": config.weight_decay},
+    ]
+    if model.effort_net is not None:
+        alpha_param_groups.append({
+            "params": list(model.effort_net.parameters()),
+            "lr": config.resolved_effort_lr,
+            "weight_decay": config.resolved_effort_wd,
+        })
+        print(f"  EffortNet LR: {config.resolved_effort_lr:.2e}  "
+              f"WD: {config.resolved_effort_wd:.2e}")
+    alpha_optimizer = Adam(alpha_param_groups)
     # Step-based LR decay: halve every 200 global epochs
     alpha_scheduler = torch.optim.lr_scheduler.StepLR(
         alpha_optimizer, step_size=200, gamma=0.5,
@@ -1034,11 +1298,13 @@ def train_cyclic(
     )
 
     # Beta gradient amplification
-    s2_grad_scale = config.stage2_beta_grad_scale
-    if s2_grad_scale != 1.0:
+    beta_grad_scale = config.beta_grad_scale
+    if beta_grad_scale != 1.0:
         for param in model.beta_net.parameters():
-            param.register_hook(lambda g, s=s2_grad_scale: g * s)
-        print(f"  Beta gradient amplification: {s2_grad_scale}×")
+            param.register_hook(lambda g, s=beta_grad_scale: g * s)
+        print(f"  Beta gradient amplification: {beta_grad_scale}×")
+    else:
+        print("  Beta gradient amplification: OFF (beta_grad_scale=1.0)")
 
     t_start = time.time()
     global_epoch = 0
@@ -1057,13 +1323,10 @@ def train_cyclic(
           f"alpha_epochs/cycle={n_alpha_epochs}, "
           f"beta_epochs/cycle={n_beta_epochs}, "
           f"tol={tol:.1e}")
+    beta_patience = config.cycle_beta_patience
     print(f"  Total epoch budget: {max_cycles * (n_alpha_epochs + n_beta_epochs)}")
+    print(f"  Beta patience (per phase): {beta_patience} epochs")
     print(f"{'='*60}\n")
-
-    # Disable beta early stopping when phases are short (< 20 epochs)
-    use_beta_early_stop = n_beta_epochs >= 20
-    if not use_beta_early_stop:
-        print(f"  (β early stopping disabled — phases too short)")
 
     converged = False
 
@@ -1083,6 +1346,9 @@ def train_cyclic(
                 p.requires_grad = False
             for p in model.alpha_net.parameters():
                 p.requires_grad = True
+            if model.effort_net is not None:
+                for p in model.effort_net.parameters():
+                    p.requires_grad = True
 
             s1_best_loss_this_cycle = float("inf")
 
@@ -1092,8 +1358,12 @@ def train_cyclic(
                 train_m = train_one_epoch(
                     model, s1_train, alpha_optimizer, site_data,
                     device, log_every=config.log_every,
+                    weight_clamp_factor=config.weight_clamp_factor,
+                    weight_log_normalise=config.weight_log_normalise,
                 )
-                val_m = validate(model, s1_val, site_data, device)
+                val_m = validate(model, s1_val, site_data, device,
+                                 weight_clamp_factor=config.weight_clamp_factor,
+                                 weight_log_normalise=config.weight_log_normalise)
                 alpha_scheduler.step()
                 lr = alpha_optimizer.param_groups[0]["lr"]
                 elapsed = time.time() - t_start
@@ -1114,7 +1384,10 @@ def train_cyclic(
                     "val_loss": f"{val_m['loss']:.6f}",
                     "train_bce": f"{train_m['bce_loss']:.6f}",
                     "train_lb": f"{train_m['lb_penalty']:.6f}",
+                    "train_anchor": f"{train_m['anchor_penalty']:.6f}",
+                    "train_effort": f"{train_m['effort_loss']:.6f}",
                     "val_bce": f"{val_m['bce_loss']:.6f}",
+                    "val_effort": f"{val_m['effort_loss']:.6f}",
                     "val_accuracy": f"{val_m['accuracy']:.4f}",
                     "alpha_mean": f"{val_m['alpha_mean']:.2f}",
                     "alpha_std": f"{val_m['alpha_std']:.2f}",
@@ -1123,8 +1396,9 @@ def train_cyclic(
                     "alpha_grad_norm": f"{train_m['alpha_grad_norm']:.6f}",
                     # Beta columns blank for alpha phase
                     "train_eta_mean": "", "val_eta_mean": "", "val_eta_std": "",
-                    "val_eta_min": "", "val_eta_max": "", "val_auc": "",
-                    "beta_grad_norm": "",
+                    "val_eta_min": "", "val_eta_max": "", "val_auc": "", "val_auc_s123": "",
+                    "beta_grad_norm": "", "eta_ac_loss": "",
+                    "weight_ess": f"{train_m['weight_ess']:.1f}",
                     "lr": f"{lr:.2e}",
                     "elapsed_sec": f"{elapsed:.0f}",
                     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -1165,6 +1439,9 @@ def train_cyclic(
 
             for p in model.alpha_net.parameters():
                 p.requires_grad = False
+            if model.effort_net is not None:
+                for p in model.effort_net.parameters():
+                    p.requires_grad = False
             for p in model.beta_net.parameters():
                 p.requires_grad = True
 
@@ -1202,8 +1479,18 @@ def train_cyclic(
 
                 total_loss_t = 0.0
                 total_eta_t = 0.0
+                total_eta_ac_t = 0.0
                 total_bg = 0.0
+                total_ess_t = 0.0
                 nb = 0
+
+                # Retention rate keys for retrospective correction
+                _rr_keys = {
+                    1: ("between_tier1_r0", "between_tier1_r1"),
+                    2: ("between_tier2_r0", "between_tier2_r1"),
+                    3: ("between_tier3_r0", "between_tier3_r1"),
+                }
+                rr = model.retention_rates
 
                 for bi, batch in enumerate(s2_train_mined):
                     batch = {k: v.to(device) for k, v in batch.items()}
@@ -1218,21 +1505,49 @@ def train_cyclic(
                     p = fwd["p_match"].clamp(eps, 1.0 - eps)
                     y = batch["y"]
                     eta = fwd["eta"]
+                    stratum = batch["stratum"]
 
-                    # Importance weights (alpha-harmonic-mean correction)
-                    ai = fwd["alpha_i"].detach()
-                    aj = fwd["alpha_j"].detach()
-                    ah = 2.0 * ai * aj / (ai + aj + eps)
-                    imp_w = torch.where(y < 0.5, 1.0 / ah,
-                                        torch.ones_like(ah))
+                    # ---- Retrospective Bernoulli correction per stratum ----
+                    # Apply p → p_samp = r0*p / (r0*p + r1*(1-p))
+                    # for each between-site tier using sampler retention rates.
+                    p_corr = p.clone()
+                    for s_idx, (r0_key, r1_key) in _rr_keys.items():
+                        mask_s = stratum == s_idx
+                        if not mask_s.any():
+                            continue
+                        r0 = rr.get(r0_key, 1.0)
+                        r1 = rr.get(r1_key, 1.0)
+                        if r0 != 1.0 or r1 != 1.0:
+                            p_s = p[mask_s]
+                            p_corr[mask_s] = (
+                                r0 * p_s / (r0 * p_s + r1 * (1.0 - p_s) + eps)
+                            ).clamp(eps, 1.0 - eps)
 
-                    # Hard-pair mining importance correction
+                    log_p_corr = torch.log(p_corr)
+                    log_1m_p_corr = torch.log(1.0 - p_corr)
+                    bce = -(1.0 - y) * log_p_corr - y * log_1m_p_corr
+
+                    # Design weights (proper IPW from sampler) + optional mining correction
+                    imp_w = batch["design_w"].clone()
                     if mining_active and "mining_iw" in batch:
                         imp_w = imp_w * batch["mining_iw"]
 
-                    bce = (-(1.0 - y) * torch.log(p)
-                           - y * torch.log(1.0 - p))
+                    # Stabilise and compute ESS
+                    imp_w, batch_ess = _stabilise_weights(
+                        imp_w, config.weight_clamp_factor,
+                        config.weight_log_normalise)
+                    total_ess_t += batch_ess
+
                     loss = (imp_w * bce).sum() / imp_w.sum()
+
+                    # Anti-collapse regularizer: -λ · mean(log(η + ε))
+                    eta_ac_loss = torch.tensor(0.0, device=p.device)
+                    if model.eta_anti_collapse_lambda > 0:
+                        eta_ac_loss = (
+                            -model.eta_anti_collapse_lambda
+                            * torch.log(eta + 1e-4).mean()
+                        )
+                        loss = loss + eta_ac_loss
 
                     # Geographic parameter L2 penalty (beta only during Phase B)
                     if model.geo_penalty_beta > 0 and model.K_env_env > 0:
@@ -1247,7 +1562,14 @@ def train_cyclic(
                     bg = [pp.grad.norm().item()
                           for pp in model.beta_net.parameters()
                           if pp.grad is not None]
-                    total_bg += sum(bg) / max(len(bg), 1)
+                    avg_bg = sum(bg) / max(len(bg), 1)
+                    total_bg += avg_bg
+
+                    # One-time hook verification (first batch, first beta epoch, first cycle)
+                    if bi == 0 and ep == 1 and cycle == 1:
+                        print(f"  [HOOK CHECK] beta_grad_scale={config.beta_grad_scale}, "
+                              f"avg_param_grad_norm={avg_bg:.6f}  "
+                              f"(expect ~{0.0005 * config.beta_grad_scale:.4f} if hooks firing)")
 
                     nn.utils.clip_grad_norm_(
                         model.beta_net.parameters(), max_norm=5.0)
@@ -1255,6 +1577,7 @@ def train_cyclic(
 
                     total_loss_t += loss.item()
                     total_eta_t += eta.mean().item()
+                    total_eta_ac_t += eta_ac_loss.item()
                     nb += 1
 
                     if (config.log_every > 0
@@ -1267,10 +1590,15 @@ def train_cyclic(
                 train_m2 = {
                     "loss": total_loss_t / max(nb, 1),
                     "eta_mean": total_eta_t / max(nb, 1),
+                    "eta_ac_loss": total_eta_ac_t / max(nb, 1),
                     "beta_grad_norm": total_bg / max(nb, 1),
+                    "weight_ess": total_ess_t / max(nb, 1),
                 }
 
-                val_m2 = _stage2_validate(model, s2_val, site_data, device)
+                val_m2 = _stage2_validate(
+                    model, s2_val, site_data, device,
+                    weight_clamp_factor=config.weight_clamp_factor,
+                    weight_log_normalise=config.weight_log_normalise)
                 beta_scheduler.step()
                 lr = beta_optimizer.param_groups[0]["lr"]
                 elapsed = time.time() - t_start
@@ -1283,7 +1611,8 @@ def train_cyclic(
                         f"η=[{val_m2['eta_min']:.2f}, "
                         f"{val_m2['eta_mean']:.2f}, "
                         f"{val_m2['eta_max']:.2f}]  "
-                        f"AUC={val_m2['auc']:.3f}"
+                        f"AUC={val_m2['auc']:.3f} "
+                        f"AUC_s123={val_m2['auc_s123']:.3f}"
                     )
 
                 log_writer.writerow({
@@ -1292,7 +1621,8 @@ def train_cyclic(
                     "train_loss": f"{train_m2['loss']:.6f}",
                     "val_loss": f"{val_m2['loss']:.6f}",
                     # Alpha columns blank
-                    "train_bce": "", "train_lb": "", "val_bce": "",
+                    "train_bce": "", "train_lb": "", "train_anchor": "", "train_effort": "",
+                    "val_bce": "", "val_effort": "",
                     "val_accuracy": "",
                     "alpha_mean": "", "alpha_std": "",
                     "alpha_min": "", "alpha_max": "",
@@ -1304,7 +1634,10 @@ def train_cyclic(
                     "val_eta_min": f"{val_m2['eta_min']:.6f}",
                     "val_eta_max": f"{val_m2['eta_max']:.6f}",
                     "val_auc": f"{val_m2['auc']:.4f}",
+                    "val_auc_s123": f"{val_m2['auc_s123']:.4f}",
                     "beta_grad_norm": f"{train_m2['beta_grad_norm']:.6f}",
+                    "eta_ac_loss": f"{train_m2['eta_ac_loss']:.6f}",
+                    "weight_ess": f"{train_m2['weight_ess']:.1f}",
                     "lr": f"{lr:.2e}",
                     "elapsed_sec": f"{elapsed:.0f}",
                     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -1328,10 +1661,9 @@ def train_cyclic(
                               f"(val_loss={overall_best_loss:.6f}) ***")
                 else:
                     s2_patience_ctr += 1
-                    if use_beta_early_stop and s2_patience_ctr >= config.stage2_patience:
-                        print(f"      Beta early stopping "
-                              f"(no improvement for "
-                              f"{config.stage2_patience} epochs)")
+                    if beta_patience > 0 and s2_patience_ctr >= beta_patience:
+                        print(f"      Beta early stopping at epoch {ep}/{n_beta_epochs} "
+                              f"(no improvement for {beta_patience} epochs)")
                         break
 
             # ==============================================================
@@ -1351,6 +1683,7 @@ def train_cyclic(
                       f"beta_loss={cycle_loss:.6f}, "
                       f"rel_change={rel_change:.2e}, "
                       f"best_overall={overall_best_loss:.6f}, "
+                      f"beta_epochs_used={ep}/{n_beta_epochs}, "
                       f"time={elapsed:.0f}s")
 
             state.history.append({
@@ -1461,14 +1794,16 @@ def train_finetune_geo(
             existing_params.append(p)
 
     # Effort params — optionally frozen via finetune_freeze_effort
+    # When trainable, effort gets its own param group with dedicated LR.
     freeze_effort = getattr(config, 'finetune_freeze_effort', False)
+    effort_params = []
     if hasattr(model, 'effort_net') and model.effort_net is not None:
         for p in model.effort_net.parameters():
             if freeze_effort:
                 p.requires_grad = False
             else:
                 p.requires_grad = True
-                existing_params.append(p)
+                effort_params.append(p)
 
     # Beta params: existing per-dim components vs new geo components
     from src.clesso_nn.model import AdditiveBetaNet, FactoredDeepBetaNet
@@ -1521,10 +1856,12 @@ def train_finetune_geo(
                 existing_params.append(p)
 
     n_existing = sum(p.numel() for p in existing_params)
+    n_effort = sum(p.numel() for p in effort_params)
     n_new = sum(p.numel() for p in new_geo_params)
     n_frozen = sum(p.numel() for p in model.parameters() if not p.requires_grad)
     print(f"  Freeze existing: {freeze_existing}")
     print(f"  Trainable existing params: {n_existing:,}")
+    print(f"  Trainable effort params:   {n_effort:,}")
     print(f"  Trainable new geo params:  {n_new:,}")
     print(f"  Frozen params:             {n_frozen:,}")
 
@@ -1535,6 +1872,14 @@ def train_finetune_geo(
             {"params": existing_params, "lr": config.finetune_lr,
              "weight_decay": config.weight_decay},
         )
+    if effort_params:
+        param_groups.append(
+            {"params": effort_params,
+             "lr": config.resolved_effort_lr,
+             "weight_decay": config.resolved_effort_wd},
+        )
+        print(f"  EffortNet LR (finetune): {config.resolved_effort_lr:.2e}  "
+              f"WD: {config.resolved_effort_wd:.2e}")
     if new_geo_params:
         param_groups.append(
             {"params": new_geo_params, "lr": new_lr,
@@ -1558,13 +1903,15 @@ def train_finetune_geo(
     all_train, all_val, _, _ = make_dataloaders(
         pairs, site_data,
         val_fraction=config.val_fraction, batch_size=config.batch_size,
-        seed=config.seed, use_unit_weights=True,
+        seed=config.seed, use_unit_weights=False,
+        use_design_weights=getattr(config, 'use_design_weights', True),
     )
     # Between-site val loader for AUC tracking
     _, s2_val, _, _ = make_dataloaders(
         between_pairs, site_data,
         val_fraction=config.val_fraction, batch_size=config.batch_size,
-        seed=config.seed, use_unit_weights=True,
+        seed=config.seed, use_unit_weights=False,
+        use_design_weights=getattr(config, 'use_design_weights', True),
     )
 
     # Progress log
@@ -1572,9 +1919,10 @@ def train_finetune_geo(
     log_file = open(log_path, "w", newline="")
     log_writer = csv.DictWriter(log_file, fieldnames=[
         "epoch", "train_loss", "val_loss",
-        "val_bce", "val_accuracy",
+        "val_bce", "val_effort", "val_accuracy",
         "alpha_mean", "alpha_std", "alpha_min", "alpha_max",
         "val_eta_mean", "val_eta_std", "val_auc",
+        "weight_ess",
         "lr_existing", "lr_new", "elapsed_sec", "timestamp",
     ])
     log_writer.writeheader()
@@ -1601,6 +1949,7 @@ def train_finetune_geo(
         # ---- Train ----
         model.train()
         total_loss_t = 0.0
+        total_ess_t = 0.0
         nb = 0
 
         for batch in all_train:
@@ -1614,33 +1963,77 @@ def train_finetune_geo(
                                 w_i=w_i, w_j=w_j)
             p = fwd["p_match"].clamp(eps, 1.0 - eps)
             y = batch["y"]
+            stratum = batch["stratum"]
 
-            # Importance weighting for between-site pairs
-            is_between = batch["is_within"] < 0.5
-            ai = fwd["alpha_i"].detach()
-            aj = fwd["alpha_j"].detach()
-            ah = 2.0 * ai * aj / (ai + aj + eps)
-            imp_w = torch.where(
-                is_between & (y < 0.5),
-                1.0 / ah,
-                torch.ones_like(ah),
-            )
+            # ---- Retrospective Bernoulli correction per stratum ----
+            _rr_keys = {
+                0: ("within_r0", "within_r1"),
+                1: ("between_tier1_r0", "between_tier1_r1"),
+                2: ("between_tier2_r0", "between_tier2_r1"),
+                3: ("between_tier3_r0", "between_tier3_r1"),
+            }
+            rr = model.retention_rates
+            p_corr = p.clone()
+            for s_idx, (r0_key, r1_key) in _rr_keys.items():
+                mask_s = stratum == s_idx
+                if not mask_s.any():
+                    continue
+                r0 = rr.get(r0_key, 1.0)
+                r1 = rr.get(r1_key, 1.0)
+                if r0 != 1.0 or r1 != 1.0:
+                    p_s = p[mask_s]
+                    p_corr[mask_s] = (
+                        r0 * p_s / (r0 * p_s + r1 * (1.0 - p_s) + eps)
+                    ).clamp(eps, 1.0 - eps)
 
-            bce = -(1.0 - y) * torch.log(p) - y * torch.log(1.0 - p)
+            log_p_corr = torch.log(p_corr)
+            log_1m_p_corr = torch.log(1.0 - p_corr)
+            bce = -(1.0 - y) * log_p_corr - y * log_1m_p_corr
 
-            # Alpha lower-bound penalty
+            # Design weights (proper IPW from sampler)
+            imp_w = batch["design_w"].clone()
+
+            # Stabilise and compute ESS
+            imp_w, batch_ess = _stabilise_weights(
+                imp_w, config.weight_clamp_factor,
+                config.weight_log_normalise)
+            total_ess_t += batch_ess
+
+            bce_weighted = (imp_w * bce).sum() / imp_w.sum()
+
+            # Pre-compute α_env for lb + anchor penalties
+            alpha_env_i = alpha_env_j = None
+            if model.alpha_lb_lambda > 0.0 or model.alpha_anchor_lambda > 0.0:
+                alpha_env_i = model._compute_alpha_env_only(z_i)
+                alpha_env_j = model._compute_alpha_env_only(z_j)
+
+            # Alpha lower-bound penalty on α_env (log-space: scale-invariant)
             lb_penalty = torch.tensor(0.0, device=device)
-            if model.alpha_lb_lambda > 0.0:
-                alpha_i_obs = S_obs[batch["site_i"]]
-                alpha_j_obs = S_obs[batch["site_j"]]
-                viol_i = torch.nn.functional.softplus(
-                    10.0 * (alpha_i_obs - fwd["alpha_i"])) / 10.0
-                viol_j = torch.nn.functional.softplus(
-                    10.0 * (alpha_j_obs - fwd["alpha_j"])) / 10.0
+            if model.alpha_lb_lambda > 0.0 and alpha_env_i is not None:
+                s_i_lb = S_obs[batch["site_i"]]
+                s_j_lb = S_obs[batch["site_j"]]
+                eps_lb = 1.0
+                log_gap_i = torch.log(s_i_lb.clamp(min=eps_lb)) - torch.log(alpha_env_i)
+                log_gap_j = torch.log(s_j_lb.clamp(min=eps_lb)) - torch.log(alpha_env_j)
+                viol_i = torch.nn.functional.softplus(10.0 * log_gap_i) / 10.0
+                viol_j = torch.nn.functional.softplus(10.0 * log_gap_j) / 10.0
                 lb_penalty = model.alpha_lb_lambda * (
                     viol_i.pow(2).mean() + viol_j.pow(2).mean())
 
-            loss = (imp_w * bce).sum() / imp_w.sum() + lb_penalty
+            # Alpha anchor penalty on α_env (effort-stripped true richness)
+            anchor_penalty = torch.tensor(0.0, device=device)
+            if model.alpha_anchor_lambda > 0.0 and alpha_env_i is not None:
+                s_i = S_obs[batch["site_i"]].clamp(min=1.0)
+                s_j = S_obs[batch["site_j"]].clamp(min=1.0)
+                tau = model.alpha_anchor_tolerance
+                gap_i = (torch.log(alpha_env_i) - torch.log(s_i)).abs() - tau
+                gap_j = (torch.log(alpha_env_j) - torch.log(s_j)).abs() - tau
+                viol_i_a = torch.nn.functional.relu(gap_i)
+                viol_j_a = torch.nn.functional.relu(gap_j)
+                anchor_penalty = model.alpha_anchor_lambda * (
+                    viol_i_a.pow(2).mean() + viol_j_a.pow(2).mean())
+
+            loss = bce_weighted + lb_penalty + anchor_penalty
 
             # Geographic parameter L2 penalty (separate from weight decay)
             if model.geo_penalty_alpha > 0 or model.geo_penalty_beta > 0:
@@ -1655,13 +2048,19 @@ def train_finetune_geo(
             optimizer.step()
 
             total_loss_t += loss.item()
+            total_ess_t += batch_ess
             nb += 1
 
         train_loss = total_loss_t / max(nb, 1)
+        train_ess = total_ess_t / max(nb, 1)
 
         # ---- Validate (all pairs for overall loss, between-site for AUC) ----
-        val_m = validate(model, all_val, site_data, device)
-        val_s2 = _stage2_validate(model, s2_val, site_data, device)
+        val_m = validate(model, all_val, site_data, device,
+                         weight_clamp_factor=config.weight_clamp_factor,
+                         weight_log_normalise=config.weight_log_normalise)
+        val_s2 = _stage2_validate(model, s2_val, site_data, device,
+                                  weight_clamp_factor=config.weight_clamp_factor,
+                                  weight_log_normalise=config.weight_log_normalise)
         scheduler.step()
 
         lr_exist = optimizer.param_groups[0]["lr"]
@@ -1674,6 +2073,7 @@ def train_finetune_geo(
             "train_loss": f"{train_loss:.6f}",
             "val_loss": f"{val_m['loss']:.6f}",
             "val_bce": f"{val_m['bce_loss']:.6f}",
+            "val_effort": f"{val_m['effort_loss']:.6f}",
             "val_accuracy": f"{val_m['accuracy']:.4f}",
             "alpha_mean": f"{val_m['alpha_mean']:.2f}",
             "alpha_std": f"{val_m['alpha_std']:.2f}",
@@ -1682,6 +2082,7 @@ def train_finetune_geo(
             "val_eta_mean": f"{val_s2['eta_mean']:.6f}",
             "val_eta_std": f"{val_s2['eta_std']:.6f}",
             "val_auc": f"{val_s2['auc']:.4f}",
+            "weight_ess": f"{train_ess:.1f}",
             "lr_existing": f"{lr_exist:.2e}",
             "lr_new": f"{lr_new_val:.2e}",
             "elapsed_sec": f"{elapsed:.0f}",
@@ -1740,5 +2141,470 @@ def train_finetune_geo(
     improvement = (best_phase1_loss - state.best_val_loss) / best_phase1_loss * 100
     print(f"  Improvement:       {improvement:+.2f}%")
     print(f"  Training time:     {total_time:.0f}s ({total_time/60:.1f} min)")
+
+    return state
+
+
+# --------------------------------------------------------------------------
+# Joint fine-tune — alpha+beta together on same env/effort variables
+# --------------------------------------------------------------------------
+
+def train_finetune_joint(
+    model: CLESSONet,
+    pairs,  # pd.DataFrame — all pairs
+    site_data: SiteData,
+    config: CLESSONNConfig,
+    best_phase1_loss: float = float("inf"),
+) -> TrainingState:
+    """Joint fine-tune after cyclic Phase 1 — all params trainable, same features.
+
+    Unlike train_finetune_geo which expands the model with geographic
+    features, this trains alpha + beta *jointly* on the exact same
+    env/effort variables used in Phase 1.  The idea is to let both
+    networks find a joint optimum now that cycling has given each a
+    good initialisation.
+
+    Uses importance-weighted BCE on ALL pairs (within + between) so both
+    alpha and beta receive gradients simultaneously.
+    """
+    import pandas as pd
+
+    device = config.resolve_device()
+    print(f"\n{'='*60}")
+    print(f"  PHASE 2: Joint Fine-tune (same env/effort variables)")
+    print(f"{'='*60}")
+
+    alpha_lr = config.finetune_lr * config.finetune_joint_alpha_lr_mult
+    beta_lr = config.finetune_lr * config.finetune_joint_beta_lr_mult
+    print(f"  LR alpha:  {alpha_lr:.2e}")
+    print(f"  LR beta:   {beta_lr:.2e}")
+    if model.effort_net is not None:
+        print(f"  LR effort: {config.resolved_effort_lr:.2e}")
+    print(f"  Max epochs: {config.finetune_max_epochs}  "
+          f"Patience: {config.finetune_patience}")
+
+    model = model.to(device)
+
+    # All parameters trainable
+    for p in model.parameters():
+        p.requires_grad = True
+
+    # Build differential LR param groups
+    alpha_params = list(model.alpha_net.parameters())
+    beta_params = list(model.beta_net.parameters())
+    effort_params = []
+    if model.effort_net is not None:
+        effort_params = list(model.effort_net.parameters())
+
+    param_groups = [
+        {"params": alpha_params, "lr": alpha_lr,
+         "weight_decay": config.weight_decay},
+        {"params": beta_params, "lr": beta_lr,
+         "weight_decay": config.weight_decay},
+    ]
+    if effort_params:
+        param_groups.append(
+            {"params": effort_params,
+             "lr": config.resolved_effort_lr,
+             "weight_decay": config.resolved_effort_wd},
+        )
+
+    n_alpha = sum(p.numel() for p in alpha_params)
+    n_beta = sum(p.numel() for p in beta_params)
+    n_effort = sum(p.numel() for p in effort_params)
+    print(f"  Alpha params: {n_alpha:,}  Beta params: {n_beta:,}  "
+          f"Effort params: {n_effort:,}")
+
+    optimizer = Adam(param_groups)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
+
+    # Build dataloaders on SAME site_data (no geo expansion)
+    between_pairs = pairs[pairs["is_within"] == 0].reset_index(drop=True)
+
+    all_train, all_val, _, _ = make_dataloaders(
+        pairs, site_data,
+        val_fraction=config.val_fraction, batch_size=config.batch_size,
+        seed=config.seed, use_unit_weights=False,
+        use_design_weights=getattr(config, 'use_design_weights', True),
+    )
+    _, s2_val, _, _ = make_dataloaders(
+        between_pairs, site_data,
+        val_fraction=config.val_fraction, batch_size=config.batch_size,
+        seed=config.seed, use_unit_weights=False,
+        use_design_weights=getattr(config, 'use_design_weights', True),
+    )
+
+    # Progress log
+    log_path = config.output_dir / "training_progress_finetune.log"
+    log_file = open(log_path, "w", newline="")
+    log_writer = csv.DictWriter(log_file, fieldnames=[
+        "epoch", "train_loss", "val_loss",
+        "val_bce", "val_effort", "val_accuracy",
+        "alpha_mean", "alpha_std", "alpha_min", "alpha_max",
+        "val_eta_mean", "val_eta_std", "val_auc", "val_auc_s123",
+        "weight_ess",
+        "lr_alpha", "lr_beta", "elapsed_sec", "timestamp",
+    ])
+    log_writer.writeheader()
+    log_file.flush()
+    print(f"  Joint finetune log: {log_path}")
+
+    # Checkpoint paths
+    best_model_path = config.output_dir / "best_model.pt"
+    phase2_ckpt_path = config.output_dir / "best_model_phase2.pt"
+
+    state = TrainingState()
+    best_val_loss = float("inf")
+    patience_ctr = 0
+    eps = 1e-7
+    t_start = time.time()
+
+    Z = site_data.Z.to(device)
+    S_obs = site_data.S_obs.to(device)
+    W = site_data.W.to(device) if site_data.W is not None else None
+
+    for epoch in range(1, config.finetune_max_epochs + 1):
+        # ---- Train ----
+        model.train()
+        total_loss_t = 0.0
+        total_ess_t = 0.0
+        nb = 0
+
+        for batch in all_train:
+            batch = {k: v.to(device) for k, v in batch.items()}
+            z_i = Z[batch["site_i"]]
+            z_j = Z[batch["site_j"]]
+            w_i = W[batch["site_i"]] if W is not None else None
+            w_j = W[batch["site_j"]] if W is not None else None
+
+            fwd = model.forward(z_i, z_j, batch["env_diff"], batch["is_within"],
+                                w_i=w_i, w_j=w_j)
+            p = fwd["p_match"].clamp(eps, 1.0 - eps)
+            y = batch["y"]
+            stratum = batch["stratum"]
+
+            # ---- Retrospective Bernoulli correction per stratum ----
+            _rr_keys = {
+                0: ("within_r0", "within_r1"),
+                1: ("between_tier1_r0", "between_tier1_r1"),
+                2: ("between_tier2_r0", "between_tier2_r1"),
+                3: ("between_tier3_r0", "between_tier3_r1"),
+            }
+            rr = model.retention_rates
+            p_corr = p.clone()
+            for s_idx, (r0_key, r1_key) in _rr_keys.items():
+                mask_s = stratum == s_idx
+                if not mask_s.any():
+                    continue
+                r0 = rr.get(r0_key, 1.0)
+                r1 = rr.get(r1_key, 1.0)
+                if r0 != 1.0 or r1 != 1.0:
+                    p_s = p[mask_s]
+                    p_corr[mask_s] = (
+                        r0 * p_s / (r0 * p_s + r1 * (1.0 - p_s) + eps)
+                    ).clamp(eps, 1.0 - eps)
+
+            log_p_corr = torch.log(p_corr)
+            log_1m_p_corr = torch.log(1.0 - p_corr)
+            bce = -(1.0 - y) * log_p_corr - y * log_1m_p_corr
+
+            # Design weights
+            imp_w = batch["design_w"].clone()
+            imp_w, batch_ess = _stabilise_weights(
+                imp_w, config.weight_clamp_factor,
+                config.weight_log_normalise)
+            total_ess_t += batch_ess
+
+            bce_weighted = (imp_w * bce).sum() / imp_w.sum()
+
+            # Pre-compute α_env for lb + anchor penalties
+            alpha_env_i = alpha_env_j = None
+            if model.alpha_lb_lambda > 0.0 or model.alpha_anchor_lambda > 0.0:
+                alpha_env_i = model._compute_alpha_env_only(z_i)
+                alpha_env_j = model._compute_alpha_env_only(z_j)
+
+            # Alpha lower-bound penalty on α_env (true richness must ≥ S_obs)
+            lb_penalty = torch.tensor(0.0, device=device)
+            if model.alpha_lb_lambda > 0.0 and alpha_env_i is not None:
+                s_i_lb = S_obs[batch["site_i"]]
+                s_j_lb = S_obs[batch["site_j"]]
+                eps_lb = 1.0
+                log_gap_i = torch.log(s_i_lb.clamp(min=eps_lb)) - torch.log(alpha_env_i)
+                log_gap_j = torch.log(s_j_lb.clamp(min=eps_lb)) - torch.log(alpha_env_j)
+                viol_i = torch.nn.functional.softplus(10.0 * log_gap_i) / 10.0
+                viol_j = torch.nn.functional.softplus(10.0 * log_gap_j) / 10.0
+                lb_penalty = model.alpha_lb_lambda * (
+                    viol_i.pow(2).mean() + viol_j.pow(2).mean())
+
+            # Alpha anchor penalty on α_env (effort-stripped true richness)
+            anchor_penalty = torch.tensor(0.0, device=device)
+            if model.alpha_anchor_lambda > 0.0 and alpha_env_i is not None:
+                s_i = S_obs[batch["site_i"]].clamp(min=1.0)
+                s_j = S_obs[batch["site_j"]].clamp(min=1.0)
+                tau = model.alpha_anchor_tolerance
+                gap_i = (torch.log(alpha_env_i) - torch.log(s_i)).abs() - tau
+                gap_j = (torch.log(alpha_env_j) - torch.log(s_j)).abs() - tau
+                viol_i_a = torch.nn.functional.relu(gap_i)
+                viol_j_a = torch.nn.functional.relu(gap_j)
+                anchor_penalty = model.alpha_anchor_lambda * (
+                    viol_i_a.pow(2).mean() + viol_j_a.pow(2).mean())
+
+            loss = bce_weighted + lb_penalty + anchor_penalty
+
+            optimizer.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            optimizer.step()
+
+            total_loss_t += loss.item()
+            nb += 1
+
+        train_loss = total_loss_t / max(nb, 1)
+        train_ess = total_ess_t / max(nb, 1)
+
+        # ---- Validate ----
+        val_m = validate(model, all_val, site_data, device,
+                         weight_clamp_factor=config.weight_clamp_factor,
+                         weight_log_normalise=config.weight_log_normalise)
+        val_s2 = _stage2_validate(model, s2_val, site_data, device,
+                                  weight_clamp_factor=config.weight_clamp_factor,
+                                  weight_log_normalise=config.weight_log_normalise)
+        scheduler.step()
+
+        lr_a = optimizer.param_groups[0]["lr"]
+        lr_b = optimizer.param_groups[1]["lr"]
+        elapsed = time.time() - t_start
+
+        # Log
+        log_writer.writerow({
+            "epoch": epoch,
+            "train_loss": f"{train_loss:.6f}",
+            "val_loss": f"{val_m['loss']:.6f}",
+            "val_bce": f"{val_m['bce_loss']:.6f}",
+            "val_effort": f"{val_m['effort_loss']:.6f}",
+            "val_accuracy": f"{val_m['accuracy']:.4f}",
+            "alpha_mean": f"{val_m['alpha_mean']:.2f}",
+            "alpha_std": f"{val_m['alpha_std']:.2f}",
+            "alpha_min": f"{val_m['alpha_min']:.2f}",
+            "alpha_max": f"{val_m['alpha_max']:.2f}",
+            "val_eta_mean": f"{val_s2['eta_mean']:.6f}",
+            "val_eta_std": f"{val_s2['eta_std']:.6f}",
+            "val_auc": f"{val_s2['auc']:.4f}",
+            "val_auc_s123": f"{val_s2['auc_s123']:.4f}",
+            "weight_ess": f"{train_ess:.1f}",
+            "lr_alpha": f"{lr_a:.2e}",
+            "lr_beta": f"{lr_b:.2e}",
+            "elapsed_sec": f"{elapsed:.0f}",
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        })
+        log_file.flush()
+
+        # Print progress
+        if epoch == 1 or epoch % 5 == 0 or epoch == config.finetune_max_epochs:
+            print(f"  JF-{epoch:3d}/{config.finetune_max_epochs}  "
+                  f"loss={val_m['loss']:.6f}  beta_loss={val_s2['loss']:.6f}  "
+                  f"AUC_s123={val_s2['auc_s123']:.3f}  "
+                  f"α=[{val_m['alpha_min']:.0f},{val_m['alpha_mean']:.0f},"
+                  f"{val_m['alpha_max']:.0f}]  "
+                  f"η=[{val_s2['eta_min']:.2f},{val_s2['eta_mean']:.2f},"
+                  f"{val_s2['eta_max']:.2f}]")
+
+        # Save best — use between-site loss
+        metric = val_s2["loss"]
+        if metric < best_val_loss:
+            best_val_loss = metric
+            state.best_val_loss = best_val_loss
+            state.best_epoch = epoch
+            patience_ctr = 0
+            _save_checkpoint(model, optimizer, epoch, metric,
+                             site_data, config, best_model_path)
+            _save_checkpoint(model, optimizer, epoch, metric,
+                             site_data, config, phase2_ckpt_path)
+            print(f"      *** New best (beta_loss={best_val_loss:.6f}, "
+                  f"AUC_s123={val_s2['auc_s123']:.3f}) ***")
+        else:
+            patience_ctr += 1
+            if patience_ctr >= config.finetune_patience:
+                print(f"  Early stopping at epoch {epoch} "
+                      f"(no improvement for {config.finetune_patience} epochs)")
+                break
+
+    log_file.close()
+    total_time = time.time() - t_start
+
+    # Restore best model
+    if phase2_ckpt_path.exists():
+        ckpt = torch.load(phase2_ckpt_path, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state_dict"])
+    elif best_model_path.exists():
+        ckpt = torch.load(best_model_path, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state_dict"])
+
+    print(f"\n  Joint fine-tuning complete.")
+    print(f"  Best epoch:        {state.best_epoch}")
+    print(f"  Best val loss (between-site): {state.best_val_loss:.6f}")
+    print(f"  Phase 1 val loss:  {best_phase1_loss:.6f}")
+    improvement = (best_phase1_loss - state.best_val_loss) / best_phase1_loss * 100
+    print(f"  Improvement:       {improvement:+.2f}%")
+    print(f"  Training time:     {total_time:.0f}s ({total_time/60:.1f} min)")
+
+    return state
+
+
+# --------------------------------------------------------------------------
+# Calibration phase — design-weighted loss only, no mining, no boost
+# --------------------------------------------------------------------------
+
+def train_calibration(
+    model: CLESSONet,
+    pairs,  # pd.DataFrame — all pairs
+    site_data: SiteData,
+    config: CLESSONNConfig,
+) -> TrainingState:
+    """Calibration phase: short fine-tune with design-weighted composite loss.
+
+    No hard-pair mining, no match-boost auxiliary loss.
+    Uses a small learning rate and design weights only to de-bias
+    probability estimates after quota sampling.
+    """
+    import pandas as pd
+
+    device = config.resolve_device()
+    print(f"\n{'='*60}")
+    print(f"  CALIBRATION PHASE")
+    print(f"{'='*60}")
+    print(f"  Epochs: {config.calibration_epochs}  "
+          f"LR: {config.calibration_lr:.1e}  "
+          f"Patience: {config.calibration_patience}")
+
+    model = model.to(device)
+
+    # Disable match-boost for calibration
+    saved_boost_lambda = model.match_boost_lambda
+    model.match_boost_lambda = 0.0
+
+    # Use ALL pairs (within + between)
+    cal_train, cal_val, _, _ = make_dataloaders(
+        pairs, site_data,
+        val_fraction=config.val_fraction, batch_size=config.batch_size,
+        seed=config.seed, use_unit_weights=False,
+        use_design_weights=getattr(config, 'use_design_weights', True),
+    )
+
+    # Small LR, all parameters unfrozen
+    optimizer = Adam(model.parameters(), lr=config.calibration_lr,
+                     weight_decay=config.weight_decay)
+
+    state = TrainingState()
+    cal_ckpt_path = config.output_dir / "best_model_calibrated.pt"
+
+    # Progress log
+    log_path = config.output_dir / "training_progress_calibration.log"
+    log_file = open(log_path, "w", newline="")
+    log_writer = csv.DictWriter(log_file, fieldnames=[
+        "epoch", "train_loss", "val_loss", "train_bce", "val_bce",
+    ])
+    log_writer.writeheader()
+
+    patience_ctr = 0
+
+    Z = site_data.Z.to(device)
+    S_obs = site_data.S_obs.to(device)
+    W = site_data.W.to(device) if site_data.W is not None else None
+
+    for epoch in range(1, config.calibration_epochs + 1):
+        model.train()
+        epoch_loss = 0.0
+        epoch_bce = 0.0
+        n_batches = 0
+
+        for batch in cal_train:
+            batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+                     for k, v in batch.items()}
+
+            z_i = Z[batch["site_i"]]
+            z_j = Z[batch["site_j"]]
+            w_i = W[batch["site_i"]] if W is not None else None
+            w_j = W[batch["site_j"]] if W is not None else None
+
+            result = model.compute_loss(
+                batch, z_i, z_j, S_obs,
+                w_i=w_i, w_j=w_j,
+            )
+            loss = result["loss"]
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            epoch_loss += loss.item()
+            epoch_bce += result["bce_loss"].item()
+            n_batches += 1
+
+        avg_train_loss = epoch_loss / max(n_batches, 1)
+        avg_train_bce = epoch_bce / max(n_batches, 1)
+
+        # Validation
+        model.eval()
+        val_loss = 0.0
+        val_bce = 0.0
+        n_val = 0
+        with torch.no_grad():
+            for batch in cal_val:
+                batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+                         for k, v in batch.items()}
+                z_i = Z[batch["site_i"]]
+                z_j = Z[batch["site_j"]]
+                w_i = W[batch["site_i"]] if W is not None else None
+                w_j = W[batch["site_j"]] if W is not None else None
+                result = model.compute_loss(
+                    batch, z_i, z_j, S_obs,
+                    w_i=w_i, w_j=w_j,
+                )
+                val_loss += result["loss"].item()
+                val_bce += result["bce_loss"].item()
+                n_val += 1
+
+        avg_val_loss = val_loss / max(n_val, 1)
+        avg_val_bce = val_bce / max(n_val, 1)
+
+        log_writer.writerow({
+            "epoch": epoch,
+            "train_loss": f"{avg_train_loss:.6f}",
+            "val_loss": f"{avg_val_loss:.6f}",
+            "train_bce": f"{avg_train_bce:.6f}",
+            "val_bce": f"{avg_val_bce:.6f}",
+        })
+        log_file.flush()
+
+        if epoch % 10 == 1 or epoch == config.calibration_epochs:
+            print(f"  Cal epoch {epoch:3d}: loss={avg_train_loss:.6f}  "
+                  f"val={avg_val_loss:.6f}  bce={avg_train_bce:.6f}")
+
+        # Early stopping
+        if avg_val_loss < state.best_val_loss:
+            state.best_val_loss = avg_val_loss
+            state.best_epoch = epoch
+            patience_ctr = 0
+            _save_checkpoint(model, optimizer, epoch, avg_val_loss,
+                             site_data, config, cal_ckpt_path)
+        else:
+            patience_ctr += 1
+            if patience_ctr >= config.calibration_patience:
+                print(f"  Early stopping at epoch {epoch}")
+                break
+
+    log_file.close()
+
+    # Restore best calibrated model
+    if cal_ckpt_path.exists():
+        ckpt = torch.load(cal_ckpt_path, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state_dict"])
+
+    # Restore boost lambda
+    model.match_boost_lambda = saved_boost_lambda
+
+    print(f"\n  Calibration complete: best_val_loss = {state.best_val_loss:.6f} "
+          f"(epoch {state.best_epoch})")
 
     return state

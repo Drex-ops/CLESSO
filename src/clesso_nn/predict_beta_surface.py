@@ -43,12 +43,19 @@ import torch
 # ──────────────────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
+def _default_checkpoint():
+    """Prefer calibrated checkpoint when it exists."""
+    base = PROJECT_ROOT / "src" / "clesso_nn" / "output" / "VAS_hexBalance_nn" / "best_model.pt"
+    calibrated = base.parent / "best_model_calibrated.pt"
+    return calibrated if calibrated.exists() else base
+
+
 DEFAULTS = dict(
-    checkpoint=PROJECT_ROOT / "src" / "clesso_nn" / "output" / "VAS_nn" / "best_model.pt",
+    checkpoint=_default_checkpoint(),
     reference_raster=PROJECT_ROOT / "data" / "FWPT_mean_Cmax_mean_1946_1975.flt",
     substrate_raster=PROJECT_ROOT / "data" / "SUBS_brk_VAS.grd",
     npy_src="/Volumes/PortableSSD/CLIMATE/geonpy",
-    output=PROJECT_ROOT / "src" / "clesso_nn" / "output" / "VAS_nn" / "beta_surface.tif",
+    output=None,  # derived from checkpoint dir at runtime
     n_landmarks=500,
     n_components=3,
     stretch=2.0,       # percentile stretch for RGB
@@ -60,28 +67,44 @@ DEFAULTS = dict(
     geonpy_start_year=1911,
 )
 
-# Climate variable extraction groups (same as alpha surface)
-CLIMATE_GROUPS = [
-    ("mean", np.mean, np.mean, [
-        ("mean_PT_191101-201712", "mean_mean_PT"),
-    ]),
-    ("min", np.mean, np.min, [
-        ("TNn_191101-201712", "min_TNn"),
-        ("FWPT_191101-201712", "min_FWPT"),
-    ]),
-    ("max", np.mean, np.max, [
-        ("max_PT_191101-201712", "max_max_PT"),
-        ("FWPT_191101-201712", "max_FWPT"),
-    ]),
-    ("max", np.mean, np.max, [
-        ("FD_191101-201712", "max_FD"),
-        ("TXx_191101-201712", "max_TXx"),
-    ]),
-    ("max", np.mean, np.max, [
-        ("TNn_191101-201712", "max_TNn"),
-        ("PD_191101-201712", "max_PD"),
-    ]),
-]
+# Date-range suffix on geonpy .npy files (matches training data period)
+NPY_DATE_RANGE = "191101-201712"
+
+# Stat prefix → (mstat_func, cstat_func) mapping used by geonpy
+# mstat is always np.mean (monthly aggregation); cstat varies.
+CSTAT_FUNCS = {
+    "mean": (np.mean, np.mean),
+    "min":  (np.mean, np.min),
+    "max":  (np.mean, np.max),
+}
+
+
+def derive_climate_vars(cov_names: list[str]) -> list[tuple[str, str, callable, callable]]:
+    """Derive climate extraction specs from the checkpoint's covariate names.
+
+    Convention (matching run_clesso.R):
+        column name  = "{cstat}_{varname}"
+        npy file     = "{varname}_{NPY_DATE_RANGE}.npy"
+        mstat        = np.mean  (always)
+        cstat        = np.mean / np.min / np.max  (from prefix)
+
+    Non-climate names (subs_*) are skipped.
+
+    Returns: list of (col_name, npy_basename, mstat_func, cstat_func)
+    """
+    skip_prefixes = ("subs_",)
+    specs = []
+    for col in cov_names:
+        if any(col.startswith(pfx) for pfx in skip_prefixes):
+            continue
+        parts = col.split("_", 1)
+        if len(parts) != 2 or parts[0] not in CSTAT_FUNCS:
+            continue  # not a climate column
+        cstat_prefix, varname = parts
+        mstat_func, cstat_func = CSTAT_FUNCS[cstat_prefix]
+        npy_basename = f"{varname}_{NPY_DATE_RANGE}"
+        specs.append((col, npy_basename, mstat_func, cstat_func))
+    return specs
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -130,9 +153,15 @@ def extract_substrate(path, mask):
     return vals
 
 
-def extract_climate(npy_src, lons, lats, climate_year, climate_month,
+def extract_climate(npy_src, lons, lats, climate_specs,
+                    climate_year, climate_month,
                     climate_window, start_year):
-    """Extract 9 climate variables at land cells → dict[name → (n,) array]."""
+    """Extract climate variables at land cells → dict[name → (n,) array].
+
+    Args:
+        climate_specs: list of (col_name, npy_basename, mstat_func, cstat_func)
+                       as returned by derive_climate_vars()
+    """
     from geonpy.geonpy import Geonpy, calc_climatology_window, gen_multi_index_slice
 
     npy_src = Path(npy_src)
@@ -148,23 +177,20 @@ def extract_climate(npy_src, lons, lats, climate_year, climate_month,
           f"{climate_year}/{climate_month:02d} ({window_months} months)")
 
     results = {}
-    n_vars = sum(len(g[3]) for g in CLIMATE_GROUPS)
-    done = 0
-    for _, mstat, cstat, variables in CLIMATE_GROUPS:
-        for npy_name, col_name in variables:
-            done += 1
-            npy_path = npy_src / f"{npy_name}.npy"
-            if not npy_path.exists():
-                raise FileNotFoundError(f"Climate file not found: {npy_path}")
-            print(f"    [{done}/{n_vars}] {col_name}", end="  ")
-            t0 = time.time()
-            g = Geonpy(str(npy_path))
-            raw = g.read_points(pts, dim_idx=dim_idx)
-            vals = calc_climatology_window(raw, mstat, cstat)
-            results[col_name] = vals.astype(np.float32)
-            dt = time.time() - t0
-            print(f"({dt:.1f}s)")
-            del g
+    n_vars = len(climate_specs)
+    for i, (col_name, npy_name, mstat, cstat) in enumerate(climate_specs, 1):
+        npy_path = npy_src / f"{npy_name}.npy"
+        if not npy_path.exists():
+            raise FileNotFoundError(f"Climate file not found: {npy_path}")
+        print(f"    [{i}/{n_vars}] {col_name} ← {npy_name}", end="  ")
+        t0 = time.time()
+        g = Geonpy(str(npy_path))
+        raw = g.read_points(pts, dim_idx=dim_idx)
+        vals = calc_climatology_window(raw, mstat, cstat)
+        results[col_name] = vals.astype(np.float32)
+        dt = time.time() - t0
+        print(f"({dt:.1f}s)")
+        del g
     return results
 
 
@@ -666,7 +692,8 @@ def main():
     parser.add_argument("--npy-src", type=str,
                         default=str(DEFAULTS["npy_src"]))
     parser.add_argument("--output", type=str,
-                        default=str(DEFAULTS["output"]))
+                        default=None,
+                        help="Output GeoTIFF path (default: <checkpoint_dir>/beta_surface.tif)")
     parser.add_argument("--n-landmarks", type=int,
                         default=DEFAULTS["n_landmarks"])
     parser.add_argument("--n-components", type=int,
@@ -681,6 +708,11 @@ def main():
     args = parser.parse_args()
 
     t_start = time.time()
+
+    # Derive output path from checkpoint dir if not explicitly provided
+    if args.output is None:
+        args.output = str(Path(args.checkpoint).parent / "beta_surface.tif")
+
     print("=" * 70)
     print("  CLESSO NN — Beta Surface (Landmark MDS)")
     print("=" * 70)
@@ -718,9 +750,15 @@ def main():
     # Substrate PCA (6 bands)
     subs_vals = extract_substrate(args.substrate_raster, mask)
 
-    # Climate (9 variables)
+    # Derive which climate variables to extract from the checkpoint
+    climate_specs = derive_climate_vars(env_cov_names)
+    print(f"  Climate variables to extract ({len(climate_specs)}): "
+          f"{[s[0] for s in climate_specs]}")
+
+    # Climate
     climate = extract_climate(
         args.npy_src, lons_valid, lats_valid,
+        climate_specs=climate_specs,
         climate_year=DEFAULTS["climate_year"],
         climate_month=DEFAULTS["climate_month"],
         climate_window=DEFAULTS["climate_window"],

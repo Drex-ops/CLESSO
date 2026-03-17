@@ -11,14 +11,14 @@ the feather file.  metadata.json is updated with `effort_cov_cols`.
 
 Usage
 ─────
-    python src/clesso_nn/patch_effort_to_export.py <export_dir> [--effort-raster-dir <dir>]
+    python src/clesso_nn/patch_effort_to_export.py <export_dir> [--effort-input-dir <dir>]
 
 Example
 ───────
     python src/clesso_nn/patch_effort_to_export.py \
         src/clesso_v2/output/VAS_20260310_092634/nn_export
 
-If --effort-raster-dir is not given, it defaults to the Effort_data_preper
+If --effort-input-dir is not given, it defaults to the Effort_data_preper
 outputs directory.
 """
 from __future__ import annotations
@@ -113,10 +113,10 @@ def main() -> None:
         help="Path to the nn_export directory (contains site_covariates.feather)",
     )
     parser.add_argument(
-        "--effort-raster-dir",
+        "--effort-input-dir",
         type=Path,
         default=Path(DEFAULT_EFFORT_DIR),
-        help="Directory containing the .flt effort raster files",
+        help="Directory containing the .flt effort INPUT raster files",
     )
     parser.add_argument(
         "--dry-run",
@@ -126,7 +126,7 @@ def main() -> None:
     args = parser.parse_args()
 
     export_dir: Path = args.export_dir
-    effort_dir: Path = args.effort_raster_dir
+    effort_dir: Path = args.effort_input_dir
 
     # ── Validate paths ──────────────────────────────────────────────────
     sc_path = export_dir / "site_covariates.feather"
@@ -179,7 +179,7 @@ def main() -> None:
         added_layers.append(layer_name)
 
     if not added_layers:
-        sys.exit("ERROR: No effort layers were extracted. Check --effort-raster-dir.")
+        sys.exit("ERROR: No effort layers were extracted. Check --effort-input-dir.")
 
     print(f"\nAdded {len(added_layers)} effort columns to site_covariates")
     print(f"  Final columns ({len(sc.columns)}): {list(sc.columns)}")

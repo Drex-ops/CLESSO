@@ -265,12 +265,13 @@ if (!exists("pairs_dt") || !exists("clesso_config")) {
 # ---------------------------------------------------------------------------
 # Step 4d: Extract effort / detectability rasters at site locations
 # ---------------------------------------------------------------------------
-## The 6 raw effort rasters (ESRI BIL .flt format) live in the Effort_data_preper
-## outputs directory.  We extract values at each unique site and include them in
-## site_covariates so the NN effort‑net can use them.
+## The 6 raw effort INPUT rasters (ESRI BIL .flt format) live in the
+## Effort_data_preper outputs directory.  We extract values at each unique site
+## and include them in site_covariates so the NN effort-net can use them.
+## NOTE: This reads INPUT rasters only — output surfaces are written elsewhere.
 
-effort_raster_dir <- Sys.getenv(
-  "EFFORT_RASTER_DIR",
+effort_input_dir <- Sys.getenv(
+  "EFFORT_INPUT_DIR",
   unset = "/Users/andrewhoskins/Library/Mobile Documents/com~apple~CloudDocs/CODE/Effort_data_preper/outputs"
 )
 
@@ -283,7 +284,7 @@ effort_layer_names <- c(
   "road_density_km_per_km2"
 )
 
-if (dir.exists(effort_raster_dir)) {
+if (dir.exists(effort_input_dir)) {
   cat("  Extracting effort / detectability rasters at site locations...\n")
   require(raster)
 
@@ -297,7 +298,7 @@ if (dir.exists(effort_raster_dir)) {
 
   effort_parts <- list()
   for (lyr in effort_layer_names) {
-    flt_path <- file.path(effort_raster_dir, paste0(lyr, ".flt"))
+    flt_path <- file.path(effort_input_dir, paste0(lyr, ".flt"))
     if (!file.exists(flt_path)) {
       cat(sprintf("    WARNING: effort raster not found: %s\n", flt_path))
       next
@@ -323,7 +324,7 @@ if (dir.exists(effort_raster_dir)) {
   }
 } else {
   cat(sprintf("  Skipping effort raster extraction (dir not found: %s)\n",
-              effort_raster_dir))
+              effort_input_dir))
 }
 
 # ---------------------------------------------------------------------------
@@ -357,9 +358,21 @@ if (!"is_within" %in% names(pairs_dt)) {
 ## Select columns needed by NN
 export_cols <- c("site_i", "site_j", "species_i", "species_j",
                  "lon_i", "lat_i", "lon_j", "lat_j",
-                 "y", "pair_type", "is_within", "w")
+                 "y", "pair_type", "is_within", "w",
+                 "stratum", "design_w")
 ## Only keep columns that exist
 export_cols <- intersect(export_cols, names(pairs_dt))
+
+## Ensure stratum and design_w have sensible defaults if missing
+if (!"stratum" %in% export_cols) {
+  pairs_dt[, stratum := fifelse(pair_type == "within", 0L, 1L)]
+  export_cols <- c(export_cols, "stratum")
+}
+if (!"design_w" %in% export_cols) {
+  pairs_dt[, design_w := 1.0]
+  export_cols <- c(export_cols, "design_w")
+}
+
 pairs_export <- pairs_dt[, ..export_cols]
 
 arrow::write_feather(pairs_export, file.path(export_dir, "pairs.feather"))
@@ -456,6 +469,29 @@ metadata <- list(
                           setdiff(names(env_site_table), "site_id") else character(0),
   effort_cov_cols     = effort_cols_in_export
 )
+
+## Add retention rates for retrospective likelihood correction
+retention <- attr(pairs_dt, "retention_rates")
+if (!is.null(retention)) {
+  ## Flatten nested list for JSON serialisation
+  rr <- list()
+  for (nm in names(retention)) {
+    sub <- retention[[nm]]
+    if (is.list(sub) && !is.null(sub$r_0)) {
+      rr[[paste0(nm, "_r0")]] <- sub$r_0
+      rr[[paste0(nm, "_r1")]] <- sub$r_1
+    } else if (is.list(sub)) {
+      ## Nested (e.g. between has tier1/tier2/tier3)
+      for (tnm in names(sub)) {
+        if (is.list(sub[[tnm]])) {
+          rr[[paste0(nm, "_", tnm, "_r0")]] <- sub[[tnm]]$r_0
+          rr[[paste0(nm, "_", tnm, "_r1")]] <- sub[[tnm]]$r_1
+        }
+      }
+    }
+  }
+  metadata$retention_rates <- rr
+}
 
 saveRDS(metadata, file.path(export_dir, "metadata.rds"))
 ## Also save as JSON for Python

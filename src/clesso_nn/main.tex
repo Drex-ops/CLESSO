@@ -314,7 +314,7 @@ In the TMB model, turnover is parameterised using I-spline basis functions with 
     \eta_{i,j} = \exp(\eta_0^{\text{raw}}) + \sum_{l=1}^{m}\sum_{s=1}^{S} \exp(\beta_{l,s}^{\text{raw}}) \cdot \left|I_s(x_{l,i}) - I_s(x_{l,j})\right|
 \end{equation*}
 
-where $I_s(\cdot)$ are monotonically non-decreasing I-spline bases and the exponentiation of the raw coefficients ensures $\beta_{l,s} \geq 0$. The composition of non-negative coefficients with monotone bases guarantees that $\eta_{i,j}$ is non-decreasing in each $|x_{l,i} - x_{l,j}|$.
+where $I_s(\cdot)$ are monotonically increasing I-spline bases and the exponentiation of the raw coefficients ensures $\beta_{l,s} \geq 0$. The composition of non-negative coefficients with monotone bases guarantees that $\eta_{i,j}$ is non-decreasing in each $|x_{l,i} - x_{l,j}|$.
 
 \subsection{Shared building block: MonotoneLinear layers}
 
@@ -812,7 +812,14 @@ These considerations are important regardless of whether the sub-models are spec
     \item Reduce alphanet complexity (e.g.\ smaller network, stronger regularisation) to see if it helps with identifiability and prevents it from absorbing turnover signal.
     \item Go back to additive betanet and see if it can learn a reasonable fit without the beta LR multiplier and gradient amplification, especially with the retrospective correction in place.
     \item Explore adding stopping on blocked AUC or other classification metrics in addition to the validation loss, to ensure the model is not just improving likelihood but also predictive performance on the match/mismatch task.
-    \item 
+    \item Need to work on the stratum weighting approach to ensure weights calculated are as expected. In particular make sure that design weight track through from sampling to estimation
+    \item Need to brainstorm completeness model approach. Model is conceptually neat, I think there is more informaiton we could include into the completeness section (e.g.n unique visits, repeated sampling, n unique observers, unique species vs observation fraction, triplets?, systematic survey identifier, n 'sites' within hex [or radius])
+    \item Look more closely at the standardisation of ecological distances in the betanet - could be masking effect
+    \item When $\Delta$ env = 0, $\eta$ also = 0  might want to revisit this given model doesn't capture all sources of variation in a community. 
+    \item Additive betanet initialisation current initialises at $\eta = 5$, look at what $eta = 5$ translates to, we might want ot reduce this
+    \item We want eta to range between 0-2, higher effectively gives total dissimilarity. Need to work on betanet to pull it down. This will affect eta collapse controls and many other things. $\eta$ collapse mechanism pushes $\eta$ to be above 1 which is approx. 0.3 dissimilarity so we loose the finer gradient. 
+    \item Put some thought into seperating the covariate set. Do the same things matter for alpha and beta?!?!
+    \item Play around with regularisaiton of alphanet, increase drop out, stronger $\lambda$ on interaction weights, shallower network, to see if it helps with identifiability and prevents alpha from absorbing turnover signal.
 \end{itemize}
 
 \begin{itemize}
@@ -841,6 +848,7 @@ These considerations are important regardless of whether the sub-models are spec
     \item Run multiple random seeds for the same configuration and quantify variability in validation and test AUC, to determine whether the current performance gap is partly due to optimisation variance rather than systematic model failure.
     \item Try a simple seed ensemble of the best few models, to see whether averaging predictions improves test AUC and stabilises the ranking.
     \item Compare the neural network fit against a deliberately simpler baseline (e.g.\ additive beta + small alpha net, or even a spline / shallow model) to establish whether the current extra flexibility is actually buying test performance.
+    \item Look into chelsa and terraclimate covariates as alternatives to AWAP, to see whether the choice of climate dataset is influencing the fit and generalisation.
 \end{itemize}
 
 \end{document}

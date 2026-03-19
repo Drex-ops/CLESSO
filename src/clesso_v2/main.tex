@@ -2,14 +2,11 @@
 \usepackage{graphicx} % Required for inserting images
 \usepackage{amsmath} % For cases environment
 
-\title{To DO: ObsPair modelling v2}
-
-\begin{list}{label}{spacing}
-    - remove interceot from Beta
-    - blocked coordinate descent is the way to go for fitting this model
-    - need to strategically sample pairs to stop the between site pairs dominating the likelihood and then weight appropriately
-    - maybe: hard pair minnig
-\end{list}
+% To DO:
+% - remove intercept from Beta
+% - blocked coordinate descent is the way to go for fitting this model
+% - need to strategically sample pairs to stop the between site pairs dominating the likelihood and then weight appropriately
+% - maybe: hard pair mining
 
 
 
@@ -75,7 +72,7 @@ By doing this we get identifiably between richness and turnover in our sampled d
 
 \begin{itemize}
     \item each occurrence record is (\textit{s,i}) = species \textit{s} observed at site \textit{i}
-    \iten Create an observation-pair dataset $P$ by sampling pairs of occurrence records from a set of species observations for your region of interest.
+    \item Create an observation-pair dataset $P$ by sampling pairs of occurrence records from a set of species observations for your region of interest.
 \end{itemize}
 
 For each pair $p \in P$ we record:
@@ -114,10 +111,10 @@ Conditional on the equal draw assumption then a recorded presence behaves like a
 If we represent turnover via a Sorensen similarity:
 
 \begin{equation}
-    S_{i,j} = \frac{2\gamma_{i,j}}{\alpha_{i} + \alpha{j}}
+    S_{i,j} = \frac{2\gamma_{i,j}}{\alpha_{i} + \alpha_{j}}
 \end{equation}
 
-and rearrange to $\gamma_{i,j} = S_{i,j}(\alpha_{i} + \alpha{j})/2$ then substitute it into (3) we get:
+and rearrange to $\gamma_{i,j} = S_{i,j}(\alpha_{i} + \alpha_{j})/2$ then substitute it into (3) we get:
 
 \begin{equation}
     p_{i,j} = S_{i,j} \frac{\alpha_{i} + \alpha_j}{2\alpha_{i}\alpha_{j}}
@@ -127,7 +124,7 @@ This gives us a model that separates the turnover and richness components to mak
 
 \begin{itemize}
     \item turnover is zero as sites are identical thus $S_{i,i} = 1$
-    \item \gamma_{i,i} = \alpha_{i}
+    \item $\gamma_{i,i} = \alpha_{i}$
 \end{itemize}
 
 which means that:
@@ -148,19 +145,19 @@ Alpha can be modelled as a positive (Poisson) set which is driven by the site le
 
 where $g_{k}(\cdot)$ can be linear terms, splines (making it a GAM) and/or spatial smooths
 
-The turnover model then follows the GDM style as:
+The turnover model then follows the GDM style, applying monotone I-spline transforms to each covariate \emph{before} taking the absolute difference between sites, thereby preserving positional information:
 
 \begin{equation}
-    \eta_{i,j} = f_{d}(d_{i,j}) + \sum_{l=1}^{m}f_l(\Delta x_{l,i,j})
+    \eta_{i,j} = \theta_{0} + \sum_{k=1}^{m}\left|\, T_k(x_{k,i}) - T_k(x_{k,j}) \,\right|
 \end{equation}
 
 Which is mapped to similarity (rather than dissimilarity) as:
 
 \begin{equation}
-    S_{i,j} = exp(-\eta_{i,j})
+    S_{i,j} = \exp(-\eta_{i,j})
 \end{equation}
 
-where $f_{d}$ and $f_{l}$ are monotone splines to ensure turnover increases with increasing environmental and geographic distance 
+where each $T_k(\cdot)$ is a monotone I-spline transform ensuring turnover increases with increasing environmental and geographic distance 
 
 \subsection{Likelihood}
 
@@ -179,7 +176,7 @@ with a response following a Bernoulli distribution so that:
 This then allows us to use the Bernoulli log-likelihood to maximise across all pairs (within and between sites)
 
 \begin{equation}
-    \mathcal{L} = \sum_{p \in P}[(1 - y_{p}) \log p_{p} + y_{p} + log(1-p_{p})] - \lambda_{\alpha} \tau_{\alpha}(\theta) - \lambda_{\beta} \tau_{\beta}(\beta)
+    \mathcal{L} = \sum_{p \in P}[(1 - y_{p}) \log p_{p} + y_{p} \log(1-p_{p})] - \lambda_{\alpha} \tau_{\alpha}(\theta) - \lambda_{\beta} \tau_{\beta}(\beta)
 \end{equation}
 
 where
@@ -199,5 +196,48 @@ where
     \item Drawing pairs will result in large missmatches (same as before) and we have the added difficulty of within-site pairs. We'd want to strategically draw a set that stops the missmatches or between site pairs dominate the likelihood and then weight appropriately
     \item We can estimate this in Stan (might be slow) or TMB
 \end{itemize}
+
+\section{SF formulation}
+
+A possible alternative formulation of this model is to use the formulation developed by Simon Ferrier (for now called clesso SF) which is based on the same underlying principles of the approach described above. In the clesso\_sf formulation we define:
+
+\begin{equation}
+    p_{i,j} = \frac{S_{i,j}}{\alpha_{i,j}}
+\end{equation}
+
+where $\alpha_{i,j}$ is the average richness across the two sites in the pair and $S_{i,j}$ is the Sorensen similarity between the two sites. 
+
+This can be reformulated as:
+\begin{equation}
+    p_{i,j} = S_{i,j} \cdot \frac{1}{\bar{\alpha}_{i,j}}
+\end{equation}
+
+Which is expanded using a negative exponential link link function for both components as:
+\begin{equation}
+    p_{i,j} = exp(-\eta_{i,j}) \cdot exp(-\alpha_{i,j})
+\end{equation}
+
+Where $\eta_{i,j}$ is the same as in the previous formulation, applying monotone I-spline transforms to each covariate before taking the absolute difference between sites:
+\begin{equation}
+    \eta_{i,j} = \theta_{0} + \sum_{k=1}^{m}\left|\, I_k(x_{k,i}) - I_k(x_{k,j}) \,\right|
+\end{equation}
+
+and $\bar{\alpha}_{i,j}$ is a function of the average richness across the two sites such that $\bar{\alpha}_{i,j}$ is:
+\begin{equation}
+    \bar{\alpha}_{i,j} = \frac{\alpha_i + \alpha_j}{2}
+\end{equation}
+
+or $\frac{1}{\bar{\alpha}_{i,j}}$ is the harmonic mean (??) of the two sites:
+\begin{equation}
+    \frac{1}{\bar{\alpha}_{i,j}} = \frac{\alpha_{i} + \alpha_j}{2\alpha_{i}\alpha_{j}}
+\end{equation} 
+
+and this is modelled as a linear combination of regression splines (b-spline or p-splines):
+\begin{equation}
+    \alpha_{i} = \theta_{0} + \sum_{k=1}^{K}g_{k}(z_{k,i})
+\end{equation}
+
+This formulation has the advantage of being more parsimonious and potentially easier to fit, but it may be less flexible in terms of modelling the relationship between richness and turnover.
+
 
 \end{document}

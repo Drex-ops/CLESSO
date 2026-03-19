@@ -240,12 +240,12 @@ class CLESSONNConfig:
     # "two_stage" = Stage 1: alpha-only on within-site, Stage 2: beta-only on between-site
     # "cyclic" = Alternating block-coordinate descent: cycle alpha→beta→alpha→... until converged
     # "cyclic_finetune" = Phase 1: damped cyclic on env-only, Phase 2: fine-tune with geo features
-    training_mode: str = "cyclic_finetune"
+    training_mode: str = "two_stage"
 
-    stage1_max_epochs: int = 300
+    stage1_max_epochs: int = 50
     stage1_patience: int = 30
 
-    stage2_max_epochs: int = 300
+    stage2_max_epochs: int = 10
     stage2_patience: int = 40
     stage2_beta_grad_scale: float = 1.0  # sigmoid provides healthy gradients; no amplification needed
 

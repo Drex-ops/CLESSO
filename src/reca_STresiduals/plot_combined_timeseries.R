@@ -322,6 +322,362 @@ cat(sprintf("\n  Saved: %s\n\n", basename(pdf_file)))
 
 
 # ===========================================================================
+# A2) SITE-LEVEL ENV-ONLY TIMESERIES
+# ===========================================================================
+cat("=== A2) Site-level env-only timeseries ===\n\n")
+
+## Fixed y-axis lower bound for env-only and cond-aligned plots
+global_base_ymin <- 0.6
+cat(sprintf("  Global y-min: %.1f\n\n", global_base_ymin))
+
+pdf_env <- file.path(viz_dir, sprintf("env_only_timeseries_%s.pdf", prefix))
+pdf(pdf_env, width = 14, height = 8)
+
+for (grp in groups) {
+  r <- registry[[grp]]
+  if (is.null(r$base_ts)) {
+    cat(sprintf("  [SKIP] %s -- no base timeseries\n", grp))
+    next
+  }
+
+  base <- readRDS(r$base_ts)
+  base_years <- c(base$baseline_year, base$target_years)
+  base_sim   <- c(1.0, base$mean_sim)
+
+  par(mar = c(5, 5, 4, 2))
+
+  plot(base_years, base_sim, type = "l", lwd = 3,
+       col = group_colours[grp],
+       xlim = range(base_years), ylim = c(global_base_ymin, 1),
+       xlab = "Year", ylab = "Mean Temporal Similarity",
+       main = sprintf("%s -- Mean Temporal Similarity\nClimate-only model (1950 baseline)",
+                      group_full_names[grp]),
+       cex.main = 1.0)
+
+  ## +/-1 SD band
+  base_sd <- apply(base$mat_sim, 2, sd, na.rm = TRUE)
+  base_sd_full <- c(0, base_sd)
+  polygon(c(base_years, rev(base_years)),
+          c(base_sim + base_sd_full, rev(pmax(0, base_sim - base_sd_full))),
+          col = adjustcolor(group_colours[grp], alpha.f = 0.1), border = NA)
+
+  legend("bottomleft",
+         legend = c(sprintf("Climate-only model (1950 baseline, %d sites)", nrow(base$sites)),
+                    "Standard deviation"),
+         col = c(group_colours[grp],
+                 adjustcolor(group_colours[grp], alpha.f = 0.2)),
+         lwd = c(3, 8), lty = c(1, 1),
+         cex = 0.85, bg = "white")
+
+  cat(sprintf("  %s: plotted (env-only)\n", grp))
+}
+
+## ---- Summary: all groups env-only ----
+par(mar = c(5, 5, 4, 2))
+
+plot(NA, xlim = c(1950, 2017), ylim = c(global_base_ymin, 1),
+     xlab = "Year", ylab = "Mean Temporal Similarity",
+     main = "All Groups -- Mean Temporal Similarity\nClimate-only model",
+     cex.main = 1.0)
+
+leg_labels <- character()
+leg_cols   <- character()
+leg_lty    <- integer()
+
+for (grp in names(summary_data)) {
+  d <- summary_data[[grp]]
+  lines(d$base_years, d$base_sim, col = adjustcolor(group_colours[grp], alpha.f = 0.7), lwd = 1.5)
+  leg_labels <- c(leg_labels, sprintf("%s (climate-only)", group_full_names[grp]))
+  leg_cols   <- c(leg_cols, group_colours[grp])
+  leg_lty    <- c(leg_lty, 1L)
+}
+
+## Mean of all base timeseries
+common_years_env <- seq(1950, 2017)
+base_matrix_env  <- matrix(NA_real_, nrow = length(summary_data), ncol = length(common_years_env))
+for (i in seq_along(summary_data)) {
+  d <- summary_data[[i]]
+  base_matrix_env[i, ] <- approx(d$base_years, d$base_sim,
+                                  xout = common_years_env, rule = 1)$y
+}
+mean_base_env <- colMeans(base_matrix_env, na.rm = TRUE)
+sd_base_env   <- apply(base_matrix_env, 2, sd, na.rm = TRUE)
+
+polygon(c(common_years_env, rev(common_years_env)),
+        c(mean_base_env + sd_base_env, rev(pmax(0, mean_base_env - sd_base_env))),
+        col = adjustcolor("black", alpha.f = 0.10), border = NA)
+lines(common_years_env, mean_base_env, col = "black", lwd = 4)
+
+leg_labels <- c(leg_labels, "Mean across all groups (climate-only)")
+leg_cols   <- c(leg_cols, "black")
+leg_lty    <- c(leg_lty, 1L)
+
+legend("bottomleft", legend = leg_labels, col = leg_cols,
+       lwd = ifelse(leg_cols == "black", 4, 2.5),
+       lty = leg_lty, cex = 0.7, bg = "white", ncol = 2)
+
+dev.off()
+cat(sprintf("\n  Saved: %s\n\n", basename(pdf_env)))
+
+
+# ===========================================================================
+# A3) SITE-LEVEL CONDITION-ALIGNED TIMESERIES (x-axis from condition start)
+# ===========================================================================
+cat("=== A3) Site-level condition-aligned timeseries ===\n\n")
+
+pdf_aligned <- file.path(viz_dir, sprintf("cond_aligned_timeseries_%s.pdf", prefix))
+pdf(pdf_aligned, width = 14, height = 8)
+
+## Storage for summary plot
+summary_aligned <- list()
+
+for (grp in groups) {
+  r <- registry[[grp]]
+  if (is.null(r$base_ts)) {
+    cat(sprintf("  [SKIP] %s -- no base timeseries\n", grp))
+    next
+  }
+
+  base <- readRDS(r$base_ts)
+  base_years <- c(base$baseline_year, base$target_years)
+  base_sim   <- c(1.0, base$mean_sim)
+
+  has_cond <- !is.null(r$cond_ts)
+  if (!has_cond) {
+    cat(sprintf("  [SKIP] %s -- no condition timeseries for alignment\n", grp))
+    next
+  }
+
+  cond <- readRDS(r$cond_ts)
+  cond_years_raw <- c(cond$baseline_year, cond$target_years)
+  cond_sim_raw   <- c(1.0, cond$mean_sim)
+
+  align_year <- cond$baseline_year
+  align_idx  <- which.min(abs(base_years - align_year))
+  base_val_at_align <- base_sim[align_idx]
+
+  ## Offset COND to align with base at the condition baseline year
+  offset <- base_val_at_align - 1.0
+  cond_sim_offset <- cond_sim_raw + offset
+
+  ## Restrict base to years >= align_year
+  base_keep <- base_years >= align_year
+  base_years_clipped <- base_years[base_keep]
+  base_sim_clipped   <- base_sim[base_keep]
+
+  ## Store for summary
+  summary_aligned[[grp]] <- list(
+    base_years = base_years_clipped,
+    base_sim   = base_sim_clipped,
+    cond_years = cond_years_raw,
+    cond_sim   = cond_sim_offset,
+    align_year = align_year
+  )
+
+  ## ---- Shared values for all style variants ----
+  base_sd <- apply(base$mat_sim, 2, sd, na.rm = TRUE)
+  base_sd_full <- c(0, base_sd)
+  base_sd_clipped <- base_sd_full[base_keep]
+
+  cond_sd <- apply(cond$mat_sim, 2, sd, na.rm = TRUE)
+  cond_sd_full <- c(0, cond_sd)
+
+  x_range <- range(c(base_years_clipped, cond_years_raw))
+
+  ## Helper: draw a base plot frame (reused by each variant)
+  draw_base_frame <- function(subtitle) {
+    par(mar = c(5, 5, 4, 2))
+    plot(base_years_clipped, base_sim_clipped, type = "l", lwd = 3,
+         col = group_colours[grp],
+         xlim = x_range, ylim = c(global_base_ymin, 1),
+         xlab = "Year", ylab = "Mean Temporal Similarity",
+         main = sprintf("%s -- Mean Temporal Similarity [%s]\nClimate-only (1950 baseline) vs Climate + Condition (aligned at %d)",
+                        group_full_names[grp], subtitle, align_year),
+         cex.main = 1.0)
+    ## Base SD band (always solid fill)
+    polygon(c(base_years_clipped, rev(base_years_clipped)),
+            c(base_sim_clipped + base_sd_clipped,
+              rev(pmax(0, base_sim_clipped - base_sd_clipped))),
+            col = adjustcolor(group_colours[grp], alpha.f = 0.15), border = NA)
+    ## Alignment marker
+    abline(v = align_year, lty = 3, col = "grey50")
+    points(align_year, base_val_at_align, pch = 16, cex = 1.5, col = "grey30")
+  }
+
+  ## ================================================================
+  ## STYLE A: Stippled (hatched) fill for condition SD band
+  ## ================================================================
+  draw_base_frame("Style A: stippled condition SD")
+
+  ## Condition SD band with cross-hatching
+  polygon(c(cond_years_raw, rev(cond_years_raw)),
+          c(cond_sim_offset + cond_sd_full,
+            rev(pmax(0, cond_sim_offset - cond_sd_full))),
+          col = NA,
+          border = adjustcolor(group_colours[grp], alpha.f = 0.4),
+          density = 15, angle = 45, lwd = 0.5)
+  ## Second pass at opposite angle for cross-hatch effect
+  polygon(c(cond_years_raw, rev(cond_years_raw)),
+          c(cond_sim_offset + cond_sd_full,
+            rev(pmax(0, cond_sim_offset - cond_sd_full))),
+          col = NA,
+          border = adjustcolor(group_colours[grp], alpha.f = 0.4),
+          density = 15, angle = -45, lwd = 0.5)
+
+  lines(cond_years_raw, cond_sim_offset, lwd = 3, lty = 2,
+        col = adjustcolor(group_colours[grp], alpha.f = 0.7))
+
+  legend("bottomleft",
+         legend = c(sprintf("Climate-only model (%d sites)", nrow(base$sites)),
+                    sprintf("Clim + Condition model (%d sites)", nrow(cond$sites)),
+                    "Base SD (shaded)", "Condition SD (stippled)", "Alignment point"),
+         col = c(group_colours[grp],
+                 adjustcolor(group_colours[grp], alpha.f = 0.7),
+                 adjustcolor(group_colours[grp], alpha.f = 0.15),
+                 adjustcolor(group_colours[grp], alpha.f = 0.4),
+                 "grey30"),
+         lwd = c(3, 3, 8, 8, NA), lty = c(1, 2, 1, 1, NA),
+         pch = c(NA, NA, NA, NA, 16),
+         cex = 0.85, bg = "white")
+
+  ## ================================================================
+  ## STYLE B: Contrasting colour for condition (blue-grey)
+  ## ================================================================
+  cond_col <- "#4A708B"   # steel-blue, distinct from any group colour
+
+  draw_base_frame("Style B: contrasting colour")
+
+  ## Condition SD band in contrasting colour
+  polygon(c(cond_years_raw, rev(cond_years_raw)),
+          c(cond_sim_offset + cond_sd_full,
+            rev(pmax(0, cond_sim_offset - cond_sd_full))),
+          col = adjustcolor(cond_col, alpha.f = 0.12), border = NA)
+
+  lines(cond_years_raw, cond_sim_offset, lwd = 3, lty = 2,
+        col = adjustcolor(cond_col, alpha.f = 0.85))
+
+  legend("bottomleft",
+         legend = c(sprintf("Climate-only model (%d sites)", nrow(base$sites)),
+                    sprintf("Clim + Condition model (%d sites)", nrow(cond$sites)),
+                    "Base SD", "Condition SD", "Alignment point"),
+         col = c(group_colours[grp],
+                 adjustcolor(cond_col, alpha.f = 0.85),
+                 adjustcolor(group_colours[grp], alpha.f = 0.15),
+                 adjustcolor(cond_col, alpha.f = 0.25),
+                 "grey30"),
+         lwd = c(3, 3, 8, 8, NA), lty = c(1, 2, 1, 1, NA),
+         pch = c(NA, NA, NA, NA, 16),
+         cex = 0.85, bg = "white")
+
+  ## ================================================================
+  ## STYLE C: Outlined-only condition SD (dashed border, no fill)
+  ## ================================================================
+  draw_base_frame("Style C: outlined condition SD")
+
+  ## Condition SD band as dashed outline only
+  polygon(c(cond_years_raw, rev(cond_years_raw)),
+          c(cond_sim_offset + cond_sd_full,
+            rev(pmax(0, cond_sim_offset - cond_sd_full))),
+          col = NA,
+          border = adjustcolor(group_colours[grp], alpha.f = 0.45),
+          lty = 3, lwd = 1.5)
+
+  lines(cond_years_raw, cond_sim_offset, lwd = 3, lty = 2,
+        col = adjustcolor(group_colours[grp], alpha.f = 0.7))
+
+  legend("bottomleft",
+         legend = c(sprintf("Climate-only model (%d sites)", nrow(base$sites)),
+                    sprintf("Clim + Condition model (%d sites)", nrow(cond$sites)),
+                    "Base SD (shaded)", "Condition SD (outline)", "Alignment point"),
+         col = c(group_colours[grp],
+                 adjustcolor(group_colours[grp], alpha.f = 0.7),
+                 adjustcolor(group_colours[grp], alpha.f = 0.15),
+                 adjustcolor(group_colours[grp], alpha.f = 0.45),
+                 "grey30"),
+         lwd = c(3, 3, 8, 1.5, NA), lty = c(1, 2, 1, 3, NA),
+         pch = c(NA, NA, NA, NA, 16),
+         cex = 0.85, bg = "white")
+
+  cat(sprintf("  %s: plotted 3 style variants (cond-aligned)\n", grp))
+}
+
+## ---- Summary: all groups condition-aligned ----
+if (length(summary_aligned) > 0) {
+  par(mar = c(5, 5, 4, 2))
+
+  ## x range: from earliest align_year to latest year
+  x_min <- min(sapply(summary_aligned, function(d) d$align_year))
+  x_max <- max(sapply(summary_aligned, function(d) max(c(d$base_years, d$cond_years))))
+
+  plot(NA, xlim = c(x_min, x_max), ylim = c(global_base_ymin, 1),
+       xlab = "Year", ylab = "Mean Temporal Similarity",
+       main = "All Groups -- Mean Temporal Similarity\nClimate-only (solid) vs Climate + Condition (dashed)",
+       cex.main = 1.0)
+
+  leg_labels <- character()
+  leg_cols   <- character()
+  leg_lty    <- integer()
+
+  for (grp in names(summary_aligned)) {
+    d <- summary_aligned[[grp]]
+    lines(d$base_years, d$base_sim,
+          col = adjustcolor(group_colours[grp], alpha.f = 0.7), lwd = 1.5)
+    leg_labels <- c(leg_labels, sprintf("%s (climate-only)", group_full_names[grp]))
+    leg_cols   <- c(leg_cols, group_colours[grp])
+    leg_lty    <- c(leg_lty, 1L)
+
+    lines(d$cond_years, d$cond_sim,
+          col = adjustcolor(group_colours[grp], alpha.f = 0.7), lwd = 1.5, lty = 2)
+    leg_labels <- c(leg_labels, sprintf("%s (climate + condition)", group_full_names[grp]))
+    leg_cols   <- c(leg_cols, group_colours[grp])
+    leg_lty    <- c(leg_lty, 2L)
+  }
+
+  ## Mean across groups
+  common_aligned_years <- seq(x_min, x_max)
+  base_mat_a <- matrix(NA_real_, nrow = length(summary_aligned), ncol = length(common_aligned_years))
+  cond_mat_a <- matrix(NA_real_, nrow = length(summary_aligned), ncol = length(common_aligned_years))
+  for (i in seq_along(summary_aligned)) {
+    d <- summary_aligned[[i]]
+    base_mat_a[i, ] <- approx(d$base_years, d$base_sim,
+                               xout = common_aligned_years, rule = 1)$y
+    cond_mat_a[i, ] <- approx(d$cond_years, d$cond_sim,
+                               xout = common_aligned_years, rule = 1)$y
+  }
+  mean_base_a <- colMeans(base_mat_a, na.rm = TRUE)
+  sd_base_a   <- apply(base_mat_a, 2, sd, na.rm = TRUE)
+  mean_cond_a <- colMeans(cond_mat_a, na.rm = TRUE)
+  sd_cond_a   <- apply(cond_mat_a, 2, sd, na.rm = TRUE)
+
+  polygon(c(common_aligned_years, rev(common_aligned_years)),
+          c(mean_base_a + sd_base_a, rev(pmax(0, mean_base_a - sd_base_a))),
+          col = adjustcolor("black", alpha.f = 0.10), border = NA)
+  lines(common_aligned_years, mean_base_a, col = "black", lwd = 4)
+  leg_labels <- c(leg_labels, "Mean across all groups (climate-only)")
+  leg_cols   <- c(leg_cols, "black")
+  leg_lty    <- c(leg_lty, 1L)
+
+  polygon(c(common_aligned_years, rev(common_aligned_years)),
+          c(mean_cond_a + sd_cond_a, rev(pmax(0, mean_cond_a - sd_cond_a))),
+          col = adjustcolor("black", alpha.f = 0.06), border = NA)
+  lines(common_aligned_years, mean_cond_a, col = "black", lwd = 4, lty = 2)
+  leg_labels <- c(leg_labels, "Mean across all groups (climate + condition)")
+  leg_cols   <- c(leg_cols, "black")
+  leg_lty    <- c(leg_lty, 2L)
+
+  ## Vertical alignment marker
+  abline(v = x_min, lty = 3, col = "grey50")
+
+  legend("bottomleft", legend = leg_labels, col = leg_cols,
+         lwd = ifelse(leg_cols == "black", 4, 2.5),
+         lty = leg_lty, cex = 0.7, bg = "white", ncol = 2)
+}
+
+dev.off()
+cat(sprintf("\n  Saved: %s\n\n", basename(pdf_aligned)))
+
+
+# ===========================================================================
 # B) IBRA-LEVEL COMBINED TIMESERIES
 # ===========================================================================
 cat("=== B) IBRA-level combined timeseries ===\n\n")

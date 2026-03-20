@@ -393,6 +393,55 @@ The architecture proceeds in three stages:
 
 The interaction term allows the model to capture effects such as: the impact of temperature distance on turnover depends on the magnitude of precipitation distance. The additive network (Section~\ref{sec:additive-beta}) cannot represent such interactions.
 
+\subsection{Transform-first monotone network (\texttt{beta\_type=``transform''})}
+\label{sec:transform-beta}
+
+The transform beta network is the closest neural analog of GDM's I-spline structure. Where the additive and factored architectures operate on \emph{pre-computed distances} $|\tilde{x}_{k,i} - \tilde{x}_{k,j}|$, the transform architecture first learns a monotone per-dimension transform of each site's raw (standardised) environmental value, and \emph{then} takes the distance in transformed space:
+
+\begin{equation}
+    \eta_{i,j} = \sigma_{\text{clamp}}\!\left(\sum_{k=1}^{m} g_k\!\left(\left|T_k(\tilde{x}_{k,i}) - T_k(\tilde{x}_{k,j})\right|\right)\right)
+    \label{eq:transform-beta}
+\end{equation}
+
+where $\sigma_{\text{clamp}}(z) = \eta_{\max} \cdot \sigma(z - s)$ is a sigmoid clamp with learnable shift~$s$ and maximum $\eta_{\max} = 10$, and each component is:
+
+\begin{description}
+    \item[$T_k$: per-dimension monotone transform.] A two-layer monotone network $T_k: \mathbb{R} \to \mathbb{R}$:
+    \begin{equation}
+        T_k(x) = \tilde{\mathbf{w}}_2^\top\,\text{softplus}\!\left(\tilde{\mathbf{w}}_1\,x + \mathbf{b}_1\right) + b_2
+    \end{equation}
+    with $\tilde{\mathbf{w}}_1 = \text{softplus}(\mathbf{w}_{1,\text{raw}}) \in \mathbb{R}_{\geq 0}^{n_T}$ and $\tilde{\mathbf{w}}_2 = \text{softplus}(\mathbf{w}_{2,\text{raw}}) \in \mathbb{R}_{\geq 0}^{n_T}$, where $n_T$ is the transform width (default 32). The composition of non-negative weights with a monotone activation (softplus) guarantees that $T_k$ is monotonically non-decreasing. Dropout (default 0.1) is applied between layers for regularisation. Because $T_k$ operates on the raw per-site value rather than a distance, it can discover nonlinear rescalings of the environmental axis --- for example, that the difference between 10\textdegree C and 15\textdegree C matters ecologically more than the difference between 25\textdegree C and 30\textdegree C.
+    
+    \item[$g_k$: per-dimension monotone weighting.] A two-layer monotone network $g_k: \mathbb{R}_{\geq 0} \to \mathbb{R}$ operating on the transformed distance $d_k = |T_k(\tilde{x}_{k,i}) - T_k(\tilde{x}_{k,j})|$:
+    \begin{equation}
+        g_k(d) = \tilde{\mathbf{v}}_2^\top\,\text{softplus}\!\left(\tilde{\mathbf{v}}_1\,d + \mathbf{c}_1\right)
+    \end{equation}
+    with $n_g$ hidden units (default 16). The output is \textbf{origin-anchored} via baseline subtraction: the contribution of dimension~$k$ is $g_k(d_k) - g_k(0)$, ensuring zero distance contributes zero turnover. This mirrors the additive network's baseline subtraction (Section~\ref{sec:additive-beta}).
+\end{description}
+
+\paragraph{Relationship to GDM I-splines.}
+In GDM, turnover is parameterised as $\eta_{i,j} = \sum_k \sum_s \beta_{k,s}\,|I_s(x_{k,i}) - I_s(x_{k,j})|$, where $I_s$ are monotone I-spline basis functions and $\beta_{k,s} \geq 0$. The transform network replaces the fixed I-spline bases $\{I_s\}$ with a \emph{learned} monotone transform $T_k$, and replaces the linear weighting $\sum_s \beta_{k,s}$ with a learned monotone weighting function $g_k$. The structural correspondence is:
+
+\begin{center}
+\begin{tabular}{l|l}
+    GDM I-spline & Transform NN \\
+    \hline
+    Fixed I-spline bases $I_s(\cdot)$ & Learned monotone $T_k(\cdot)$ \\
+    Non-neg coefficients $\beta_{k,s}$ & Learned monotone $g_k(\cdot)$ \\
+    Linear combination of basis diffs & Nonlinear weighting of transform diffs \\
+    Knot placement chosen a priori & ``Knot'' positions learned (biases $\mathbf{b}_1$) \\
+\end{tabular}
+\end{center}
+
+\paragraph{Monotonicity guarantee.}
+The guarantee follows from three facts: (1)~$T_k$ is monotone non-decreasing (MonotoneLinear + softplus composition); (2)~if $|x_{k,i} - x_{k,j}|$ increases and $T_k$ is monotone, then $|T_k(x_{k,i}) - T_k(x_{k,j})|$ is non-decreasing; (3)~$g_k$ is monotone non-decreasing with $g_k(0) = 0$ via baseline subtraction. The sum of non-negative monotone terms is itself monotone and non-negative, so $\eta$ is monotone non-decreasing in each $|x_{k,i} - x_{k,j}|$.
+
+\paragraph{Output activation.}
+Unlike the additive and factored networks which use a hard clamp, the transform network uses a \textbf{sigmoid clamp}: $\eta = \eta_{\max} \cdot \sigma(\text{raw} - s)$, where $s$ is a learnable shift parameter calibrated at initialisation so that a typical pair ($\sim$0.5$\sigma$ apart in each dimension) yields $\eta \approx 1.5$. The sigmoid provides smooth, everywhere-nonzero gradients, avoiding the dead gradient zone at the upper clamp boundary that can trap the additive/factored networks.
+
+\paragraph{Data flow.}
+The transform network requires per-site environmental vectors $(\mathbf{x}_i, \mathbf{x}_j)$ as input, rather than the pre-computed distance vector $\bm{\Delta}_{i,j}$ used by the additive and factored networks. The dataset pipeline retains the raw (standardised) per-site environmental values alongside the pre-computed distances, so both pathways are available. For within-site pairs ($i = j$), the distances are identically zero by construction.
+
 \subsection{Geographic distance as a beta input}
 
 Optionally, the beta network can include geographic (Haversine) distance as an additional input dimension:
@@ -408,19 +457,57 @@ The geographic distance feature is typically introduced in Phase~2 of the cyclic
 \subsection{Comparison}
 
 \begin{center}
-\begin{tabular}{l|l|l|l}
-    & TMB (I-spline) & Additive NN & Factored NN \\
+\small
+\begin{tabular}{l|l|l|l|l}
+    & TMB (I-spline) & Additive NN & Transform NN & Factored NN \\
     \hline
-    Monotonicity & Non-neg coef $\times$ I-spline & Non-neg weights $\times$ softplus & Non-neg weights $\times$ softplus \\
-    Flexibility & $S \times m$ params & $n \times m$ params & $n \times m$ + interaction \\
-    Interactions & None (additive) & None (additive) & Learned via shared network \\
-    $f_k(0) = 0$ & By construction & Baseline subtraction & Baseline subtraction \\
-    $\eta$ range & $[0, \infty)$ & $[0, 10]$ clamped & $[0, 10]$ clamped \\
-    Collapse risk & Low & Low & Low (per-dim encoders) \\
+    Monotonicity & Non-neg coef $\times$ I-spline & Non-neg weights $\times$ softplus & Non-neg weights $\times$ softplus & Non-neg weights $\times$ softplus \\
+    Input & Per-site $x_{k,i}$ & Pre-computed $|\Delta x_k|$ & Per-site $x_{k,i}$ & Pre-computed $|\Delta x_k|$ \\
+    Flexibility & $S \times m$ params & $n \times m$ params & $(n_T + n_g) \times m$ params & $n \times m$ + interaction \\
+    Interactions & None (additive) & None (additive) & None (additive) & Learned via shared network \\
+    $f_k(0) = 0$ & By construction & Baseline subtraction & Baseline subtraction & Baseline subtraction \\
+    $\eta$ range & $[0, \infty)$ & $[0, 10]$ clamped & $(0, 10)$ sigmoid & $[0, 10]$ clamped \\
+    Collapse risk & Low & Low & Low & Low (per-dim encoders) \\
+    GDM analogy & Identical structure & Learned $f_k$ on distance & Closest analog & Extended with interactions \\
 \end{tabular}
 \end{center}
 
-The factored network is the default (\texttt{beta\_type=``factored''}) as it combines per-variable interpretability with the ability to capture cross-dimension interactions. The additive variant (\texttt{beta\_type=``additive''}) is available when strict additivity and maximal interpretability are preferred.
+The factored network is the default (\texttt{beta\_type=``factored''}) as it combines per-variable interpretability with the ability to capture cross-dimension interactions. The additive variant (\texttt{beta\_type=``additive''}) is available when strict additivity and maximal interpretability are preferred. The transform variant (\texttt{beta\_type=``transform''}) is the closest neural analog of GDM's I-spline parameterisation and is preferred when the goal is to recover ecologically interpretable per-dimension transforms comparable to GDM partial functions.
+
+\subsection{Discussion: similarities and differences between the four beta architectures}
+\label{sec:beta-discussion}
+
+All four beta architectures --- including the TMB I-spline baseline --- share the same fundamental structure: turnover $\eta_{i,j}$ is a non-negative, monotone non-decreasing function of the environmental separation between sites $i$ and $j$, decomposed additively across covariate dimensions (with the factored network adding an interaction term on top). They all guarantee $\eta \geq 0$ and monotonicity in each $|x_{k,i} - x_{k,j}|$, and they all produce ecologically interpretable per-dimension response curves showing how turnover accumulates with environmental distance. The differences lie in \emph{where} the nonlinear transform is applied and \emph{what} the network takes as input.
+
+\paragraph{Distance-first vs.\ transform-first.}
+The additive and factored networks are \textbf{distance-first}: the data pipeline pre-computes environmental distances $|\tilde{x}_{k,i} - \tilde{x}_{k,j}|$ and the network learns a monotone function of those distances. The transform network is \textbf{transform-first}: it receives the raw per-site environmental values $(\tilde{x}_{k,i}, \tilde{x}_{k,j})$, applies a learned monotone transform $T_k$ to each, and \emph{then} takes the distance in transformed space. The TMB I-spline approach is also transform-first --- $|I_s(x_{k,i}) - I_s(x_{k,j})|$ --- making the transform NN the closest neural analog of GDM.
+
+This distinction matters ecologically. The distance-first approach treats every unit of standardised environmental distance the same: a 1$\sigma$ difference in temperature contributes the same raw input regardless of whether the pair is at 5\textdegree C vs.\ 6\textdegree C or at 30\textdegree C vs.\ 31\textdegree C. The learned monotone function $f_k$ can then up-weight or down-weight \emph{different magnitudes of distance}, but it cannot distinguish \emph{where on the environmental axis} the distance occurs.
+
+The transform-first approach can make this distinction. If $T_k$ compresses the upper end of the temperature axis (i.e.\ $T_k'(x)$ is small for large $x$), then a 1\textdegree C difference between warm sites maps to a smaller transformed distance than the same 1\textdegree C difference between cool sites. This is precisely the behaviour of GDM's I-splines, where the spline basis functions concentrate their ``knots'' (regions of rapid change) in the part of the environmental axis where species turnover is most sensitive.
+
+\paragraph{Parameters and capacity.}
+For a model with $m$ environmental dimensions:
+\begin{itemize}
+    \item The \textbf{additive NN} has $\sim 2n \cdot m$ parameters (one two-layer monotone network per dimension, with $n$ hidden units).
+    \item The \textbf{transform NN} has $\sim 2(n_T + n_g) \cdot m$ parameters: a $T_k$ network ($n_T$ hidden units) plus a $g_k$ network ($n_g$ hidden units) per dimension. With defaults $n_T = 32, n_g = 16$, this is roughly $3\times$ the additive network.
+    \item The \textbf{factored NN} has $\sim 2n \cdot m$ per-dimension encoder parameters plus the shared interaction network. The interaction network scales as $\mathcal{O}(m \cdot d_{\text{enc}} \cdot d_{\text{hidden}})$, so total capacity grows superlinearly with dimension count.
+    \item The \textbf{TMB I-spline} has $S \times m$ parameters (one coefficient per spline basis per dimension), typically 8--20 basis functions.
+\end{itemize}
+
+\paragraph{Interpretability.}
+The additive and transform networks are the most interpretable: each dimension's contribution can be visualised independently by sweeping the input while holding other dimensions at zero. For the additive network this produces response curves $f_k(d)$ showing turnover as a function of environmental distance. For the transform network, one can additionally visualise the $T_k$ transform itself, showing how the raw environmental axis is nonlinearly rescaled --- directly analogous to plotting GDM's fitted I-spline partial functions. The factored network's additive component is equally interpretable, but the interaction component requires joint response surfaces (two-dimensional sweeps) to visualise, making it harder to summarise succinctly.
+
+\paragraph{Gradient behaviour.}
+The additive and factored networks use a hard clamp ($\text{clamp}(\cdot, 0, 10)$) for the output, which has zero gradient when $\eta$ hits the boundary. In practice, pairs near the upper boundary can become ``stuck'' with no gradient signal to refine their turnover estimate. The transform network uses a sigmoid output activation $\eta_{\max} \cdot \sigma(\cdot - s)$, which always has nonzero gradient regardless of the $\eta$ value, providing smoother optimisation dynamics at the cost of never reaching exactly $\eta = 0$ or $\eta = 10$.
+
+\paragraph{When to use each.}
+\begin{itemize}
+    \item \textbf{Additive}: simplest, fastest, most interpretable. Preferred when there are many environmental dimensions and strict per-variable additivity is desired. Cannot represent cross-dimension interactions or position-dependent sensitivity.
+    \item \textbf{Transform}: closest to GDM, position-aware, fully interpretable. Preferred when the goal is to recover ecologically meaningful per-dimension transforms and to allow position-dependent sensitivity along environmental axes. Somewhat more expensive due to two forward passes per dimension (one per site). Like the additive network, it cannot represent cross-dimension interactions.
+    \item \textbf{Factored}: most flexible, captures interactions. Preferred when cross-dimension effects are expected (e.g.\ temperature--precipitation interactions) and some interpretability can be traded for capacity. The per-dimension encoders retain variable-level interpretability for the additive component.
+    \item \textbf{Deep}: included for completeness but not recommended. Prone to dimensional collapse under weight decay and offers no per-variable interpretability.
+\end{itemize}
 
 \section{Optimisation}
 
@@ -850,5 +937,222 @@ These considerations are important regardless of whether the sub-models are spec
     \item Compare the neural network fit against a deliberately simpler baseline (e.g.\ additive beta + small alpha net, or even a spline / shallow model) to establish whether the current extra flexibility is actually buying test performance.
     \item Look into chelsa and terraclimate covariates as alternatives to AWAP, to see whether the choice of climate dataset is influencing the fit and generalisation.
 \end{itemize}
+
+
+\subsection{Habitat condition decomposition for alpha}
+\label{sec:condition-decomposition}
+
+A useful extension is to separate \emph{potential ecological richness} from \emph{realised richness under current habitat condition}. The intuition is that climate, substrate, and other environmental predictors may describe the richness a site could support under broadly intact native condition, while land use, habitat loss, fragmentation, and other pressure variables reduce the proportion of that richness that remains.
+
+To represent this, we decompose richness into three components:
+\begin{itemize}
+    \item \(\alpha_i^{\mathrm{pot}}\): potential native richness under environmental conditions,
+    \item \(c_i^{\mathrm{cond}} \in [0,1]\): condition-retention factor, interpreted as the proportion of potential native richness retained under current habitat condition,
+    \item \(\alpha_i^{\mathrm{ecol}}\): ecological richness after condition effects are applied.
+\end{itemize}
+
+The potential richness component is modelled using the existing environmental alpha network:
+\begin{equation}
+    \alpha_i^{\mathrm{pot}}
+    =
+    1 + \mathrm{softplus}\!\left(f_\alpha(\mathbf{z}_i;\bm{W}_\alpha)\right)
+\end{equation}
+where \(\mathbf{z}_i\) contains environmental and substrate covariates and the softplus\(+1\) transform ensures \(\alpha_i^{\mathrm{pot}} > 1\).
+
+Habitat condition is modelled through a separate bounded network:
+\begin{equation}
+    c_i^{\mathrm{cond}}
+    =
+    \sigma\!\left(f_{\mathrm{cond}}(\mathbf{q}_i;\bm{W}_{\mathrm{cond}})\right)
+\end{equation}
+where \(\mathbf{q}_i\) is a vector of habitat condition / human pressure covariates (e.g.\ land use intensity, vegetation loss, fragmentation, human footprint, grazing pressure), \(\sigma(\cdot)\) is the logistic sigmoid, and therefore \(c_i^{\mathrm{cond}} \in (0,1)\).
+
+The resulting ecological richness is then:
+\begin{equation}
+    \alpha_i^{\mathrm{ecol}}
+    =
+    1 + c_i^{\mathrm{cond}}
+    \left(\alpha_i^{\mathrm{pot}} - 1\right).
+    \label{eq:alpha-condition}
+\end{equation}
+
+This formulation scales the \emph{excess above the minimum richness bound of 1}, so that:
+\begin{itemize}
+    \item \(c_i^{\mathrm{cond}} \approx 1\) implies little or no condition-related loss,
+    \item \(c_i^{\mathrm{cond}} < 1\) implies proportional reduction in retained native richness,
+    \item and \(c_i^{\mathrm{cond}} \to 0\) collapses richness toward the lower bound of the model.
+\end{itemize}
+
+\paragraph{Interpretation.}
+The condition-retention factor is best interpreted as the \emph{proportion of environmentally expected native richness retained under current habitat condition}, rather than as a literal measure of total biodiversity intactness. This keeps the quantity closely tied to the alpha component of the ObsPair likelihood.
+
+\paragraph{Relationship to effort/completeness.}
+When an observation-process decomposition is also used, it is natural to apply effort \emph{after} condition:
+\begin{equation}
+    \alpha_i^{\mathrm{eff}}
+    =
+    1 + c_i^{\mathrm{det}}
+    \left(\alpha_i^{\mathrm{ecol}} - 1\right)
+\end{equation}
+where \(c_i^{\mathrm{det}}\) is a completeness / detectability factor. In this hierarchy:
+\[
+\alpha_i^{\mathrm{pot}}
+\;\rightarrow\;
+\alpha_i^{\mathrm{ecol}}
+\;\rightarrow\;
+\alpha_i^{\mathrm{eff}}
+\]
+the environment determines potential richness, habitat condition reduces the proportion of native richness retained, and the observation process determines how much of that ecological richness is expressed in the observed draw process. In simpler implementations, the effort component can be omitted initially and the pair likelihood can be written directly in terms of \(\alpha_i^{\mathrm{ecol}}\).
+
+\paragraph{Regularisation.}
+Because \(c_i^{\mathrm{cond}}\) is a flexible multiplicative correction, a shrinkage penalty toward intact condition is useful:
+\begin{equation}
+    \mathcal{R}_{\mathrm{cond}}
+    =
+    \lambda_{\mathrm{cond}}
+    \cdot
+    \frac{1}{|B|}
+    \sum_{i \in B}
+    \left(1 - c_i^{\mathrm{cond}}\right)^2.
+\end{equation}
+This encourages the model to explain richness variation through the environmental alpha pathway unless the data support a condition-related reduction.
+
+\paragraph{Advantages.}
+This decomposition has several appealing properties:
+\begin{enumerate}
+    \item it gives habitat condition a clear ecological interpretation as a bounded retention factor rather than an unrestricted additive correction,
+    \item it separates broad environmental potential from anthropogenic degradation,
+    \item it produces a directly mappable condition surface \(c_i^{\mathrm{cond}}\),
+    \item and it can reduce the burden on the main alpha network to absorb land-use and pressure effects indirectly.
+\end{enumerate}
+
+\paragraph{Potential limitations.}
+The main caution is confounding between environment, habitat condition, and the observation process. ConditionNet should therefore be supplied only with covariates that genuinely describe habitat state or anthropogenic pressure, and its flexibility should be kept more restricted than the main environmental alpha network.
+
+\subsection{Elastic distance weighting for cyclic optimisation}
+\label{sec:elastic-weighting}
+
+A soft extension of the within-site / between-site separation is to allow the contribution of between-site pairs to vary smoothly with pair distance during optimisation. The underlying probabilistic model is \emph{not} changed:
+\begin{equation}
+    p_{i,j}
+    =
+    \exp(-\eta_{i,j})
+    \cdot
+    \frac{\alpha_i + \alpha_j}{2\alpha_i\alpha_j}.
+\end{equation}
+Instead, distance-dependent weights are used only to control how strongly different pairs contribute during the alpha and beta optimisation phases.
+
+\paragraph{Pair distance.}
+Let \(d_{i,j}\) denote a scalar pair distance, defined either in geographic space or environmental space. For example, geographic distance may be used:
+\begin{equation}
+    d_{i,j}^{\mathrm{geo}} = \mathrm{Haversine}(i,j),
+\end{equation}
+or a standardised environmental distance:
+\begin{equation}
+    d_{i,j}^{\mathrm{env}}
+    =
+    \left(
+    \sum_{k=1}^{m}
+    \frac{(x_{k,i}-x_{k,j})^2}{\sigma_k^2}
+    \right)^{1/2}.
+\end{equation}
+Within-site pairs satisfy \(d_{i,i}=0\).
+
+\paragraph{Elastic alpha and beta weights.}
+We define a smooth alpha-weighting function \(\omega_\alpha(d)\in[0,1]\) that decreases with distance, and a complementary beta-weighting function:
+\begin{equation}
+    \omega_\beta(d) = 1 - \omega_\alpha(d).
+\end{equation}
+A convenient default is the logistic form:
+\begin{equation}
+    \omega_\alpha(d)
+    =
+    \frac{1}{1 + \exp\!\left(\frac{d-\tau}{s}\right)},
+    \qquad
+    \omega_\beta(d)
+    =
+    1 - \omega_\alpha(d),
+    \label{eq:elastic-weights}
+\end{equation}
+where:
+\begin{itemize}
+    \item \(\tau\) is the transition distance at which alpha and beta contributions are equal,
+    \item \(s\) controls the smoothness of the transition.
+\end{itemize}
+Thus:
+\begin{itemize}
+    \item pairs with \(d \ll \tau\) contribute mostly to alpha,
+    \item pairs with \(d \gg \tau\) contribute mostly to beta,
+    \item and within-site pairs (\(d=0\)) remain effectively pure alpha information.
+\end{itemize}
+
+\paragraph{Key point.}
+These weights affect only \emph{how training signal is allocated} during block-coordinate optimisation. They do \emph{not} alter the generative pairwise match probability. This preserves the interpretation of the fitted model while allowing nearby and distant pairs to play different roles during optimisation.
+
+\subsubsection{Alpha phase}
+
+In the current implementation, the alpha phase is fitted primarily or exclusively on within-site pairs, for which \(d=0\) and \(\omega_\alpha(d)=1\). In that strict formulation, the elastic weighting does not materially change the alpha phase. However, if between-site pairs are later allowed to contribute weakly to alpha learning, the alpha objective can be written as:
+\begin{equation}
+    \mathcal{L}_\alpha
+    =
+    \frac{
+    \sum_{p \in P}
+    d_p \, \omega_\alpha(d_p)\, \ell_p
+    }{
+    \sum_{p \in P}
+    d_p \, \omega_\alpha(d_p)
+    }
+    +
+    \lambda_{\mathrm{lb}} \mathcal{R}_\alpha
+    +
+    \lambda_{\mathrm{anchor}} \mathcal{R}_{\mathrm{anchor}},
+\end{equation}
+where \(d_p\) is the design weight for pair \(p\), \(d_p\) in \(\omega_\alpha(d_p)\) denotes the corresponding pair distance, and \(\ell_p\) is the per-pair Bernoulli loss (optionally with retrospective correction).
+
+\subsubsection{Beta phase}
+
+The main practical use of the elastic weighting in the current formulation is in the beta phase, where alpha is frozen and beta is trained on between-site pairs. The beta objective becomes:
+\begin{equation}
+    \mathcal{L}_\beta
+    =
+    \frac{
+    \sum_{p \in P_{\mathrm{between}}}
+    d_p \, \omega_\beta(d_p)\, \ell_p
+    }{
+    \sum_{p \in P_{\mathrm{between}}}
+    d_p \, \omega_\beta(d_p)
+    }
+    +
+    \lambda_{\eta}\mathcal{R}_{\eta}
+    +
+    \lambda_{\mathrm{boost}}\mathcal{L}_{\mathrm{boost}}.
+\end{equation}
+
+This gives low-distance between-site pairs relatively less influence on beta updates, while allowing increasingly distant pairs to dominate turnover learning. In this sense the method provides a soft continuum between the strict within-site / between-site split and a fully joint pairwise likelihood.
+
+\paragraph{Interpretation.}
+Under this formulation:
+\begin{itemize}
+    \item within-site pairs remain the strongest direct anchor for alpha,
+    \item nearby between-site pairs are treated as primarily informative about richness and only secondarily about turnover,
+    \item and increasingly distant pairs are treated as progressively more informative about beta diversity.
+\end{itemize}
+
+\paragraph{Choice of distance metric.}
+Geographic distance is the simplest and safest choice for the elastic weighting because it is exogenous to the turnover covariates and less likely to create circularity. Environmental distance is more ecologically targeted, but may blur the same signal that beta is intended to learn.
+
+\paragraph{Learning the weighting curve.}
+Rather than fixing \((\tau,s)\) a priori, they can be treated as outer-loop optimisation parameters. In that case, the shape of the elastic weighting function is learned between training cycles, while the alpha and beta sub-model parameters are optimised conditionally on the current weight curve. This preserves the interpretation of the model itself while allowing the balance between near-pair and far-pair influence to adapt to the data.
+
+\paragraph{Advantages.}
+The elastic weighting scheme may help:
+\begin{enumerate}
+    \item reduce competition between alpha and beta during optimisation,
+    \item generalise the hard within-site / between-site split into a smooth continuum,
+    \item and allow the model to exploit nearby between-site pairs without forcing them to behave identically to distant turnover pairs.
+\end{enumerate}
+
+\paragraph{Potential limitations.}
+The weighting function introduces additional tuning parameters and may suppress true local turnover if the transition is too aggressive. It should therefore be treated initially as an optimisation device rather than a change to the ecological model itself.
 
 \end{document}

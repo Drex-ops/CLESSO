@@ -60,11 +60,13 @@ class CLESSONNConfig:
     # ------------------------------------------------------------------
     # Beta (turnover) network architecture -- monotone network
     # ------------------------------------------------------------------
-    beta_type: str = "factored"  # "additive" | "factored" (per-dim + interactions) | "deep"
+    beta_type: str = "transform"  # "additive" | "factored" | "transform" | "deep"
     beta_hidden: list[int] = field(default_factory=lambda: [128, 64, 32])  # only for beta_type="deep"
     beta_n_knots: int = 32       # per-dimension knots for beta_type="additive"
     beta_dropout: float = 0.1
-    beta_no_intercept: bool = True  # if True, remove bias from first MonotoneLinear in additive/factored nets
+    beta_no_intercept: bool = True  # if True, remove bias from first MonotoneLinear in additive/factored/transform nets
+    transform_n_knots: int = 32  # hidden units in T_k transform nets (beta_type="transform")
+    transform_g_knots: int = 16  # hidden units in g_k weighting nets (beta_type="transform")
     beta_lr_mult: float = 50.0  # LR multiplier for beta network (relative to base LR)
     beta_grad_scale: float = 100.0  # gradient amplification for beta params (via hooks; sigmoid provides healthy grads)
     include_geo_in_beta: bool = False  # OLD: include raw lon/lat diffs in beta (deprecated)
@@ -148,7 +150,7 @@ class CLESSONNConfig:
     # resists eta → 0 while exerting negligible force at moderate eta.
     # Acts as a safety net alongside the retrospective correction.
     # Recommended: 0.01–0.1.  Set to 0.0 to disable.
-    eta_anti_collapse_lambda: float = 0.1
+    eta_anti_collapse_lambda: float = 0.0
 
     # ------------------------------------------------------------------
     # Training
@@ -240,12 +242,12 @@ class CLESSONNConfig:
     # "two_stage" = Stage 1: alpha-only on within-site, Stage 2: beta-only on between-site
     # "cyclic" = Alternating block-coordinate descent: cycle alpha→beta→alpha→... until converged
     # "cyclic_finetune" = Phase 1: damped cyclic on env-only, Phase 2: fine-tune with geo features
-    training_mode: str = "two_stage"
+    training_mode: str = "cyclic_finetune"  # "joint" | "two_stage" | "cyclic" | "cyclic_finetune"
 
-    stage1_max_epochs: int = 50
+    stage1_max_epochs: int = 300
     stage1_patience: int = 30
 
-    stage2_max_epochs: int = 10
+    stage2_max_epochs: int = 300
     stage2_patience: int = 40
     stage2_beta_grad_scale: float = 1.0  # sigmoid provides healthy gradients; no amplification needed
 

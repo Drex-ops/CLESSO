@@ -57,7 +57,7 @@ DEFAULTS = dict(
     npy_src="/Volumes/PortableSSD/CLIMATE/geonpy",
     output=None,  # derived from checkpoint dir at runtime
     n_landmarks=500,
-    n_components=3,
+    n_components=9,
     stretch=2.0,       # percentile stretch for RGB
     seed=42,
     batch_size=50_000,
@@ -201,7 +201,7 @@ def extract_climate(npy_src, lons, lats, climate_specs,
 def load_model(checkpoint_path, device="cpu"):
     """Load trained CLESSO NN model from checkpoint."""
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from clesso_nn.model import CLESSONet
+    from clesso_nn.model import CLESSONet, TransformBetaNet
 
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     cfg = ckpt["config"]
@@ -226,6 +226,8 @@ def load_model(checkpoint_path, device="cpu"):
         beta_type=cfg.get("beta_type", "deep"),
         beta_n_knots=cfg.get("beta_n_knots", 32),
         beta_no_intercept=beta_no_intercept,
+        transform_n_knots=cfg.get("transform_n_knots", 32),
+        transform_g_knots=cfg.get("transform_g_knots", 16),
         K_effort=cfg.get("K_effort", 0),
         effort_hidden=cfg.get("effort_hidden", [64, 32]),
         effort_dropout=cfg.get("effort_dropout", 0.1),
@@ -327,6 +329,37 @@ def compute_eta_pairwise(model, E_std_a, G_std_a, E_std_b, G_std_b,
         eta: (n,) float32 array
     """
     n = E_std_a.shape[0]
+
+    from clesso_nn.model import TransformBetaNet
+    _is_transform = isinstance(model.beta_net, TransformBetaNet)
+
+    if _is_transform:
+        # TransformBetaNet takes (env_i, env_j, geo_dist)
+        if G_std_a is not None and G_std_b is not None:
+            env_a = np.hstack([E_std_a, G_std_a]).astype(np.float32)
+            env_b = np.hstack([E_std_b, G_std_b]).astype(np.float32)
+        else:
+            env_a = E_std_a.astype(np.float32)
+            env_b = E_std_b.astype(np.float32)
+
+        geo_d_norm = None
+        if geo_dist_scale is not None and lons_a is not None:
+            from clesso_nn.dataset import haversine_km
+            d_km = haversine_km(lons_a, lats_a, lons_b, lats_b).astype(np.float32)
+            geo_d_norm = (d_km / geo_dist_scale).reshape(-1, 1)
+
+        eta = np.empty(n, dtype=np.float32)
+        for start in range(0, n, batch_size):
+            end = min(start + batch_size, n)
+            ei_t = torch.from_numpy(env_a[start:end]).to(device)
+            ej_t = torch.from_numpy(env_b[start:end]).to(device)
+            gd_t = None
+            if geo_d_norm is not None:
+                gd_t = torch.from_numpy(geo_d_norm[start:end]).to(device)
+            eta[start:end] = model.beta_net(ei_t, ej_t, geo_dist=gd_t).cpu().numpy()
+        return eta
+
+    # --- Non-transform beta nets: pass |env_diff| ---
     if G_std_a is not None and G_std_b is not None:
         env_diff = np.abs(
             np.hstack([E_std_a, G_std_a]) - np.hstack([E_std_b, G_std_b])
@@ -439,6 +472,8 @@ def scores_to_rgb(scores, stretch=2.0):
         hi = np.percentile(v, 100 - stretch)
         if hi <= lo:
             lo, hi = v.min(), v.max()
+        if hi <= lo:
+            continue  # constant dimension → leave channel at 0
         scaled = np.clip((v - lo) / (hi - lo), 0, 1)
         rgb[:, k] = (scaled * 255).astype(np.uint8)
     return rgb
@@ -495,7 +530,8 @@ def write_rgb_geotiff(output_path, rgb_vals, mask, grid):
 def plot_beta_map(rgb_vals, mds_scores, grid, eigenvalues, var_explained,
                   n_neg, n_landmarks, pdf_path,
                   shapefile_path=None, epoch=0, val_loss=0.0,
-                  lm_lons=None, lm_lats=None, stretch=2.0):
+                  lm_lons=None, lm_lats=None, stretch=2.0,
+                  extra_triplets=None):
     """Produce a multi-page PDF with beta surface maps and diagnostics."""
     import matplotlib
     matplotlib.use("Agg")
@@ -671,6 +707,107 @@ def plot_beta_map(rgb_vals, mds_scores, grid, eigenvalues, var_explained,
         fig.tight_layout()
         pdf.savefig(fig, dpi=150)
         plt.close(fig)
+
+        # ─── Extra triplet pages (dims 4-6, 7-9, …) ────────────
+        if extra_triplets:
+            for dim_start, trip_rgb in extra_triplets:
+                dim_end = min(dim_start + 3, mds_scores.shape[1])
+                n_trip = dim_end - dim_start
+                trip_channels = ["Red", "Green", "Blue"][:n_trip]
+                trip_var = var_explained[dim_start:dim_end]
+
+                # RGB map page
+                trip_img = np.full((height, width, 3), 230, dtype=np.uint8)
+                trip_img[mask] = trip_rgb
+
+                fig, ax = plt.subplots(figsize=(12, 10))
+                ax.imshow(trip_img, extent=extent, origin="upper",
+                          interpolation="nearest", aspect="equal")
+
+                if boundary_shapes is not None:
+                    for shape in boundary_shapes:
+                        for i_part in range(len(shape.parts)):
+                            i_start = shape.parts[i_part]
+                            i_end = (shape.parts[i_part + 1]
+                                     if i_part + 1 < len(shape.parts)
+                                     else len(shape.points))
+                            pts = np.array(shape.points[i_start:i_end])
+                            if len(pts) > 2:
+                                ax.plot(pts[:, 0], pts[:, 1],
+                                        color="#333333", linewidth=0.25,
+                                        alpha=0.4)
+
+                ax.set_xlim(x_min, x_max)
+                ax.set_ylim(y_min, y_max)
+                ax.set_xlabel("Longitude (°E)", fontsize=11)
+                ax.set_ylabel("Latitude (°S)", fontsize=11)
+                ax.set_title(
+                    f"Biological Space — Dims {dim_start+1}–"
+                    f"{dim_start+n_trip} "
+                    f"({sum(trip_var):.1f}% variance)\n"
+                    f"Epoch {epoch} | {n_landmarks} landmarks | "
+                    f"{stretch}% stretch",
+                    fontsize=13, fontweight="bold")
+                ax.grid(True, linewidth=0.3, alpha=0.3, color="grey")
+
+                legend_lines = []
+                for i in range(n_trip):
+                    legend_lines.append(
+                        f"  Dim {dim_start+i+1} ({trip_channels[i]}): "
+                        f"{trip_var[i]:.1f}%")
+                legend_lines.append(f"  Total: {sum(trip_var):.1f}%")
+                ax.text(0.02, 0.02, "\n".join(legend_lines),
+                        transform=ax.transAxes, fontsize=9,
+                        verticalalignment="bottom",
+                        bbox=dict(boxstyle="round,pad=0.4",
+                                  facecolor="white", alpha=0.85,
+                                  edgecolor="grey"))
+
+                fig.tight_layout()
+                pdf.savefig(fig, dpi=200)
+                plt.close(fig)
+
+                # Individual dimension maps page
+                dim_colors_t = ["#B2182B", "#238B45", "#2166AC"]
+                fig, axes = plt.subplots(1, 3, figsize=(16, 6))
+                for kk in range(3):
+                    ax = axes[kk]
+                    d = dim_start + kk
+                    if d < mds_scores.shape[1]:
+                        dim_2d = np.full((height, width), np.nan,
+                                         dtype=np.float32)
+                        dim_2d[mask] = mds_scores[:, d]
+                        vlo = np.percentile(mds_scores[:, d], stretch)
+                        vhi = np.percentile(mds_scores[:, d],
+                                            100 - stretch)
+                        cmap = plt.cm.RdYlBu_r.copy()
+                        cmap.set_bad(color="#e8e8e8")
+                        im = ax.imshow(dim_2d, extent=extent,
+                                       origin="upper", cmap=cmap,
+                                       vmin=vlo, vmax=vhi,
+                                       interpolation="nearest",
+                                       aspect="equal")
+                        fig.colorbar(im, ax=ax, shrink=0.6, pad=0.02)
+                        dv = trip_var[kk] if kk < len(trip_var) else 0
+                        ax.set_title(
+                            f"Dim {d+1} ({trip_channels[kk]}) "
+                            f"({dv:.1f}%)",
+                            fontsize=11, fontweight="bold",
+                            color=dim_colors_t[kk])
+                    else:
+                        ax.axis("off")
+                        ax.text(0.5, 0.5, "(not available)",
+                                ha="center", va="center",
+                                transform=ax.transAxes)
+                    ax.set_xlim(x_min, x_max)
+                    ax.set_ylim(y_min, y_max)
+
+                fig.suptitle(
+                    f"MDS Dimensions {dim_start+1}–{dim_start+n_trip}",
+                    fontsize=13, fontweight="bold")
+                fig.tight_layout()
+                pdf.savefig(fig, dpi=150)
+                plt.close(fig)
 
     print(f"  Written: {pdf_path}")
 
@@ -874,29 +1011,49 @@ def main():
 
     # ── 8. RGB mapping + output ─────────────────────────────────────
     print(f"\n[8/8] Generating RGB map and outputs...")
-    rgb_vals = scores_to_rgb(scores.astype(np.float32), stretch=args.stretch)
+    scores_f32 = scores.astype(np.float32)
+    rgb_vals = scores_to_rgb(scores_f32[:, :3], stretch=args.stretch)
 
-    # Write GeoTIFF
+    # Write GeoTIFF (dims 1–3)
     write_rgb_geotiff(args.output, rgb_vals, mask, grid)
+
+    # Additional RGB triplets for higher MDS dimensions
+    extra_triplets = []
+    m_avail = scores_f32.shape[1]
+    for d_start in (3, 6):
+        if d_start < m_avail:
+            d_end = min(d_start + 3, m_avail)
+            trip_scores = np.zeros((scores_f32.shape[0], 3), dtype=np.float32)
+            trip_scores[:, :d_end - d_start] = scores_f32[:, d_start:d_end]
+            trip_rgb = scores_to_rgb(trip_scores, stretch=args.stretch)
+            extra_triplets.append((d_start, trip_rgb))
+
+            suffix = f"_dims{d_start+1}-{d_start+3}"
+            trip_path = str(Path(args.output).with_suffix('')) + suffix + ".tif"
+            write_rgb_geotiff(trip_path, trip_rgb, mask, grid)
 
     # Generate PDF map
     pdf_path = Path(args.output).with_suffix(".pdf")
     shapefile_path = PROJECT_ROOT / "data" / "ibra51_reg" / "ibra51_regions.shp"
 
     plot_beta_map(
-        rgb_vals, scores.astype(np.float32), grid,
+        rgb_vals, scores_f32, grid,
         eigenvalues, var_explained, n_neg,
         n_landmarks=k, pdf_path=pdf_path,
         shapefile_path=shapefile_path,
         epoch=ckpt["epoch"], val_loss=ckpt["val_loss"],
         lm_lons=lons_valid[lm_idx], lm_lats=lats_valid[lm_idx],
         stretch=args.stretch,
+        extra_triplets=extra_triplets,
     )
 
     dt = time.time() - t_start
     print(f"\nDone in {dt:.0f}s ({dt / 60:.1f} min)")
     print(f"Outputs:")
     print(f"  GeoTIFF: {args.output}")
+    for d_start, _ in extra_triplets:
+        suffix = f"_dims{d_start+1}-{d_start+3}"
+        print(f"  GeoTIFF: {Path(args.output).with_suffix('')}{suffix}.tif")
     print(f"  PDF map: {pdf_path}")
 
 

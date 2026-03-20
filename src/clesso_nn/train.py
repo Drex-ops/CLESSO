@@ -567,7 +567,10 @@ def _stage2_validate(
         w_j = W[batch["site_j"]] if W is not None else None
 
         fwd = model.forward(z_i, z_j, batch["env_diff"], batch["is_within"],
-                            w_i=w_i, w_j=w_j)
+                            w_i=w_i, w_j=w_j,
+                            env_i=batch.get("env_i"),
+                            env_j=batch.get("env_j"),
+                            geo_dist=batch.get("geo_dist"))
         p = fwd["p_match"].clamp(eps, 1.0 - eps)
         y = batch["y"]
         eta = fwd["eta"]
@@ -666,6 +669,8 @@ def _save_checkpoint(model, optimizer, epoch, val_loss, site_data, config, path)
             "beta_type": config.beta_type,
             "beta_n_knots": config.beta_n_knots,
             "beta_no_intercept": config.beta_no_intercept,
+            "transform_n_knots": config.transform_n_knots,
+            "transform_g_knots": config.transform_g_knots,
             "training_mode": config.training_mode,
             "geo_penalty_alpha": getattr(config, "geo_penalty_alpha", 0.0),
             "geo_penalty_beta": getattr(config, "geo_penalty_beta", 0.0),
@@ -1002,7 +1007,10 @@ def train_two_stage(
                 w_j = W[batch["site_j"]] if W is not None else None
 
                 fwd = model.forward(z_i, z_j, batch["env_diff"], batch["is_within"],
-                                    w_i=w_i, w_j=w_j)
+                                    w_i=w_i, w_j=w_j,
+                                    env_i=batch.get("env_i"),
+                                    env_j=batch.get("env_j"),
+                                    geo_dist=batch.get("geo_dist"))
                 p = fwd["p_match"].clamp(eps, 1.0 - eps)
                 y = batch["y"]
                 eta = fwd["eta"]
@@ -1501,7 +1509,10 @@ def train_cyclic(
 
                     fwd = model.forward(z_i, z_j, batch["env_diff"],
                                         batch["is_within"],
-                                        w_i=w_i, w_j=w_j)
+                                        w_i=w_i, w_j=w_j,
+                                        env_i=batch.get("env_i"),
+                                        env_j=batch.get("env_j"),
+                                        geo_dist=batch.get("geo_dist"))
                     p = fwd["p_match"].clamp(eps, 1.0 - eps)
                     y = batch["y"]
                     eta = fwd["eta"]
@@ -1960,7 +1971,10 @@ def train_finetune_geo(
             w_j = W[batch["site_j"]] if W is not None else None
 
             fwd = model.forward(z_i, z_j, batch["env_diff"], batch["is_within"],
-                                w_i=w_i, w_j=w_j)
+                                w_i=w_i, w_j=w_j,
+                                env_i=batch.get("env_i"),
+                                env_j=batch.get("env_j"),
+                                geo_dist=batch.get("geo_dist"))
             p = fwd["p_match"].clamp(eps, 1.0 - eps)
             y = batch["y"]
             stratum = batch["stratum"]
@@ -2278,7 +2292,10 @@ def train_finetune_joint(
             w_j = W[batch["site_j"]] if W is not None else None
 
             fwd = model.forward(z_i, z_j, batch["env_diff"], batch["is_within"],
-                                w_i=w_i, w_j=w_j)
+                                w_i=w_i, w_j=w_j,
+                                env_i=batch.get("env_i"),
+                                env_j=batch.get("env_j"),
+                                geo_dist=batch.get("geo_dist"))
             p = fwd["p_match"].clamp(eps, 1.0 - eps)
             y = batch["y"]
             stratum = batch["stratum"]

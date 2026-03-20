@@ -375,6 +375,204 @@ class AdditiveBetaNet(nn.Module):
         return _sigmoid_clamp(total, self.sigmoid_shift, max_val=self.eta_max)
 
 
+class TransformBetaNet(nn.Module):
+    """Transform-first beta network: learn T_k, then take distances.
+
+    This is the closest neural analog of GDM's I-spline structure.
+    For each covariate k, learn a monotone 1D transform T_k(x), then define
+
+        η = sigmoid_clamp(Σ_k g_k(|T_k(x_{k,i}) - T_k(x_{k,j})|), shift, 10)
+
+    where T_k is a monotone per-dimension transform and g_k is a monotone
+    per-dimension weighting network (both using MonotoneLinear + Softplus).
+
+    Key difference from AdditiveBetaNet:
+        AdditiveBetaNet:   f_k(|x_i - x_j|)     — learns on pre-computed distances
+        TransformBetaNet:  g_k(|T_k(x_i) - T_k(x_j)|) — learns transform first
+
+    The transform-first approach lets the network discover that e.g. the
+    difference between 10°C and 15°C matters more than between 25°C and 30°C,
+    which is exactly what GDM's I-splines achieve.
+
+    Monotonicity guarantee:
+        - T_k is monotone (MonotoneLinear + Softplus composition)
+        - |T_k(x_i) - T_k(x_j)| is non-negative
+        - If x_i and x_j move further apart in the raw env space, T_k being
+          monotone means |T_k(x_i) - T_k(x_j)| ≥ previous value
+        - g_k is monotone and origin-anchored (g_k(0) = 0)
+        - The sum of non-negative monotone terms is monotone and non-negative
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        n_transform_knots: int = 32,
+        n_g_knots: int = 16,
+        dropout: float = 0.1,
+        no_intercept: bool = False,
+        n_geo_dims: int = 0,
+    ):
+        super().__init__()
+        self.K_env = input_dim
+        self.n_transform_knots = n_transform_knots
+        self.n_g_knots = n_g_knots
+        self.no_intercept = no_intercept
+        self.n_geo_dims = n_geo_dims
+        self.eta_max = 10.0
+
+        # Learnable shift for sigmoid output
+        self.sigmoid_shift = nn.Parameter(torch.tensor(1.75))
+
+        # Per-dimension monotone transform: raw env scalar → transformed scalar
+        # T_k: scalar → n_transform_knots → 1
+        self.transform_nets = nn.ModuleList()
+        for _ in range(input_dim):
+            self.transform_nets.append(nn.Sequential(
+                MonotoneLinear(1, n_transform_knots, bias=True),
+                nn.Softplus(),
+                nn.Dropout(dropout),
+                MonotoneLinear(n_transform_knots, 1, bias=True),
+            ))
+
+        # Per-dimension monotone weighting: |T_k(x_i) - T_k(x_j)| → contribution
+        # g_k: scalar → n_g_knots → 1, origin-anchored via baseline subtraction
+        self.weight_nets = nn.ModuleList()
+        for _ in range(input_dim):
+            self.weight_nets.append(nn.Sequential(
+                MonotoneLinear(1, n_g_knots, bias=not no_intercept),
+                nn.Softplus(),
+                nn.Dropout(dropout),
+                MonotoneLinear(n_g_knots, 1, bias=False),
+            ))
+
+        # Optional geo distance sub-nets (haversine km, already a scalar distance)
+        # These use the same g_k-style monotone network directly on distance.
+        self.geo_nets = nn.ModuleList()
+        for _ in range(n_geo_dims):
+            self.geo_nets.append(nn.Sequential(
+                MonotoneLinear(1, n_g_knots, bias=not no_intercept),
+                nn.Softplus(),
+                nn.Dropout(dropout),
+                MonotoneLinear(n_g_knots, 1, bias=False),
+            ))
+
+        self._init_weights()
+        self._calibrate_sigmoid_shift()
+
+    def _init_weights(self):
+        """Initialise transform and weighting networks."""
+        # Transform nets: moderate init so T_k starts near-linear
+        for net in self.transform_nets:
+            first_layer = True
+            for m in net.modules():
+                if isinstance(m, MonotoneLinear):
+                    if first_layer:
+                        nn.init.uniform_(m.weight_raw, -0.5, 0.5)
+                        if m.bias is not None:
+                            n = m.bias.shape[0]
+                            m.bias.data.copy_(torch.linspace(-3.0, 0.0, n))
+                        first_layer = False
+                    else:
+                        # Output layer: moderate so T_k has ~unit-scale output
+                        nn.init.constant_(m.weight_raw, -2.0)
+                        if m.bias is not None:
+                            nn.init.zeros_(m.bias)
+
+        # Weight nets: small init (same pattern as AdditiveBetaNet dim_nets)
+        for net_list in [self.weight_nets, self.geo_nets]:
+            for net in net_list:
+                first_layer = True
+                for m in net.modules():
+                    if isinstance(m, MonotoneLinear):
+                        if first_layer:
+                            nn.init.uniform_(m.weight_raw, -0.5, 0.5)
+                            if m.bias is not None:
+                                n = m.bias.shape[0]
+                                m.bias.data.copy_(torch.linspace(-3.0, 0.0, n))
+                            first_layer = False
+                        else:
+                            nn.init.constant_(m.weight_raw, -3.0)
+
+    def _calibrate_sigmoid_shift(self, target_eta: float = 1.5):
+        """Set sigmoid_shift so η ≈ target_eta for typical standardised input.
+
+        Simulates a pair of sites 0.5σ apart in each env dimension.
+        """
+        with torch.no_grad():
+            # Simulate site_i at +0.25σ and site_j at -0.25σ (total diff 0.5σ)
+            env_i = torch.ones(64, self.K_env) * 0.25
+            env_j = torch.ones(64, self.K_env) * -0.25
+            total = torch.zeros(64)
+            zero = torch.zeros(1, 1)
+            for k in range(self.K_env):
+                t_i = self.transform_nets[k](env_i[:, k:k+1])
+                t_j = self.transform_nets[k](env_j[:, k:k+1])
+                delta_k = torch.abs(t_i - t_j)
+                g_k = self.weight_nets[k](delta_k)
+                g_k_0 = self.weight_nets[k](zero)
+                total += (g_k - g_k_0).squeeze(-1)
+            mean_raw = total.mean().item()
+            t = target_eta / self.eta_max
+            logit_t = math.log(t / (1.0 - t))
+            self.sigmoid_shift.data.fill_(mean_raw - logit_t)
+
+    def transform_site(self, env: torch.Tensor) -> torch.Tensor:
+        """Apply per-dimension transforms T_k to raw (standardised) env values.
+
+        Useful for spatial prediction (PCA on transformed space → RGB) and
+        spline visualisation.
+
+        Args:
+            env: (N, K_env) standardised environmental covariates
+        Returns:
+            transformed: (N, K_env) T_k(env_k) for each dimension k
+        """
+        parts = []
+        for k in range(self.K_env):
+            t_k = self.transform_nets[k](env[:, k:k+1])  # (N, 1)
+            parts.append(t_k)
+        return torch.cat(parts, dim=-1)  # (N, K_env)
+
+    def forward(
+        self,
+        env_i: torch.Tensor,
+        env_j: torch.Tensor,
+        geo_dist: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """
+        Args:
+            env_i: (B, K_env) standardised env covariates for site i
+            env_j: (B, K_env) standardised env covariates for site j
+            geo_dist: (B, n_geo_dims) normalised geographic distance(s), or None
+        Returns:
+            eta: (B,) non-negative turnover values η ∈ (0, eta_max)
+        """
+        device = env_i.device
+        total = torch.zeros(env_i.shape[0], device=device)
+        zero = torch.zeros(1, 1, device=device)
+
+        for k in range(self.K_env):
+            # Apply monotone transform to each site's env value
+            t_i = self.transform_nets[k](env_i[:, k:k+1])   # (B, 1)
+            t_j = self.transform_nets[k](env_j[:, k:k+1])   # (B, 1)
+            # Distance in transformed space
+            delta_k = torch.abs(t_i - t_j)                   # (B, 1)
+            # Monotone weighting, origin-anchored
+            g_k = self.weight_nets[k](delta_k)                # (B, 1)
+            g_k_0 = self.weight_nets[k](zero)                 # (1, 1)
+            total = total + (g_k - g_k_0).squeeze(-1)         # (B,)
+
+        # Optional geographic distance dimensions
+        if geo_dist is not None and self.n_geo_dims > 0:
+            for g in range(self.n_geo_dims):
+                d_g = geo_dist[:, g:g+1]                      # (B, 1)
+                h_g = self.geo_nets[g](d_g)                   # (B, 1)
+                h_g_0 = self.geo_nets[g](zero)                # (1, 1)
+                total = total + (h_g - h_g_0).squeeze(-1)     # (B,)
+
+        return _sigmoid_clamp(total, self.sigmoid_shift, max_val=self.eta_max)
+
+
 class FactoredDeepBetaNet(nn.Module):
     """Factored deep beta network: per-dimension monotone encoders + monotone interaction.
 
@@ -604,6 +802,8 @@ def expand_model_for_geo(
         beta_type=config.beta_type,
         beta_n_knots=config.beta_n_knots,
         beta_no_intercept=config.beta_no_intercept,
+        transform_n_knots=getattr(config, 'transform_n_knots', 32),
+        transform_g_knots=getattr(config, 'transform_g_knots', 16),
         K_effort=model_phase1.effort_net.net[0].in_features if model_phase1.effort_net else 0,
         effort_hidden=config.effort_hidden,
         effort_dropout=config.effort_dropout,
@@ -650,6 +850,13 @@ def expand_model_for_geo(
                 beta_new.dim_projectors[k].load_state_dict(beta_old.dim_projectors[k].state_dict())
             # Interaction net is rebuilt with new K_env dims → fresh init
             # (input size changes with K_env, so weights can't be transferred)
+
+        elif isinstance(beta_old, TransformBetaNet):
+            # Copy per-dimension transform and weight nets
+            for k in range(K_env_old):
+                beta_new.transform_nets[k].load_state_dict(beta_old.transform_nets[k].state_dict())
+                beta_new.weight_nets[k].load_state_dict(beta_old.weight_nets[k].state_dict())
+            # New geo_nets keep fresh initialisation
 
         else:
             # Deep beta or unknown — skip beta transfer
@@ -705,6 +912,8 @@ class CLESSONet(nn.Module):
         beta_type: str = "additive",
         beta_n_knots: int = 32,
         beta_no_intercept: bool = False,
+        transform_n_knots: int = 32,
+        transform_g_knots: int = 16,
         K_effort: int = 0,
         effort_hidden: list[int] = (64, 32),
         effort_dropout: float = 0.1,
@@ -735,11 +944,17 @@ class CLESSONet(nn.Module):
                 interaction_hidden=[32], dropout=0.0,
                 no_intercept=beta_no_intercept,
             )
+        elif beta_type == "transform":
+            self.beta_net = TransformBetaNet(
+                K_env, n_transform_knots=transform_n_knots,
+                n_g_knots=transform_g_knots, dropout=beta_dropout,
+                no_intercept=beta_no_intercept,
+            )
         elif beta_type == "deep":
             self.beta_net = MonotoneBetaNet(K_env, beta_hidden, beta_dropout)
         else:
             raise ValueError(f"Unknown beta_type: {beta_type!r}. "
-                             "Use 'additive', 'factored', or 'deep'.")
+                             "Use 'additive', 'factored', 'transform', or 'deep'.")
 
         self.alpha_lb_lambda = alpha_lb_lambda
         self.alpha_anchor_lambda = alpha_anchor_lambda
@@ -805,6 +1020,11 @@ class CLESSONet(nn.Module):
                     for p in self.beta_net.encoders[k].parameters():
                         beta_geo_l2 = beta_geo_l2 + p.pow(2).sum()
                     for p in self.beta_net.dim_projectors[k].parameters():
+                        beta_geo_l2 = beta_geo_l2 + p.pow(2).sum()
+            elif isinstance(self.beta_net, TransformBetaNet):
+                # Penalise geo_nets parameters (not env transform/weight nets)
+                for g in range(self.beta_net.n_geo_dims):
+                    for p in self.beta_net.geo_nets[g].parameters():
                         beta_geo_l2 = beta_geo_l2 + p.pow(2).sum()
 
         return alpha_geo_l2, beta_geo_l2
@@ -891,6 +1111,9 @@ class CLESSONet(nn.Module):
         is_within: torch.Tensor, # (B,):         1=within, 0=between
         w_i: torch.Tensor | None = None,  # (B, K_effort): effort covs site i
         w_j: torch.Tensor | None = None,  # (B, K_effort): effort covs site j
+        env_i: torch.Tensor | None = None,  # (B, K_env): raw standardised env site i
+        env_j: torch.Tensor | None = None,  # (B, K_env): raw standardised env site j
+        geo_dist: torch.Tensor | None = None,  # (B, n_geo): geo distance(s)
     ) -> dict[str, torch.Tensor]:
         """Forward pass returning alpha, eta, similarity, and match probability.
 
@@ -902,7 +1125,10 @@ class CLESSONet(nn.Module):
         """
         alpha_i = self._compute_alpha(z_i, w_i)
         alpha_j = self._compute_alpha(z_j, w_j)
-        eta = self.beta_net(env_diff)
+        if isinstance(self.beta_net, TransformBetaNet):
+            eta = self.beta_net(env_i, env_j, geo_dist=geo_dist)
+        else:
+            eta = self.beta_net(env_diff)
         similarity = torch.exp(-eta)
 
         # --- Log-space match probability ---
@@ -989,7 +1215,10 @@ class CLESSONet(nn.Module):
             dict with loss components and forward outputs
         """
         fwd = self.forward(z_i, z_j, batch["env_diff"], batch["is_within"],
-                           w_i=w_i, w_j=w_j)
+                           w_i=w_i, w_j=w_j,
+                           env_i=batch.get("env_i"),
+                           env_j=batch.get("env_j"),
+                           geo_dist=batch.get("geo_dist"))
 
         y = batch["y"]
         design_w = batch["design_w"]

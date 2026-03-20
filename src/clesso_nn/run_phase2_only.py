@@ -60,6 +60,7 @@ def main():
         alpha_lb_lambda=cfg.alpha_lower_bound_lambda,
         alpha_regression_lambda=cfg.alpha_regression_lambda,
         beta_type=cfg.beta_type, beta_n_knots=cfg.beta_n_knots,
+        transform_n_knots=cfg.transform_n_knots, transform_g_knots=cfg.transform_g_knots,
         K_effort=ckpt["config"].get("K_effort", 0),
         effort_hidden=ckpt["config"].get("effort_hidden", [64, 32]),
         effort_dropout=ckpt["config"].get("effort_dropout", 0.1),

@@ -59,7 +59,7 @@ if str(_project_root) not in sys.path:
 
 from src.clesso_nn.config import CLESSONNConfig
 from src.clesso_nn.dataset import SiteData, load_export, make_dataloaders, collate_fn
-from src.clesso_nn.model import CLESSONet
+from src.clesso_nn.model import CLESSONet, TransformBetaNet
 from src.clesso_nn.predict import (
     check_monotonicity,
     load_model,
@@ -171,12 +171,23 @@ def run_diagnostics(
     ckpt_alpha_names = stats.get("alpha_cov_names", [])
     data["metadata"]["exclude_coords_from_alpha"] = ("lon" not in ckpt_alpha_names and "lat" not in ckpt_alpha_names)
 
+    # Derive exclude_cov_names: any numeric column in site_covariates that was
+    # NOT used as an alpha covariate OR effort covariate during training must be
+    # excluded (e.g. effort_drop_cov_names like ala_record_count).
+    _ckpt_effort = stats.get("effort_cov_names") or []
+    _keep_set = set(ckpt_alpha_names) | set(_ckpt_effort) | {"site_id"}
+    _sc = data["site_covariates"]
+    _exclude = [c for c in _sc.columns
+                if c not in _keep_set
+                and pd.api.types.is_numeric_dtype(_sc[c])]
+
     site_data = SiteData(
         site_covariates=data["site_covariates"],
         env_site_table=data["env_site_table"],
         site_obs_richness=data["site_obs_richness"],
         metadata=data["metadata"],
-        effort_cov_names=stats.get("effort_cov_names") or None,
+        effort_cov_names=_ckpt_effort or None,
+        exclude_cov_names=_exclude or None,
     )
 
     # Override geo_dist_scale with checkpoint value for exact reproducibility
@@ -234,8 +245,25 @@ def run_diagnostics(
     is_within = pairs["is_within"].values.astype(bool)
     env_diff[is_within] = 0.0
 
+    _is_transform = isinstance(model.beta_net, TransformBetaNet)
+
     with torch.no_grad():
-        eta = model.beta_net(torch.from_numpy(env_diff)).cpu().numpy()
+        if _is_transform:
+            # TransformBetaNet needs per-site env values, not pre-computed diffs
+            ei_t = env_i.clone()
+            ej_t = env_j.clone()
+            ei_t[is_within] = 0.0
+            ej_t[is_within] = 0.0
+            geo_dist_t = None
+            if site_data.include_geo_dist_in_beta and site_data.lon_deg is not None:
+                geo_dist_t = torch.from_numpy(
+                    geo_dist_norm[..., np.newaxis] if geo_dist_norm.ndim == 1
+                    else geo_dist_norm
+                )
+                geo_dist_t[is_within] = 0.0
+            eta = model.beta_net(ei_t, ej_t, geo_dist=geo_dist_t).cpu().numpy()
+        else:
+            eta = model.beta_net(torch.from_numpy(env_diff)).cpu().numpy()
     similarity = np.exp(-eta)
 
     # p_match
@@ -1038,7 +1066,10 @@ def run_diagnostics(
             ax.plot(d, e, color=PAL_BLUE, lw=2.5)
             status = "✓ monotone" if info["is_monotone"] else "✗ violation"
             ax.set_title(f"{all_env_names[dim]}  [{status}]", fontsize=9)
-            ax.set_xlabel(f"|Δ {all_env_names[dim]}| (standardised)")
+            if _is_transform:
+                ax.set_xlabel(f"{all_env_names[dim]} (standardised)")
+            else:
+                ax.set_xlabel(f"|Δ {all_env_names[dim]}| (standardised)")
             ax.set_ylabel("η (turnover)")
             ax.axhline(0, color=PAL_GREY, ls=":", lw=0.5)
 
@@ -1064,7 +1095,10 @@ def run_diagnostics(
             ax.plot(d, S, color=PAL_BLUE, lw=2.5)
             ax.set_ylim(0, 1)
             ax.set_title(all_env_names[dim], fontsize=9)
-            ax.set_xlabel(f"|Δ {all_env_names[dim]}| (standardised)")
+            if _is_transform:
+                ax.set_xlabel(f"{all_env_names[dim]} (standardised)")
+            else:
+                ax.set_xlabel(f"|Δ {all_env_names[dim]}| (standardised)")
             ax.set_ylabel("Similarity S = exp(−η)")
 
             # Baseline S at distance=0
@@ -1227,16 +1261,31 @@ def run_diagnostics(
             fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 
             n_grid = 80
-            r1 = np.linspace(0, 5, n_grid)
-            r2 = np.linspace(0, 5, n_grid)
+            if _is_transform:
+                r1 = np.linspace(-3, 3, n_grid)
+                r2 = np.linspace(-3, 3, n_grid)
+            else:
+                r1 = np.linspace(0, 5, n_grid)
+                r2 = np.linspace(0, 5, n_grid)
             G1, G2 = np.meshgrid(r1, r2)
 
-            env_grid = np.zeros((n_grid * n_grid, K_env), dtype=np.float32)
-            env_grid[:, d1] = G1.ravel()
-            env_grid[:, d2] = G2.ravel()
-
             with torch.no_grad():
-                eta_2d = model.beta_net(torch.from_numpy(env_grid)).cpu().numpy()
+                if _is_transform:
+                    env_i_2d = np.zeros((n_grid * n_grid, K_env), dtype=np.float32)
+                    env_j_2d = np.zeros((n_grid * n_grid, K_env), dtype=np.float32)
+                    env_i_2d[:, d1] = G1.ravel()
+                    env_i_2d[:, d2] = G2.ravel()
+                    # env_j stays at 0 (mean) so distance = |T(x) - T(0)|
+                    eta_2d = model.beta_net(
+                        torch.from_numpy(env_i_2d),
+                        torch.from_numpy(env_j_2d),
+                    ).cpu().numpy()
+                else:
+                    env_grid = np.zeros((n_grid * n_grid, K_env), dtype=np.float32)
+                    env_grid[:, d1] = G1.ravel()
+                    env_grid[:, d2] = G2.ravel()
+                    eta_2d = model.beta_net(
+                        torch.from_numpy(env_grid)).cpu().numpy()
             ETA = eta_2d.reshape(n_grid, n_grid)
             SIM = np.exp(-ETA)
 
@@ -1593,11 +1642,26 @@ def run_diagnostics(
 
         dim_contributions = np.zeros((n_between_sub, n_dims))
         with torch.no_grad():
-            for dim in range(n_dims):
-                single = np.zeros_like(between_sub)
-                single[:, dim] = between_sub[:, dim]
-                dim_contributions[:, dim] = model.beta_net(
-                    torch.from_numpy(single)).cpu().numpy().ravel()
+            if _is_transform:
+                # For transform: env_i has the actual value in dim k,
+                # env_j at 0 (mean).  This isolates T_k(x_k) - T_k(0).
+                for dim in range(n_dims):
+                    ei_single = np.zeros_like(between_sub)
+                    ej_single = np.zeros_like(between_sub)
+                    # We don't have raw env_i/env_j here, but we can use
+                    # half the distance as a proxy: site_i = +d/2, site_j = -d/2
+                    ei_single[:, dim] = between_sub[:, dim] / 2.0
+                    ej_single[:, dim] = -between_sub[:, dim] / 2.0
+                    dim_contributions[:, dim] = model.beta_net(
+                        torch.from_numpy(ei_single),
+                        torch.from_numpy(ej_single),
+                    ).cpu().numpy().ravel()
+            else:
+                for dim in range(n_dims):
+                    single = np.zeros_like(between_sub)
+                    single[:, dim] = between_sub[:, dim]
+                    dim_contributions[:, dim] = model.beta_net(
+                        torch.from_numpy(single)).cpu().numpy().ravel()
 
         mean_contrib = dim_contributions.mean(axis=0)
 

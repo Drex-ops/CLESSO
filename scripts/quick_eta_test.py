@@ -108,6 +108,8 @@ def run_test(label: str, overrides: dict):
         beta_type=cfg.beta_type,
         beta_n_knots=cfg.beta_n_knots,
         beta_no_intercept=cfg.beta_no_intercept,
+        transform_n_knots=cfg.transform_n_knots,
+        transform_g_knots=cfg.transform_g_knots,
         K_effort=site_data.K_effort,
         effort_hidden=cfg.effort_hidden,
         effort_dropout=cfg.effort_dropout,

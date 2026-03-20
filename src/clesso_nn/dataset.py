@@ -362,26 +362,39 @@ class CLESSOPairDataset(Dataset):
             torch.from_numpy(self.site_i))
         env_j = site_data.get_env_at_site(
             torch.from_numpy(self.site_j))
+
+        # Retain raw standardised per-site env values for TransformBetaNet
+        self.env_i_raw = env_i.numpy()
+        self.env_j_raw = env_j.numpy()
+
         self.env_diff = torch.abs(env_i - env_j).numpy()
 
         # Optionally append haversine geographic distance (single dim)
+        self.geo_dist = None
         if site_data.include_geo_dist_in_beta and site_data.lon_deg is not None:
             geo_dist = haversine_km(
                 site_data.lon_deg[self.site_i], site_data.lat_deg[self.site_i],
                 site_data.lon_deg[self.site_j], site_data.lat_deg[self.site_j],
             )
             geo_dist_norm = (geo_dist / site_data.geo_dist_scale).astype(np.float32)
+            self.geo_dist = geo_dist_norm.reshape(-1, 1)  # (n_pairs, 1)
             self.env_diff = np.column_stack([self.env_diff, geo_dist_norm])
 
         # Zero out env_diff for within-site pairs (same site → zero distance)
         within_mask = self.is_within == 1
         self.env_diff[within_mask] = 0.0
+        # Also zero out raw env values for within-site pairs so transform
+        # produces identical values (i.e. T(x) - T(x) = 0)
+        self.env_i_raw[within_mask] = 0.0
+        self.env_j_raw[within_mask] = 0.0
+        if self.geo_dist is not None:
+            self.geo_dist[within_mask] = 0.0
 
     def __len__(self) -> int:
         return self.n
 
     def __getitem__(self, idx: int) -> dict:
-        return {
+        item = {
             "site_i": self.site_i[idx],
             "site_j": self.site_j[idx],
             "y": self.y[idx],
@@ -390,7 +403,12 @@ class CLESSOPairDataset(Dataset):
             "design_w": self.design_w[idx],
             "stratum": self.stratum[idx],
             "env_diff": self.env_diff[idx],
+            "env_i": self.env_i_raw[idx],
+            "env_j": self.env_j_raw[idx],
         }
+        if self.geo_dist is not None:
+            item["geo_dist"] = self.geo_dist[idx]
+        return item
 
 
 # --------------------------------------------------------------------------
@@ -399,7 +417,7 @@ class CLESSOPairDataset(Dataset):
 
 def collate_fn(batch: list[dict]) -> dict[str, torch.Tensor]:
     """Stack a list of sample dicts into batched tensors."""
-    return {
+    result = {
         "site_i": torch.tensor([b["site_i"] for b in batch], dtype=torch.long),
         "site_j": torch.tensor([b["site_j"] for b in batch], dtype=torch.long),
         "y": torch.tensor([b["y"] for b in batch], dtype=torch.float32),
@@ -411,7 +429,21 @@ def collate_fn(batch: list[dict]) -> dict[str, torch.Tensor]:
             np.stack([b["env_diff"] for b in batch]),
             dtype=torch.float32,
         ),
+        "env_i": torch.tensor(
+            np.stack([b["env_i"] for b in batch]),
+            dtype=torch.float32,
+        ),
+        "env_j": torch.tensor(
+            np.stack([b["env_j"] for b in batch]),
+            dtype=torch.float32,
+        ),
     }
+    if "geo_dist" in batch[0]:
+        result["geo_dist"] = torch.tensor(
+            np.stack([b["geo_dist"] for b in batch]),
+            dtype=torch.float32,
+        )
+    return result
 
 
 def make_dataloaders(

@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from .model import CLESSONet
+from .model import CLESSONet, TransformBetaNet
 
 
 # --------------------------------------------------------------------------
@@ -55,6 +55,8 @@ def load_model(checkpoint_path: str | Path, device: str = "cpu") -> tuple[CLESSO
         beta_type=cfg.get("beta_type", "deep"),
         beta_n_knots=cfg.get("beta_n_knots", 32),
         beta_no_intercept=beta_no_intercept,
+        transform_n_knots=cfg.get("transform_n_knots", 32),
+        transform_g_knots=cfg.get("transform_g_knots", 16),
         K_effort=cfg.get("K_effort", 0),
         effort_hidden=cfg.get("effort_hidden", [64, 32]),
         effort_dropout=cfg.get("effort_dropout", 0.1),
@@ -225,7 +227,27 @@ def predict_beta(
     np.nan_to_num(env_diff, copy=False, nan=0.0)
 
     env_diff_t = torch.from_numpy(env_diff).to(device)
-    eta = model.beta_net(env_diff_t).cpu().numpy()
+
+    if isinstance(model.beta_net, TransformBetaNet):
+        # TransformBetaNet needs raw standardised per-site env values
+        e_mean = np.array(stats["e_mean"], dtype=np.float32)
+        e_std = np.array(stats["e_std"], dtype=np.float32)
+        ei_std_t = torch.from_numpy(
+            ((env_i.astype(np.float32) - e_mean) / e_std)).to(device)
+        ej_std_t = torch.from_numpy(
+            ((env_j.astype(np.float32) - e_mean) / e_std)).to(device)
+        np.nan_to_num(ei_std_t.numpy() if device == "cpu" else ei_std_t.cpu().numpy(),
+                      copy=False, nan=0.0)
+        np.nan_to_num(ej_std_t.numpy() if device == "cpu" else ej_std_t.cpu().numpy(),
+                      copy=False, nan=0.0)
+        # Extract geo_dist if present
+        geo_dist_t = None
+        if stats.get("include_geo_dist_in_beta", False) and lon_i is not None:
+            geo_dist_t = env_diff_t[:, -1:]
+            # env_i/env_j are only the env columns (not geo)
+        eta = model.beta_net(ei_std_t, ej_std_t, geo_dist=geo_dist_t).cpu().numpy()
+    else:
+        eta = model.beta_net(env_diff_t).cpu().numpy()
     similarity = np.exp(-eta)
 
     return {"eta": eta, "similarity": similarity}
@@ -287,30 +309,94 @@ def check_monotonicity(
 ) -> dict[str, np.ndarray]:
     """Sweep each env distance dimension from 0 → max and verify η is non-decreasing.
 
+    For TransformBetaNet, sweeps raw env values while holding the other site
+    fixed at 0. For other beta nets, sweeps |env_diff| directly.
+
     Returns a dict mapping dimension index to (distances, eta_values).
     Useful for plotting response curves.
     """
     results = {}
-    for dim in range(K_env):
-        # Create input: one dimension varies 0→5, others held at 0
-        grid = torch.zeros(n_points, K_env, device=device)
-        grid[:, dim] = torch.linspace(0, 5, n_points)
 
-        eta = model.beta_net(grid).cpu().numpy()
-        distances = grid[:, dim].cpu().numpy()
+    if isinstance(model.beta_net, TransformBetaNet):
+        # Sweep raw env value for site i while site j stays at 0
+        for dim in range(K_env):
+            env_i = torch.zeros(n_points, K_env, device=device)
+            env_j = torch.zeros(n_points, K_env, device=device)
+            env_i[:, dim] = torch.linspace(-3, 3, n_points)
+            # env_j stays at 0 → distance is |T(x) - T(0)|
 
-        # Check monotonicity
-        diffs = np.diff(eta)
-        is_monotone = np.all(diffs >= -1e-6)
+            eta = model.beta_net(env_i, env_j).cpu().numpy()
+            raw_values = env_i[:, dim].cpu().numpy()
 
-        results[dim] = {
-            "distances": distances,
-            "eta": eta,
-            "is_monotone": is_monotone,
-            "max_violation": float(np.min(diffs)) if len(diffs) > 0 else 0.0,
-        }
+            # Check: as raw value moves away from 0 (in either direction),
+            # eta should be non-decreasing. Check positive direction.
+            half = n_points // 2
+            diffs_pos = np.diff(eta[half:])
+            diffs_neg = np.diff(eta[:half+1][::-1])  # reverse: moving away from 0
+            is_monotone = np.all(diffs_pos >= -1e-6) and np.all(diffs_neg >= -1e-6)
+
+            results[dim] = {
+                "distances": raw_values,
+                "eta": eta,
+                "is_monotone": is_monotone,
+                "max_violation": float(min(np.min(diffs_pos), np.min(diffs_neg)))
+                    if len(diffs_pos) > 0 else 0.0,
+            }
+    else:
+        for dim in range(K_env):
+            grid = torch.zeros(n_points, K_env, device=device)
+            grid[:, dim] = torch.linspace(0, 5, n_points)
+
+            eta = model.beta_net(grid).cpu().numpy()
+            distances = grid[:, dim].cpu().numpy()
+
+            diffs = np.diff(eta)
+            is_monotone = np.all(diffs >= -1e-6)
+
+            results[dim] = {
+                "distances": distances,
+                "eta": eta,
+                "is_monotone": is_monotone,
+                "max_violation": float(np.min(diffs)) if len(diffs) > 0 else 0.0,
+            }
 
     return results
+
+
+@torch.no_grad()
+def predict_transform(
+    model: CLESSONet,
+    site_env: np.ndarray,
+    ckpt: dict,
+    device: str = "cpu",
+) -> np.ndarray:
+    """Apply T_k transforms to raw env values (TransformBetaNet only).
+
+    Useful for spatial prediction: PCA on transformed space → RGB map.
+
+    Args:
+        model: trained CLESSONet with TransformBetaNet
+        site_env: (N, K_env) raw environmental covariates (un-standardised)
+        ckpt: checkpoint dict
+
+    Returns:
+        transformed: (N, K_env) T_k(standardised env_k) for each dimension
+
+    Raises:
+        TypeError: if model does not use TransformBetaNet
+    """
+    if not isinstance(model.beta_net, TransformBetaNet):
+        raise TypeError("predict_transform requires a model with TransformBetaNet")
+
+    stats = ckpt["site_data_stats"]
+    e_mean = np.array(stats["e_mean"], dtype=np.float32)
+    e_std = np.array(stats["e_std"], dtype=np.float32)
+    env_std = (site_env.astype(np.float32) - e_mean) / e_std
+    np.nan_to_num(env_std, copy=False, nan=0.0)
+
+    env_t = torch.from_numpy(env_std).to(device)
+    transformed = model.beta_net.transform_site(env_t).cpu().numpy()
+    return transformed
 
 
 # --------------------------------------------------------------------------

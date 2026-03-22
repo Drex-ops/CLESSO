@@ -136,6 +136,7 @@ def train_one_epoch(
     Z = site_data.Z.to(device)
     S_obs = site_data.S_obs.to(device)
     W = site_data.W.to(device) if site_data.W is not None else None
+    anchor_richness = site_data.anchor_richness.to(device) if site_data.anchor_richness.any() else None
 
     total_loss = 0.0
     total_bce = 0.0
@@ -145,6 +146,7 @@ def train_one_epoch(
     total_eta_smooth = 0.0
     total_eta_ac = 0.0
     total_effort = 0.0
+    total_richness_anchor = 0.0
     total_beta_grad = 0.0
     total_alpha_grad = 0.0
     total_ess = 0.0
@@ -159,6 +161,7 @@ def train_one_epoch(
         w_j = W[batch["site_j"]] if W is not None else None
 
         result = model.compute_loss(batch, z_i, z_j, S_obs, w_i=w_i, w_j=w_j,
+                                    anchor_richness=anchor_richness,
                                     weight_clamp_factor=weight_clamp_factor,
                                     weight_log_normalise=weight_log_normalise)
         loss = result["loss"]
@@ -187,6 +190,7 @@ def train_one_epoch(
         total_eta_smooth += result["eta_smooth_loss"].item()
         total_eta_ac += result["eta_ac_loss"].item()
         total_effort += result["effort_loss"].item()
+        total_richness_anchor += result["richness_anchor_loss"].item()
         total_ess += result["weight_ess"]
         n_batches += 1
 
@@ -207,6 +211,7 @@ def train_one_epoch(
         "eta_smooth_loss": total_eta_smooth / n_batches,
         "eta_ac_loss": total_eta_ac / n_batches,
         "effort_loss": total_effort / n_batches,
+        "richness_anchor_loss": total_richness_anchor / n_batches,
         "beta_grad_norm": total_beta_grad / n_batches,
         "alpha_grad_norm": total_alpha_grad / n_batches,
         "weight_ess": total_ess / n_batches,
@@ -227,6 +232,7 @@ def validate(
     Z = site_data.Z.to(device)
     S_obs = site_data.S_obs.to(device)
     W = site_data.W.to(device) if site_data.W is not None else None
+    anchor_richness = site_data.anchor_richness.to(device) if site_data.anchor_richness.any() else None
 
     total_loss = 0.0
     total_bce = 0.0
@@ -236,6 +242,7 @@ def validate(
     total_eta_smooth = 0.0
     total_eta_ac = 0.0
     total_effort = 0.0
+    total_richness_anchor = 0.0
     total_ess = 0.0
     n_batches = 0
 
@@ -252,6 +259,7 @@ def validate(
         w_j = W[batch["site_j"]] if W is not None else None
 
         result = model.compute_loss(batch, z_i, z_j, S_obs, w_i=w_i, w_j=w_j,
+                                    anchor_richness=anchor_richness,
                                     weight_clamp_factor=weight_clamp_factor,
                                     weight_log_normalise=weight_log_normalise)
 
@@ -263,6 +271,7 @@ def validate(
         total_eta_smooth += result["eta_smooth_loss"].item()
         total_eta_ac += result["eta_ac_loss"].item()
         total_effort += result["effort_loss"].item()
+        total_richness_anchor += result["richness_anchor_loss"].item()
         total_ess += result["weight_ess"]
         n_batches += 1
 
@@ -287,6 +296,7 @@ def validate(
         "eta_smooth_loss": total_eta_smooth / n_batches,
         "eta_ac_loss": total_eta_ac / n_batches,
         "effort_loss": total_effort / n_batches,
+        "richness_anchor_loss": total_richness_anchor / n_batches,
         "accuracy": accuracy,
         "alpha_mean": all_alpha_i.mean().item(),
         "alpha_std": all_alpha_i.std().item(),
@@ -372,8 +382,9 @@ def train(
     log_file = open(log_path, "w", newline="")
     log_writer = csv.DictWriter(log_file, fieldnames=[
         "epoch", "train_loss", "train_bce", "train_lb", "train_anchor", "train_areg",
-        "train_effort",
+        "train_effort", "train_richness_anchor",
         "val_loss", "val_bce", "val_lb", "val_anchor", "val_areg", "val_effort",
+        "val_richness_anchor",
         "val_accuracy",
         "alpha_mean", "alpha_std", "alpha_min", "alpha_max",
         "lr", "beta_grad_norm", "alpha_grad_norm",
@@ -441,12 +452,14 @@ def train(
                 "train_anchor": f"{train_metrics['anchor_penalty']:.6f}",
                 "train_areg": f"{train_metrics['alpha_reg_loss']:.6f}",
                 "train_effort": f"{train_metrics['effort_loss']:.6f}",
+                "train_richness_anchor": f"{train_metrics['richness_anchor_loss']:.6f}",
                 "val_loss": f"{val_metrics['loss']:.6f}",
                 "val_bce": f"{val_metrics['bce_loss']:.6f}",
                 "val_lb": f"{val_metrics['lb_penalty']:.6f}",
                 "val_anchor": f"{val_metrics['anchor_penalty']:.6f}",
                 "val_areg": f"{val_metrics['alpha_reg_loss']:.6f}",
                 "val_effort": f"{val_metrics['effort_loss']:.6f}",
+                "val_richness_anchor": f"{val_metrics['richness_anchor_loss']:.6f}",
                 "val_accuracy": f"{val_metrics['accuracy']:.4f}",
                 "alpha_mean": f"{val_metrics['alpha_mean']:.2f}",
                 "alpha_std": f"{val_metrics['alpha_std']:.2f}",
@@ -1955,6 +1968,7 @@ def train_finetune_geo(
     Z = site_data.Z.to(device)
     S_obs = site_data.S_obs.to(device)
     W = site_data.W.to(device) if site_data.W is not None else None
+    anchor_richness = site_data.anchor_richness.to(device) if site_data.anchor_richness.any() else None
 
     for epoch in range(1, config.finetune_max_epochs + 1):
         # ---- Train ----
@@ -2015,9 +2029,10 @@ def train_finetune_geo(
 
             bce_weighted = (imp_w * bce).sum() / imp_w.sum()
 
-            # Pre-compute α_env for lb + anchor penalties
+            # Pre-compute α_env for lb + anchor + richness_anchor penalties
             alpha_env_i = alpha_env_j = None
-            if model.alpha_lb_lambda > 0.0 or model.alpha_anchor_lambda > 0.0:
+            if model.alpha_lb_lambda > 0.0 or model.alpha_anchor_lambda > 0.0 \
+                    or model.richness_anchor_lambda > 0.0:
                 alpha_env_i = model._compute_alpha_env_only(z_i)
                 alpha_env_j = model._compute_alpha_env_only(z_j)
 
@@ -2047,7 +2062,25 @@ def train_finetune_geo(
                 anchor_penalty = model.alpha_anchor_lambda * (
                     viol_i_a.pow(2).mean() + viol_j_a.pow(2).mean())
 
-            loss = bce_weighted + lb_penalty + anchor_penalty
+            # Richness anchor penalty (external raster-based soft constraint)
+            richness_anchor_loss = torch.tensor(0.0, device=device)
+            if model.richness_anchor_lambda > 0.0 and alpha_env_i is not None \
+                    and anchor_richness is not None:
+                anc_i = anchor_richness[batch["site_i"]]
+                anc_j = anchor_richness[batch["site_j"]]
+                valid_i = anc_i > 1.0
+                valid_j = anc_j > 1.0
+                if valid_i.any():
+                    ra_i = (torch.log(alpha_env_i[valid_i]) - torch.log(anc_i[valid_i])).pow(2).mean()
+                else:
+                    ra_i = torch.tensor(0.0, device=device)
+                if valid_j.any():
+                    ra_j = (torch.log(alpha_env_j[valid_j]) - torch.log(anc_j[valid_j])).pow(2).mean()
+                else:
+                    ra_j = torch.tensor(0.0, device=device)
+                richness_anchor_loss = model.richness_anchor_lambda * (ra_i + ra_j) / 2.0
+
+            loss = bce_weighted + lb_penalty + anchor_penalty + richness_anchor_loss
 
             # Geographic parameter L2 penalty (separate from weight decay)
             if model.geo_penalty_alpha > 0 or model.geo_penalty_beta > 0:
@@ -2276,6 +2309,7 @@ def train_finetune_joint(
     Z = site_data.Z.to(device)
     S_obs = site_data.S_obs.to(device)
     W = site_data.W.to(device) if site_data.W is not None else None
+    anchor_richness = site_data.anchor_richness.to(device) if site_data.anchor_richness.any() else None
 
     for epoch in range(1, config.finetune_max_epochs + 1):
         # ---- Train ----
@@ -2334,9 +2368,10 @@ def train_finetune_joint(
 
             bce_weighted = (imp_w * bce).sum() / imp_w.sum()
 
-            # Pre-compute α_env for lb + anchor penalties
+            # Pre-compute α_env for lb + anchor + richness_anchor penalties
             alpha_env_i = alpha_env_j = None
-            if model.alpha_lb_lambda > 0.0 or model.alpha_anchor_lambda > 0.0:
+            if model.alpha_lb_lambda > 0.0 or model.alpha_anchor_lambda > 0.0 \
+                    or model.richness_anchor_lambda > 0.0:
                 alpha_env_i = model._compute_alpha_env_only(z_i)
                 alpha_env_j = model._compute_alpha_env_only(z_j)
 
@@ -2366,7 +2401,25 @@ def train_finetune_joint(
                 anchor_penalty = model.alpha_anchor_lambda * (
                     viol_i_a.pow(2).mean() + viol_j_a.pow(2).mean())
 
-            loss = bce_weighted + lb_penalty + anchor_penalty
+            # Richness anchor penalty (external raster-based soft constraint)
+            richness_anchor_loss = torch.tensor(0.0, device=device)
+            if model.richness_anchor_lambda > 0.0 and alpha_env_i is not None \
+                    and anchor_richness is not None:
+                anc_i = anchor_richness[batch["site_i"]]
+                anc_j = anchor_richness[batch["site_j"]]
+                valid_i = anc_i > 1.0
+                valid_j = anc_j > 1.0
+                if valid_i.any():
+                    ra_i = (torch.log(alpha_env_i[valid_i]) - torch.log(anc_i[valid_i])).pow(2).mean()
+                else:
+                    ra_i = torch.tensor(0.0, device=device)
+                if valid_j.any():
+                    ra_j = (torch.log(alpha_env_j[valid_j]) - torch.log(anc_j[valid_j])).pow(2).mean()
+                else:
+                    ra_j = torch.tensor(0.0, device=device)
+                richness_anchor_loss = model.richness_anchor_lambda * (ra_i + ra_j) / 2.0
+
+            loss = bce_weighted + lb_penalty + anchor_penalty + richness_anchor_loss
 
             optimizer.zero_grad()
             loss.backward()
@@ -2528,6 +2581,7 @@ def train_calibration(
     Z = site_data.Z.to(device)
     S_obs = site_data.S_obs.to(device)
     W = site_data.W.to(device) if site_data.W is not None else None
+    anchor_richness = site_data.anchor_richness.to(device) if site_data.anchor_richness.any() else None
 
     for epoch in range(1, config.calibration_epochs + 1):
         model.train()
@@ -2547,6 +2601,7 @@ def train_calibration(
             result = model.compute_loss(
                 batch, z_i, z_j, S_obs,
                 w_i=w_i, w_j=w_j,
+                anchor_richness=anchor_richness,
             )
             loss = result["loss"]
 
@@ -2577,6 +2632,7 @@ def train_calibration(
                 result = model.compute_loss(
                     batch, z_i, z_j, S_obs,
                     w_i=w_i, w_j=w_j,
+                    anchor_richness=anchor_richness,
                 )
                 val_loss += result["loss"].item()
                 val_bce += result["bce_loss"].item()

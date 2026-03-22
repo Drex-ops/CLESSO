@@ -962,6 +962,7 @@ class CLESSONet(nn.Module):
         self.alpha_regression_lambda = alpha_regression_lambda
         self.eta_smoothness_lambda = 0.0  # set by train() from config
         self.eta_anti_collapse_lambda = 0.0  # set by train() from config
+        self.richness_anchor_lambda = 0.0  # set externally from config
         self.eps = eps
 
         # Geographic parameter L2 penalty — set externally after construction.
@@ -1179,6 +1180,7 @@ class CLESSONet(nn.Module):
         S_obs: torch.Tensor,      # (n_sites,) observed richness
         w_i: torch.Tensor | None = None,
         w_j: torch.Tensor | None = None,
+        anchor_richness: torch.Tensor | None = None,  # (n_sites,) anchor richness from raster
         weight_clamp_factor: float = 0.0,
         weight_log_normalise: bool = False,
     ) -> dict[str, torch.Tensor]:
@@ -1317,9 +1319,10 @@ class CLESSONet(nn.Module):
         # Alpha penalties (unchanged)
         # ------------------------------------------------------------------
 
-        # Pre-compute α_env (effort-stripped true richness) for lb + anchor penalties
+        # Pre-compute α_env (effort-stripped true richness) for lb + anchor + richness_anchor penalties
         alpha_env_i = alpha_env_j = None
-        if (self.alpha_lb_lambda > 0.0 or self.alpha_anchor_lambda > 0.0) and S_obs is not None:
+        if (self.alpha_lb_lambda > 0.0 or self.alpha_anchor_lambda > 0.0
+                or self.richness_anchor_lambda > 0.0) and S_obs is not None:
             alpha_env_i = self._compute_alpha_env_only(z_i)
             alpha_env_j = self._compute_alpha_env_only(z_j)
 
@@ -1393,7 +1396,26 @@ class CLESSONet(nn.Module):
                 viol_i.pow(2).mean() + viol_j.pow(2).mean()
             )
 
-        loss = bce_loss + lb_penalty + alpha_reg_loss + eta_smooth_loss + eta_ac_loss + anchor_penalty
+        # Richness anchor penalty (external raster-based soft constraint)
+        # Pushes α_env toward anchor values at sites with valid anchor data.
+        #   penalty = λ * mean[ (log(α_env) - log(anchor))² ]
+        richness_anchor_loss = torch.tensor(0.0, device=p.device)
+        if self.richness_anchor_lambda > 0.0 and alpha_env_i is not None and anchor_richness is not None:
+            anc_i = anchor_richness[batch["site_i"]]
+            anc_j = anchor_richness[batch["site_j"]]
+            valid_i = anc_i > 1.0
+            valid_j = anc_j > 1.0
+            if valid_i.any():
+                ra_i = (torch.log(alpha_env_i[valid_i]) - torch.log(anc_i[valid_i])).pow(2).mean()
+            else:
+                ra_i = torch.tensor(0.0, device=p.device)
+            if valid_j.any():
+                ra_j = (torch.log(alpha_env_j[valid_j]) - torch.log(anc_j[valid_j])).pow(2).mean()
+            else:
+                ra_j = torch.tensor(0.0, device=p.device)
+            richness_anchor_loss = self.richness_anchor_lambda * (ra_i + ra_j) / 2.0
+
+        loss = bce_loss + lb_penalty + alpha_reg_loss + eta_smooth_loss + eta_ac_loss + anchor_penalty + richness_anchor_loss
 
         # Effort net L2 penalty
         effort_loss = torch.tensor(0.0, device=p.device)
@@ -1422,6 +1444,7 @@ class CLESSONet(nn.Module):
             "effort_loss": effort_loss,
             "geo_loss": geo_loss,
             "boost_loss": boost_loss,
+            "richness_anchor_loss": richness_anchor_loss,
             "weight_ess": weight_ess,
             **stratum_bce_parts,
             **weight_ess_parts,

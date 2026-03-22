@@ -227,13 +227,23 @@ class CLESSONNConfig:
     # 0.0 is a hard anchor that penalises any deviation from S_obs, which may be too strict given the uncertainty in S_obs and the flexibility of EffortNet.
     #
     # Set alpha_anchor_lambda = 0.0 to disable the penalty entirely.
-    alpha_anchor_lambda: float = 1.0   # 0.0 = disabled
+    alpha_anchor_lambda: float = 0.0   # 0.0 = disabled
     alpha_anchor_tolerance: float = 1.1 # log-space slack (e.g. 0.7 → ~2× S_obs, 1.1 → ~3× S_obs)
 
     # Direct alpha regression: lambda * MSE(alpha, S_obs)
     # DISABLED (0.0) — this was pulling alpha toward the incorrect S_obs values.
     # With corrected S_obs, the lower-bound penalty alone is sufficient.
     alpha_regression_lambda: float = 0.0
+
+    # Richness anchor (auxiliary raster-based soft constraint on α_env):
+    # An external raster provides expected richness values at certain
+    # locations.  The model is softly pushed toward these values via:
+    #   penalty = λ * mean[ (log(α_env) - log(anchor))² ]
+    # Only applied where the raster has valid data (pixel value > 1;
+    # pixels with value 0 are treated as no-data).
+    # Set richness_anchor_lambda = 0.0 or richness_anchor_path = None to disable.
+    richness_anchor_path: Optional[Path] = Path("/Users/andrewhoskins/Library/Mobile Documents/com~apple~CloudDocs/CODE/Richness_anchor_clesso/output/richness_anchor_lower.tif")
+    richness_anchor_lambda: float = 1.0  # 0.0 = disabled
 
     # ------------------------------------------------------------------
     # Two-stage training

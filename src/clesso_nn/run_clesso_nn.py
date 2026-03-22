@@ -45,7 +45,7 @@ def main(export_dir: str | None = None, config_overrides: dict | None = None):
         sys.path.insert(0, str(project_root))
 
     from src.clesso_nn.config import CLESSONNConfig
-    from src.clesso_nn.dataset import SiteData, load_export, make_dataloaders
+    from src.clesso_nn.dataset import SiteData, load_export, load_richness_anchor, make_dataloaders
     from src.clesso_nn.model import CLESSONet, expand_model_for_geo
     from src.clesso_nn.predict import (
         check_monotonicity,
@@ -209,6 +209,14 @@ def main(export_dir: str | None = None, config_overrides: dict | None = None):
     model.eta_smoothness_lambda = cfg.eta_smoothness_lambda
     model.eta_anti_collapse_lambda = cfg.eta_anti_collapse_lambda
     model.effort_penalty = cfg.effort_penalty
+
+    # Richness anchor (external raster-based soft constraint)
+    model.richness_anchor_lambda = cfg.richness_anchor_lambda
+    if cfg.richness_anchor_path is not None and cfg.richness_anchor_lambda > 0.0:
+        load_richness_anchor(site_data, cfg.richness_anchor_path,
+                             data["site_covariates"])
+        print(f"  Richness anchor: λ={cfg.richness_anchor_lambda}, "
+              f"path={cfg.richness_anchor_path}")
 
     # Composite likelihood parameters
     model.stratum_weights = cfg.stratum_weights

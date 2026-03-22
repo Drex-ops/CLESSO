@@ -15,13 +15,15 @@ Algorithm (follows the R predict_spatial_lmds approach):
   5. Compute η from every pixel to each landmark (n×k)
   6. Convert η to dissimilarity: D = 1 - exp(-η)
   7. Classical MDS on landmark D matrix + Nyström extension for all pixels
-  8. Map 3 MDS dimensions → RGB
-  9. Write 3-band GeoTIFF + PDF map
+  8. (Optional) k-means clustering of MDS dimensions → classified surface
+  9. Map 3 MDS dimensions → RGB
+ 10. Write 3-band GeoTIFF + PDF map (+ cluster GeoTIFF if --cluster)
 
 Usage:
     python predict_beta_surface.py                           # defaults
     python predict_beta_surface.py --n-landmarks 1000        # more landmarks
     python predict_beta_surface.py --output beta_surface.tif
+    python predict_beta_surface.py --cluster --n-clusters 15  # cluster MDS dims
 
 Requirements:
     torch, numpy, rasterio, geonpy, matplotlib, pyshp, sklearn
@@ -146,10 +148,10 @@ def extract_substrate(path, mask):
         all_bands = src.read()
         nodata = src.nodata
 
-    cube = np.moveaxis(all_bands, 0, -1).astype(np.float32)
-    vals = cube[mask]
+    cube = np.moveaxis(all_bands, 0, -1).astype(np.float64)
     if nodata is not None:
-        vals[vals == nodata] = np.nan
+        cube[cube == nodata] = np.nan
+    vals = cube[mask].astype(np.float32)
     return vals
 
 
@@ -454,6 +456,69 @@ def landmark_mds(D_LL, D_NL, n_components=3):
 # RGB mapping with percentile stretch
 # ──────────────────────────────────────────────────────────────────────────
 
+def cluster_mds_scores(scores, n_clusters=20, seed=42):
+    """Cluster the MDS scores using k-means.
+
+    Args:
+        scores: (n, m) MDS coordinates for all pixels
+        n_clusters: number of clusters
+        seed: random seed
+
+    Returns:
+        labels: (n,) int32 cluster labels (0-based)
+        centres: (n_clusters, m) cluster centres
+    """
+    from sklearn.cluster import MiniBatchKMeans
+
+    print(f"  Running MiniBatchKMeans ({n_clusters} clusters on "
+          f"{scores.shape[1]} MDS dims, {scores.shape[0]:,} pixels)...")
+    t0 = time.time()
+    km = MiniBatchKMeans(
+        n_clusters=n_clusters, random_state=seed,
+        batch_size=min(10_000, len(scores)), n_init=5, max_iter=100,
+    )
+    km.fit(scores)
+    dt = time.time() - t0
+    print(f"  Clustering done ({dt:.1f}s), inertia={km.inertia_:.2f}")
+    return km.labels_.astype(np.int32), km.cluster_centers_
+
+
+def write_cluster_geotiff(output_path, labels, mask, grid):
+    """Write single-band classified GeoTIFF with cluster labels.
+
+    Labels are stored as 1-based (0 = nodata/ocean).
+    """
+    height, width = grid["height"], grid["width"]
+    layer = np.zeros((height, width), dtype=np.int16)
+    layer[mask] = labels + 1  # 1-based
+
+    profile = {
+        "driver": "GTiff",
+        "dtype": "int16",
+        "width": width,
+        "height": height,
+        "count": 1,
+        "crs": "EPSG:4326",
+        "transform": grid["transform"],
+        "nodata": 0,
+        "compress": "deflate",
+        "tiled": True,
+        "blockxsize": 256,
+        "blockysize": 256,
+    }
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with rasterio.open(output_path, "w", **profile) as dst:
+        dst.write(layer, 1)
+        dst.update_tags(
+            DESCRIPTION="CLESSO NN beta turnover — MDS cluster membership",
+        )
+
+    size_mb = output_path.stat().st_size / 1e6
+    print(f"  Written: {output_path} ({size_mb:.1f} MB)")
+
+
 def scores_to_rgb(scores, stretch=2.0):
     """Map MDS scores to 0–255 RGB via percentile stretch.
 
@@ -531,7 +596,8 @@ def plot_beta_map(rgb_vals, mds_scores, grid, eigenvalues, var_explained,
                   n_neg, n_landmarks, pdf_path,
                   shapefile_path=None, epoch=0, val_loss=0.0,
                   lm_lons=None, lm_lats=None, stretch=2.0,
-                  extra_triplets=None):
+                  extra_triplets=None,
+                  cluster_labels=None, cluster_centres=None):
     """Produce a multi-page PDF with beta surface maps and diagnostics."""
     import matplotlib
     matplotlib.use("Agg")
@@ -809,6 +875,84 @@ def plot_beta_map(rgb_vals, mds_scores, grid, eigenvalues, var_explained,
                 pdf.savefig(fig, dpi=150)
                 plt.close(fig)
 
+        # ─── Cluster map page (optional) ─────────────────────────
+        if cluster_labels is not None:
+            n_clusters = int(cluster_labels.max()) + 1
+
+            # Assign each cluster a colour from its mean MDS RGB
+            cluster_rgb_map = np.zeros((n_clusters, 3), dtype=np.uint8)
+            for cl in range(n_clusters):
+                cl_mask_flat = (cluster_labels == cl)
+                if cl_mask_flat.any():
+                    cluster_rgb_map[cl] = np.mean(
+                        rgb_vals[cl_mask_flat].astype(np.float32), axis=0
+                    ).astype(np.uint8)
+
+            # Build cluster image using mean-RGB colouring
+            cl_rgb = cluster_rgb_map[cluster_labels]  # (n, 3)
+            cl_img = np.full((height, width, 3), 230, dtype=np.uint8)
+            cl_img[mask] = cl_rgb
+
+            fig, axes = plt.subplots(1, 2, figsize=(16, 8))
+
+            # Left: cluster map coloured by mean MDS-RGB
+            ax = axes[0]
+            ax.imshow(cl_img, extent=extent, origin="upper",
+                      interpolation="nearest", aspect="equal")
+            if boundary_shapes is not None:
+                for shape in boundary_shapes:
+                    for i_part in range(len(shape.parts)):
+                        i_start = shape.parts[i_part]
+                        i_end = (shape.parts[i_part + 1]
+                                 if i_part + 1 < len(shape.parts)
+                                 else len(shape.points))
+                        pts = np.array(shape.points[i_start:i_end])
+                        if len(pts) > 2:
+                            ax.plot(pts[:, 0], pts[:, 1],
+                                    color="#333333", linewidth=0.25,
+                                    alpha=0.4)
+            ax.set_xlim(x_min, x_max)
+            ax.set_ylim(y_min, y_max)
+            ax.set_xlabel("Longitude (°E)", fontsize=11)
+            ax.set_ylabel("Latitude (°S)", fontsize=11)
+            ax.set_title(
+                f"MDS Clusters (k={n_clusters}, coloured by mean RGB)\n"
+                f"{n_landmarks} landmarks | {mds_scores.shape[1]} MDS dims",
+                fontsize=12, fontweight="bold")
+            ax.grid(True, linewidth=0.3, alpha=0.3, color="grey")
+
+            # Right: cluster map with discrete colourmap
+            ax = axes[1]
+            cl_2d = np.full((height, width), np.nan, dtype=np.float32)
+            cl_2d[mask] = cluster_labels.astype(np.float32)
+            cmap_cl = plt.cm.get_cmap("tab20", n_clusters)
+            cmap_cl.set_bad(color="#e8e8e8")
+            im = ax.imshow(cl_2d, extent=extent, origin="upper",
+                           cmap=cmap_cl, vmin=-0.5, vmax=n_clusters - 0.5,
+                           interpolation="nearest", aspect="equal")
+            fig.colorbar(im, ax=ax, shrink=0.6, pad=0.02,
+                         label="Cluster ID",
+                         ticks=range(0, n_clusters, max(1, n_clusters // 10)))
+            ax.set_xlim(x_min, x_max)
+            ax.set_ylim(y_min, y_max)
+            ax.set_xlabel("Longitude (°E)", fontsize=11)
+            ax.set_ylabel("Latitude (°S)", fontsize=11)
+            ax.set_title(
+                f"MDS Clusters — Discrete Colourmap (k={n_clusters})",
+                fontsize=12, fontweight="bold")
+            ax.grid(True, linewidth=0.3, alpha=0.3, color="grey")
+
+            # Cluster size summary
+            sizes = [int((cluster_labels == cl).sum()) for cl in range(n_clusters)]
+            summary = (f"Cluster sizes: min={min(sizes):,}, "
+                       f"max={max(sizes):,}, "
+                       f"median={int(np.median(sizes)):,}")
+            fig.suptitle(summary, fontsize=10, y=0.02, color="grey")
+
+            fig.tight_layout(rect=[0, 0.04, 1, 1])
+            pdf.savefig(fig, dpi=150)
+            plt.close(fig)
+
     print(f"  Written: {pdf_path}")
 
 
@@ -842,6 +986,10 @@ def main():
     parser.add_argument("--batch-size", type=int,
                         default=DEFAULTS["batch_size"])
     parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--cluster", action="store_true", default=False,
+                        help="Cluster MDS dimensions and map cluster membership")
+    parser.add_argument("--n-clusters", type=int, default=20,
+                        help="Number of clusters for MDS clustering (default: 20)")
     args = parser.parse_args()
 
     t_start = time.time()
@@ -1009,9 +1157,25 @@ def main():
         n_components=args.n_components,
     )
 
-    # ── 8. RGB mapping + output ─────────────────────────────────────
-    print(f"\n[8/8] Generating RGB map and outputs...")
+    # ── 8. Clustering (optional) ────────────────────────────────────
     scores_f32 = scores.astype(np.float32)
+    cluster_labels = None
+    cluster_centres = None
+    if args.cluster:
+        n_steps = 9
+        print(f"\n[8/{n_steps}] Clustering MDS scores "
+              f"({args.n_clusters} clusters)...")
+        cluster_labels, cluster_centres = cluster_mds_scores(
+            scores_f32, n_clusters=args.n_clusters, seed=args.seed,
+        )
+        # Write cluster GeoTIFF
+        cluster_tif = str(Path(args.output).with_suffix('')) + "_clusters.tif"
+        write_cluster_geotiff(cluster_tif, cluster_labels, mask, grid)
+    else:
+        n_steps = 8
+
+    # ── 9/8. RGB mapping + output ───────────────────────────────────
+    print(f"\n[{n_steps}/{n_steps}] Generating RGB map and outputs...")
     rgb_vals = scores_to_rgb(scores_f32[:, :3], stretch=args.stretch)
 
     # Write GeoTIFF (dims 1–3)
@@ -1045,6 +1209,8 @@ def main():
         lm_lons=lons_valid[lm_idx], lm_lats=lats_valid[lm_idx],
         stretch=args.stretch,
         extra_triplets=extra_triplets,
+        cluster_labels=cluster_labels,
+        cluster_centres=cluster_centres,
     )
 
     dt = time.time() - t_start
@@ -1054,6 +1220,8 @@ def main():
     for d_start, _ in extra_triplets:
         suffix = f"_dims{d_start+1}-{d_start+3}"
         print(f"  GeoTIFF: {Path(args.output).with_suffix('')}{suffix}.tif")
+    if cluster_labels is not None:
+        print(f"  GeoTIFF: {Path(args.output).with_suffix('')}_clusters.tif")
     print(f"  PDF map: {pdf_path}")
 
 

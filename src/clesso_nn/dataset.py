@@ -271,6 +271,11 @@ class SiteData:
                 if idx is not None:
                     self.S_obs[idx] = float(row["S_obs"])
 
+        # -- Richness anchor (external raster, loaded separately) --
+        # Populated by load_richness_anchor() after construction.
+        # Shape: (n_sites,) with 0.0 for sites without anchor data.
+        self.anchor_richness = torch.zeros(self.n_sites, dtype=torch.float32)
+
     @property
     def K_alpha(self) -> int:
         return self.Z.shape[1]
@@ -302,6 +307,59 @@ class SiteData:
         if not parts:
             raise ValueError("No environmental covariates available for beta model")
         return torch.cat(parts, dim=-1)
+
+
+def load_richness_anchor(
+    site_data: SiteData,
+    raster_path: str | Path,
+    site_covariates: pd.DataFrame,
+) -> None:
+    """Sample a richness anchor raster at site locations and store on SiteData.
+
+    The raster must be a single-band GeoTIFF (or rasterio-readable format).
+    Valid anchor pixels have values > 1; pixels with value <= 0 are treated
+    as no-data (anchor_richness stays 0 for those sites).
+
+    Args:
+        site_data: SiteData object to populate (modifies in-place).
+        raster_path: Path to the anchor raster file.
+        site_covariates: DataFrame with 'site_id', 'lon', 'lat' columns.
+    """
+    import rasterio
+
+    raster_path = Path(raster_path)
+    if not raster_path.exists():
+        print(f"  [RichnessAnchor] WARNING: raster not found: {raster_path}")
+        return
+
+    site_ids = site_covariates["site_id"].values
+    lons = site_covariates["lon"].values.astype(np.float64)
+    lats = site_covariates["lat"].values.astype(np.float64)
+
+    with rasterio.open(raster_path) as src:
+        coords = list(zip(lons, lats))
+        sampled = np.array([val[0] for val in src.sample(coords)],
+                           dtype=np.float32)
+
+    # Valid anchor values are > 1; treat 0 and negatives as no-data
+    valid_mask = sampled > 1.0
+    # Also mask NaN / inf
+    valid_mask &= np.isfinite(sampled)
+
+    anchor = np.zeros(site_data.n_sites, dtype=np.float32)
+    for i, sid in enumerate(site_ids):
+        idx = site_data.site_id_to_idx.get(sid)
+        if idx is not None and valid_mask[i]:
+            anchor[idx] = sampled[i]
+
+    n_valid = int((anchor > 0).sum())
+    site_data.anchor_richness = torch.from_numpy(anchor)
+    print(f"  [RichnessAnchor] Loaded from {raster_path.name}: "
+          f"{n_valid}/{site_data.n_sites} sites have valid anchor values")
+    if n_valid > 0:
+        vals = anchor[anchor > 0]
+        print(f"  [RichnessAnchor] Anchor range: {vals.min():.1f} – {vals.max():.1f}, "
+              f"median: {np.median(vals):.1f}")
 
 
 # --------------------------------------------------------------------------

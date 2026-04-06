@@ -1,0 +1,244 @@
+\documentclass{article}
+\usepackage{graphicx} % Required for inserting images
+\usepackage{amsmath} % For cases environment
+
+% To DO:
+% - remove intercept from Beta
+% - blocked coordinate descent is the way to go for fitting this model
+% - need to strategically sample pairs to stop the between site pairs dominating the likelihood and then weight appropriately
+% - maybe: hard pair mining
+
+
+
+\title{ObsPair modelling v2}
+\author{Andrew Hoskins}
+\date{February 2026}
+
+\begin{document}
+
+\maketitle
+
+\section{Background}
+
+Hoskins et al (2020) presented an approach for estimating species turnover via a set of pairs observations that describe wether a species is a match or a missmatch. This approach is based on the idea that the probability of drawing the same pair of species (from a site x species pool) is effectively driven by the total number of species found at each site (richness) and the numbers of species shared between sites (turnover). What the approach did was extend the old Generalised Dissimilarity Modelling approach by Ferrier et al (REF) to allow the use of species overvation data, relaxing the need to use full species inventory datasets.
+
+The initial model proposed that $p_{i,j}$ is a function of both the total number of species actually occurring at each site (alpha diveristy: $\alpha$) and the number of species that are unique to that site, because the do not occur at the other site (beta diversity: $\beta$), following the expression:
+
+\begin{equation}
+    p_{i,j}
+    = \sum_{k=1}^{n}
+    \left(
+    \frac{\left[s_{k,i}\right]}{\alpha_i}
+    \,\times\,
+    \frac{\left[s_{k,j}\right]}{\alpha_j}
+    \right)
+\end{equation}
+
+
+\[
+\left[s\right] =
+\begin{cases}
+1, & \text{species } s \text{ is found at the site of interest } i,\\
+0, & \text{species } s \text{ is not found at the site of interest } i.
+\end{cases}
+\qquad
+\]
+
+Because the quantity being summed reduces to zero when a given species is not shared between the sites the equation reduces to:
+
+\begin{equation}
+    p_{i,j}
+    = (1/[\alpha_i\alpha_j])\gamma
+\end{equation}
+
+where $\gamma$ is the number of species shared between sites.
+
+This is estimated as a binary response variable using a logit link function and standard GDM monotonic spline functions.
+
+A core constraint to this approach was that it never estimated $\alpha$ at the site level, rather it fixed $\alpha$ as an average regional estimate for the whole model. The goal of the approach proposed below is to develop a model format that can estimate both $\alpha$ and $\beta$ as functions of varying covariates (e.g. environmental differences).
+
+\section{New approach}
+
+The main idea/extension to this approach is that rather than considering only \textbf{between-site} pairs to estimate turnover, we also learn richness by adding a second source of information - \textbf{within-site pairs}. In this way:
+
+\begin{itemize}
+    \item Between-site pairs ($i \neq j$ inform $\beta$ and are modulated by $\alpha$
+    \item Within-site pairs ($i = j$) isolate $\alpha$ because turnover reduces to zero
+\end{itemize}
+
+By doing this we get identifiably between richness and turnover in our sampled dataset, enabling us to model both.
+
+\subsection{Pair constructs}
+
+\begin{itemize}
+    \item each occurrence record is (\textit{s,i}) = species \textit{s} observed at site \textit{i}
+    \item Create an observation-pair dataset $P$ by sampling pairs of occurrence records from a set of species observations for your region of interest.
+\end{itemize}
+
+For each pair $p \in P$ we record:
+\begin{itemize}
+    \item $i_{p},j_{p}:$ the identity of the two sites in the pair
+    \item $y_{p} = 0$ if species identities match and $y_{p} = 1$ otherwise
+\end{itemize}
+
+For sites with at least 2 occurrence records ($P_{within}$):
+\begin{itemize}
+    \item sample pairs of records that both come from site $i$ so that:
+$i_{p} = j_{p} = i$
+    \item extract a set of environmental covariates at the site level, $\textbf{z}_{i}$
+\end{itemize}
+
+For between site pairs ($P_{between}$ undertake the usual obs-pair GDM sampling and compute:
+\begin{itemize}
+    \item a set of sample pairs from two different sites
+    \item compute environmental distances for each covariate (or spline component) $l$: $\Delta x_{l,i,j} = |x_{l,i} - x_{l,j}|$
+\end{itemize}
+
+\subsection{Model assumptions and decomposition}
+
+This model follows the same assumption of an equal-draw probability for each species in the community (same as previous method). Some options for relaxing this assumption are discussed later in this document.
+
+Conditional on the equal draw assumption then a recorded presence behaves like a random draw from the species present at both sites such that:
+
+\begin{equation}
+    p_{i,j} = P(match) = \frac{
+    \gamma_{i,j}
+    }{
+    \alpha_{i}\alpha_{j}
+    }
+\end{equation}
+
+If we represent turnover via a Sorensen similarity:
+
+\begin{equation}
+    S_{i,j} = \frac{2\gamma_{i,j}}{\alpha_{i} + \alpha_{j}}
+\end{equation}
+
+and rearrange to $\gamma_{i,j} = S_{i,j}(\alpha_{i} + \alpha_{j})/2$ then substitute it into (3) we get:
+
+\begin{equation}
+    p_{i,j} = S_{i,j} \frac{\alpha_{i} + \alpha_j}{2\alpha_{i}\alpha_{j}}
+\end{equation}
+
+This gives us a model that separates the turnover and richness components to make both identifiable. For example, when estimating $\alpha_{i}$ then $i = j$ so:
+
+\begin{itemize}
+    \item turnover is zero as sites are identical thus $S_{i,i} = 1$
+    \item $\gamma_{i,i} = \alpha_{i}$
+\end{itemize}
+
+which means that:
+
+\begin{equation}
+    p_{i,i} = 1 \frac{\alpha_{i} + \alpha_{i}}{2\alpha_{i}^{2}} = \frac{1}{\alpha_{i}}
+\end{equation}
+
+\subsection{Modelling format}
+
+The way to model this is via a hierarchical model that contains two submodels and a joint likelihood or via iteratively fitting alpha and beta models while holding the other fixed (thanks claude for the idea). 
+
+Alpha can be modelled as a positive (Poisson) set which is driven by the site level covariates $\textbf{z}_{i}$:
+
+\begin{equation}
+    \log \alpha_{i} = \theta_{0} + \sum_{k=1}^{K}g_{k}(z_{k,i})
+\end{equation}
+
+where $g_{k}(\cdot)$ can be linear terms, splines (making it a GAM) and/or spatial smooths
+
+The turnover model then follows the GDM style, applying monotone I-spline transforms to each covariate \emph{before} taking the absolute difference between sites, thereby preserving positional information:
+
+\begin{equation}
+    \eta_{i,j} = \theta_{0} + \sum_{k=1}^{m}\left|\, T_k(x_{k,i}) - T_k(x_{k,j}) \,\right|
+\end{equation}
+
+
+Which is mapped to similarity (rather than dissimilarity) as:
+
+\begin{equation}
+    S_{i,j} = \exp(-\eta_{i,j})
+\end{equation}
+
+where each $T_k(\cdot)$ is a monotone I-spline transform ensuring turnover increases with increasing environmental and geographic distance 
+
+\subsection{Likelihood}
+
+We can then define the likelihood as follows. For each pair $p$ from sites ($i_{p},j_{p}$) we define $p_{p}$ as:
+
+\begin{equation}
+    p_{p} = p_{i_{p}j_{p}} = exp(-\eta_{i_{p}j_{p}}) \cdot \frac{\alpha_{i_{p}} + \alpha_{j_{p}}}{2\alpha_{i_{p}}\alpha_{j_{p}}}
+\end{equation}
+
+with a response following a Bernoulli distribution so that:
+
+\begin{equation}
+    y_{p} \sim Bernoulli(1-p_{p})
+\end{equation}
+
+This then allows us to use the Bernoulli log-likelihood to maximise across all pairs (within and between sites)
+
+\begin{equation}
+    \mathcal{L} = \sum_{p \in P}[(1 - y_{p}) \log p_{p} + y_{p} \log(1-p_{p})] - \lambda_{\alpha} \tau_{\alpha}(\theta) - \lambda_{\beta} \tau_{\beta}(\beta)
+\end{equation}
+
+where
+
+\begin{itemize}
+    \item $\tau_{\alpha}$: is a smoothness penalty on richness (e.g. a spatial random smooth)
+    \item $\tau_{\beta}$: is a monotonicity penalty on the turnover component fucntions
+\end{itemize}
+
+\section{Further thoughts}
+
+\begin{itemize}
+    \item Because in reality the underlying probabilities of drawing species is not equal the primary assumption is not met (just like in the original approach). However, we can view the $\alpha$ as representing a combination of true richness, abundance and the observation process which gives us something like an 'effective richness under the recording process"
+    \item Under an abundance weighted sampling assumption then our $\alpha$ (or an identical site pair probability) will be far lower with lots of species that are more evenly distributed and higher if only a few species with large populations dominate (Simpson's). It tells us how concentrated a community is.
+    \item We can include terms to suck up the recording effort - distance to roads, total records of all taxa, distance to towns etc. Would be useful bringing in some of David's thinking here about best use of ALA/GBIF for effort layers
+    \item Spatial only for now but could be extended to include temporal components
+    \item Drawing pairs will result in large missmatches (same as before) and we have the added difficulty of within-site pairs. We'd want to strategically draw a set that stops the missmatches or between site pairs dominate the likelihood and then weight appropriately
+    \item We can estimate this in Stan (might be slow) or TMB
+\end{itemize}
+
+\section{SF formulation}
+
+A possible alternative formulation of this model is to use the formulation developed by Simon Ferrier (for now called clesso SF) which is based on the same underlying principles of the approach described above. In the clesso\_sf formulation we define:
+
+\begin{equation}
+    p_{i,j} = \frac{S_{i,j}}{\alpha_{i,j}}
+\end{equation}
+
+where $\alpha_{i,j}$ is the average richness across the two sites in the pair and $S_{i,j}$ is the Sorensen similarity between the two sites. 
+
+This can be reformulated as:
+\begin{equation}
+    p_{i,j} = S_{i,j} \cdot \frac{1}{\bar{\alpha}_{i,j}}
+\end{equation}
+
+Which is expanded using a negative exponential link link function for both components as:
+\begin{equation}
+    p_{i,j} = exp(-\eta_{i,j}) \cdot exp(-\alpha_{i,j})
+\end{equation}
+
+Where $\eta_{i,j}$ is the same as in the previous formulation, applying monotone I-spline transforms to each covariate before taking the absolute difference between sites:
+\begin{equation}
+    \eta_{i,j} = \theta_{0} + \sum_{k=1}^{m}\left|\, I_k(x_{k,i}) - I_k(x_{k,j}) \,\right|
+\end{equation}
+
+and $\bar{\alpha}_{i,j}$ is a function of the average richness across the two sites such that $\bar{\alpha}_{i,j}$ is:
+\begin{equation}
+    \bar{\alpha}_{i,j} = \frac{\alpha_i + \alpha_j}{2}
+\end{equation}
+
+or $\frac{1}{\bar{\alpha}_{i,j}}$ is the harmonic mean (??) of the two sites:
+\begin{equation}
+    \frac{1}{\bar{\alpha}_{i,j}} = \frac{\alpha_{i} + \alpha_j}{2\alpha_{i}\alpha_{j}}
+\end{equation} 
+
+and this is modelled as a linear combination of regression splines (b-spline or p-splines):
+\begin{equation}
+    \alpha_{i} = \theta_{0} + \sum_{k=1}^{K}g_{k}(z_{k,i})
+\end{equation}
+
+This formulation has the advantage of being more parsimonious and potentially easier to fit, but it may be less flexible in terms of modelling the relationship between richness and turnover.
+
+
+\end{document}

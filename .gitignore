@@ -8,4 +8,15 @@ __pycache__/
 *.pyd
 *.log
 
-src/reca_version/output/*
+
+# Ignore any folder called output
+**/output/
+
+# Ignore clesso_nn backup snapshots
+**/backup/
+
+# Ignore any folder called viz
+**/viz/
+
+# Ingnore settings.json files
+**/settings.json

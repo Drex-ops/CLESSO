@@ -1,6 +1,6 @@
 ##############################################################################
 ##
-## run_obsGDM.R  —  Single parameterised entry point for RECA obsGDM
+## run_obsGDM.R  --  Single parameterised entry point for RECA obsGDM
 ##
 ## This replaces the 13 duplicated run_obsGDM_*.r scripts from OLD_RECA.
 ## All variant behaviour (AVES/PLANTS/VAS, biAverage, v2/v3 decomposition,
@@ -11,9 +11,9 @@
 ##   2. source("run_obsGDM.R")
 ##
 ## Pipeline:
-##   Load data → siteAggregator → date filter → site.richness.extractor →
-##   obsPairSampler → gen_windows (env extraction) → anomalies →
-##   substrate extraction → splineData → fitGDM → diagnostics → save
+##   Load data -> siteAggregator -> date filter -> site.richness.extractor ->
+##   obsPairSampler -> gen_windows (env extraction) -> anomalies ->
+##   substrate extraction -> splineData -> fitGDM -> diagnostics -> save
 ##
 ##############################################################################
 
@@ -30,13 +30,18 @@ this_dir <- tryCatch(
     else stop("Cannot determine script directory.")
   }
 )
-source(file.path(this_dir, "src", "reca_version","config.R"))
+config_path <- file.path(this_dir, "config.R")
+if (!file.exists(config_path)) {
+  config_path <- file.path(this_dir, "src", "reca_version", "config.R")
+}
+source(config_path)
 source(file.path(config$r_dir, "utils.R"))
 source(file.path(config$r_dir, "gdm_functions.R"))
 source(file.path(config$r_dir, "site_aggregator.R"))
 source(file.path(config$r_dir, "site_richness_extractor.R"))
 source(file.path(config$r_dir, "obs_pair_sampler.R"))
 source(file.path(config$r_dir, "gen_windows.R"))
+source(file.path(config$r_dir, "run_chunked_env.R"))
 source(file.path(config$r_dir, "plotting.R"))
 
 # ---------------------------------------------------------------------------
@@ -143,11 +148,11 @@ frog.auGrid <- data.frame(
   Site.Richness = datRED$richness
 )
 
-## Expand m1 back to full dataset
-row.nums <- 1:nrow(m1)
-row.vect <- rep(row.nums, count)
-m2       <- m1[row.vect, ]
-gc()
+## Build full-record proxy (maps each row of frog.auGrid to its site)
+## This replaces the old m2 = m1[row.vect, ] expansion that caused OOM.
+full_site_map <- match(as.character(frog.auGrid$ID), site_levels)
+m2 <- site_species_proxy(site_sp_matrix, full_site_map)
+rm(m1); gc()
 
 # ===========================================================================
 # STEP 5: Run observation-pair sampler
@@ -173,7 +178,7 @@ obsPairs_orig <- obsPairs_out
 cat("\n--- Step 6: Climate window loop ---\n")
 biol_group <- config$species_group
 
-for (c_yr in config$c_yrs) {
+for (c_yr in config$c_yrs[1]) {
   for (w_yr in config$w_yrs) {
 
     cat(sprintf("\n>>> Climate: %d yrs | Weather: %d yrs\n", c_yr, w_yr))
@@ -213,53 +218,24 @@ for (c_yr in config$c_yrs) {
         )
       }
 
-      ## Parallel env extraction
-      n_workers <- min(length(init_params), config$cores_to_use)
+      ## ---- Chunked parallel env extraction with progress reporting ----
+      n_params   <- length(init_params)
+      n_workers  <- min(n_params, config$cores_to_use)
+
       cl <- makeCluster(n_workers)
       registerDoSNOW(cl)
 
-      env_outA <- foreach(x = 1:length(init_params), .combine = "cbind",
-                          .packages = "arrow") %dopar% {
-        out <- gen_windows(
-          pairs        = ext_data,
-          variables    = init_params[[x]]$variables,
-          mstat        = init_params[[x]]$mstat,
-          cstat        = init_params[[x]]$cstat,
-          window       = init_params[[x]]$window,
-          npy_src      = config$npy_src,
-          start_year   = config$geonpy_start_year,
-          python_exe   = config$python_exe,
-          pyper_script = config$pyper_script,
-          feather_tmpdir = config$feather_tmpdir
-        )
-        colnames(out) <- paste(init_params[[x]]$prefix, colnames(out), sep = "_")
-        out[, 9:ncol(out)]
-      }
+      env_outA <- run_chunked_env(ext_data, init_params, "A", swap_sites = FALSE)
 
       ## Bidirectional averaging (if enabled)
       if (config$biAverage) {
-        cat("  Computing bidirectional average...\n")
-        env_outB <- foreach(x = 1:length(init_params), .combine = "cbind",
-                            .packages = "arrow") %dopar% {
-          out <- gen_windows(
-            pairs        = ext_data[, c(1, 2, 7, 8, 5, 6, 3, 4)],  # swap sites
-            variables    = init_params[[x]]$variables,
-            mstat        = init_params[[x]]$mstat,
-            cstat        = init_params[[x]]$cstat,
-            window       = init_params[[x]]$window,
-            npy_src      = config$npy_src,
-            start_year   = config$geonpy_start_year,
-            python_exe   = config$python_exe,
-            pyper_script = config$pyper_script,
-            feather_tmpdir = config$feather_tmpdir
-          )
-          colnames(out) <- paste(init_params[[x]]$prefix, colnames(out), sep = "_")
-          out[, 9:ncol(out)]
-        }
-        env_out <- (env_outA + env_outB) / 2
+        env_outB <- run_chunked_env(ext_data, init_params, "B", swap_sites = TRUE)
+        env_out  <- (env_outA + env_outB) / 2
+        rm(env_outB)
       } else {
         env_out <- env_outA
       }
+      rm(env_outA)
 
       stopCluster(cl)
       registerDoSEQ()
@@ -421,7 +397,7 @@ for (c_yr in config$c_yrs) {
     coefs <- coef(obsGDM_1)
     save(coefs, file = paste0(out_prefix, "coefficients.RData"))
 
-    ## Build fit object for plotting
+    ## Build fit object for plotting and metadata
     fit <- list()
     fit$intercept    <- coef(obsGDM_1)[1]
     fit$sample       <- nrow(mod_ready)
@@ -442,6 +418,27 @@ for (c_yr in config$c_yrs) {
     fit$splines    <- rep(3, ncol(XX))
     fit$predicted  <- fitted(obsGDM_1)
     fit$ecological <- obsGDM_1$linear.predictors
+
+    ## ---- Run metadata ----
+    fit$species_group    <- config$species_group
+    fit$climate_window   <- c_yr
+    fit$weather_window   <- w_yr
+    fit$nMatch           <- config$nMatch
+    fit$w_ratio          <- w
+    fit$biAverage        <- config$biAverage
+    fit$decomposition    <- config$decomposition
+    fit$date_range       <- c(as.character(config$min_date), as.character(config$max_date))
+    fit$date_offset_yrs  <- config$date_offset_years
+    fit$obs_csv          <- config$obs_csv
+    fit$n_pairs          <- nrow(obsPairs_out)
+    fit$D2               <- D2
+    fit$nagelkerke_r2    <- gdm_dev$Nagelkerke
+    fit$env_params       <- config$env_params
+    fit$substrate_raster <- basename(config$substrate_raster)
+    fit$reference_raster <- basename(config$reference_raster)
+    fit$grid_resolution  <- config$grid_resolution
+    fit$geonpy_start_year <- config$geonpy_start_year
+    fit$run_timestamp    <- Sys.time()
     save(fit, file = paste0(out_prefix, "fittedGDM.RData"))
 
     ## Diagnostic plots

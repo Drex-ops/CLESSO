@@ -1,4 +1,0 @@
-numpy
-pandas
-pyarrow
-geonpy @ git+https://github.com/cwarecsiro/geonpy.git

@@ -17,6 +17,46 @@ def _env(var: str, default: str) -> str:
     return os.environ.get(var, default)
 
 
+# ======================================================================
+# Path profiles — switch via  CLESSO_PROFILE  env var ("local" | "remote")
+# ======================================================================
+PATH_PROFILES: dict[str, dict] = {
+    # Mac / local development machine
+    "local": {
+        "export_dir": Path(
+            "/Users/andrewhoskins/Library/CloudStorage/OneDrive-NAILSMA"
+            "/CODE/TERN-biodiversity-index/src/clesso_v2/output"
+            "/VAS_20260316_181756/nn_export"
+        ),
+        "effort_search_paths": [
+            str(Path.home() / "Library/Mobile Documents/com~apple~CloudDocs"
+                "/CODE/Effort_data_preper/outputs"),
+            "data/effort",
+        ],
+        "richness_anchor_path": Path(
+            str(Path.home() / "Library/Mobile Documents/com~apple~CloudDocs"
+                "/CODE/Richness_anchor_clesso/output/richness_anchor_lower.tif")
+        ),
+        "climate_npy_dir": "/Volumes/PortableSSD/CLIMATE/geonpy",
+        "device": "mps",
+    },
+    # Windows / remote compute machine
+    "remote": {
+        "export_dir": None,                   # TODO: fill in Windows path to nn_export directory
+        "effort_search_paths": [
+            None,                             # TODO: fill in Windows path to Effort_data_preper/outputs
+            "data/effort",
+        ],
+        "richness_anchor_path": None,         # TODO: fill in Windows path to richness_anchor_lower.tif
+        "climate_npy_dir": None,              # TODO: fill in Windows path to CLIMATE/geonpy
+        "device": "auto",
+    },
+}
+
+ACTIVE_PROFILE = PATH_PROFILES[os.environ.get("CLESSO_PROFILE", "local")]
+# ======================================================================
+
+
 @dataclass
 class CLESSONNConfig:
     """Configuration for the CLESSO neural-network model."""
@@ -48,7 +88,7 @@ class CLESSONNConfig:
     # ------------------------------------------------------------------
     # Data (exported from R pipeline Steps 1-4)
     # ------------------------------------------------------------------
-    export_dir: Optional[Path] = Path("/Users/andrewhoskins/Library/CloudStorage/OneDrive-NAILSMA/CODE/TERN-biodiversity-index/src/clesso_v2/output/VAS_20260316_181756/nn_export")  # set after R export; contains feather files
+    export_dir: Optional[Path] = field(default_factory=lambda: ACTIVE_PROFILE["export_dir"])  # set after R export; contains feather files
 
     # ------------------------------------------------------------------
     # Alpha network architecture
@@ -128,13 +168,9 @@ class CLESSONNConfig:
 
     # Default search paths for effort INPUT rasters (tried in order when
     # effort_input_dir is None and the model has effort features).
-    _effort_input_search_paths: list[str] = field(default_factory=lambda: [
-        # iCloud Effort_data_preper outputs (primary source)
-        str(Path.home() / "Library/Mobile Documents/com~apple~CloudDocs"
-            "/CODE/Effort_data_preper/outputs"),
-        # Fallback: project data/effort dir
-        "data/effort",
-    ])
+    _effort_input_search_paths: list[str] = field(
+        default_factory=lambda: ACTIVE_PROFILE["effort_search_paths"]
+    )
 
     # Eta smoothness penalty: lambda * mean(eta^2) on between-site pairs.
     # Penalises large eta to encourage gradual turnover and prevent the
@@ -242,7 +278,7 @@ class CLESSONNConfig:
     # Only applied where the raster has valid data (pixel value > 1;
     # pixels with value 0 are treated as no-data).
     # Set richness_anchor_lambda = 0.0 or richness_anchor_path = None to disable.
-    richness_anchor_path: Optional[Path] = Path("/Users/andrewhoskins/Library/Mobile Documents/com~apple~CloudDocs/CODE/Richness_anchor_clesso/output/richness_anchor_lower.tif")
+    richness_anchor_path: Optional[Path] = field(default_factory=lambda: ACTIVE_PROFILE["richness_anchor_path"])
     richness_anchor_lambda: float = 1.0  # 0.0 = disabled
 
     # ------------------------------------------------------------------
@@ -328,7 +364,7 @@ class CLESSONNConfig:
     # ------------------------------------------------------------------
     # Device
     # ------------------------------------------------------------------
-    device: str = "mps"  # "auto", "cpu", "mps", "cuda"
+    device: str = field(default_factory=lambda: ACTIVE_PROFILE["device"])  # "auto", "cpu", "mps", "cuda"
 
     def resolve_device(self) -> str:
         import torch

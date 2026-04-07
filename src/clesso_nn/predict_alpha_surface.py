@@ -39,6 +39,7 @@ import rasterio
 from rasterio.transform import from_bounds
 import torch
 
+from clesso_nn.config import ACTIVE_PROFILE
 
 # ──────────────────────────────────────────────────────────────────────────
 # Default paths (relative to project root)
@@ -56,7 +57,7 @@ DEFAULTS = dict(
     checkpoint=_default_checkpoint(),
     reference_raster=PROJECT_ROOT / "data" / "FWPT_mean_Cmax_mean_1946_1975.flt",
     substrate_raster=PROJECT_ROOT / "data" / "SUBS_brk_VAS.grd",
-    npy_src="/Volumes/PortableSSD/CLIMATE/geonpy",
+    npy_src=ACTIVE_PROFILE["climate_npy_dir"],
     output=None,  # derived from checkpoint dir at runtime
     batch_size=50_000,
     climate_year=2010,

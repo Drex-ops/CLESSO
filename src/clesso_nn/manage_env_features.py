@@ -43,6 +43,8 @@ import numpy as np
 import pandas as pd
 import pyarrow.feather as pf
 
+from clesso_nn.config import ACTIVE_PROFILE
+
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
@@ -51,7 +53,7 @@ DEFAULT_EXPORT_DIR = (
     PROJECT_ROOT / "src" / "clesso_v2" / "output"
     / "VAS_20260310_092634" / "nn_export"
 )
-DEFAULT_NPY_SRC = "/Volumes/PortableSSD/CLIMATE/geonpy"
+DEFAULT_NPY_SRC = ACTIVE_PROFILE["climate_npy_dir"]
 PYPER_SCRIPT = PROJECT_ROOT / "src" / "shared" / "python" / "pyper.py"
 
 # Climate window defaults (30-year mean centred on 2010)

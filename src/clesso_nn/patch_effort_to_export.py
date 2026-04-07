@@ -33,6 +33,8 @@ import numpy as np
 import pandas as pd
 import pyarrow.feather as pf
 
+from clesso_nn.config import ACTIVE_PROFILE
+
 # ── Effort raster layer names (must have matching .flt + .hdr files) ────────
 EFFORT_LAYERS = [
     "ala_record_count",
@@ -43,10 +45,7 @@ EFFORT_LAYERS = [
     "road_density_km_per_km2",
 ]
 
-DEFAULT_EFFORT_DIR = (
-    "/Users/andrewhoskins/Library/Mobile Documents/"
-    "com~apple~CloudDocs/CODE/Effort_data_preper/outputs"
-)
+DEFAULT_EFFORT_DIR = ACTIVE_PROFILE["effort_search_paths"][0]
 
 
 # ── ESRI BIL reader ────────────────────────────────────────────────────────

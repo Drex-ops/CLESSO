@@ -47,6 +47,7 @@ Every per-pair loss term is weighted by w_final to correct for sampling biases.
 from __future__ import annotations
 
 import csv
+import sys
 import time
 from pathlib import Path
 
@@ -60,6 +61,17 @@ from torch.utils.data import DataLoader
 from .config import CLESSONNConfig
 from .dataset import SiteData, make_dataloaders, HardPairMiner
 from .model import CLESSONet
+
+
+# --------------------------------------------------------------------------
+# Platform helpers
+# --------------------------------------------------------------------------
+
+def _monitor_hint(path: Path) -> str:
+    """Return a platform-appropriate command to tail a log file."""
+    if sys.platform == "win32":
+        return f"Get-Content -Wait -Path {path}"
+    return f"tail -f {path}"
 
 
 # --------------------------------------------------------------------------
@@ -394,7 +406,7 @@ def train(
     log_writer.writeheader()
     log_file.flush()
     print(f"Progress log: {log_path}")
-    print(f"Monitor with:  tail -f {log_path}\n")
+    print(f"Monitor with:  {_monitor_hint(log_path)}\n")
 
     t_start = time.time()
 
@@ -801,7 +813,7 @@ def train_two_stage(
     s1_log_writer.writeheader()
     s1_log_file.flush()
     print(f"  Stage 1 log: {s1_log_path}")
-    print(f"  Monitor with:  tail -f {s1_log_path}\n")
+    print(f"  Monitor with:  {_monitor_hint(s1_log_path)}\n")
 
     s1_best_loss = float("inf")
     s1_patience_ctr = 0
@@ -959,7 +971,7 @@ def train_two_stage(
     s2_log_writer.writeheader()
     s2_log_file.flush()
     print(f"  Stage 2 log: {s2_log_path}")
-    print(f"  Monitor with:  tail -f {s2_log_path}\n")
+    print(f"  Monitor with:  {_monitor_hint(s2_log_path)}\n")
 
     s2_best_loss = float("inf")
     s2_patience_ctr = 0
@@ -1279,7 +1291,7 @@ def train_cyclic(
     log_writer.writeheader()
     log_file.flush()
     print(f"  Cyclic log: {log_path}")
-    print(f"  Monitor with:  tail -f {log_path}\n")
+    print(f"  Monitor with:  {_monitor_hint(log_path)}\n")
 
     # ---- Set up optimizers (persistent across cycles for momentum state) ----
 

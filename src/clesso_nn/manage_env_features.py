@@ -35,6 +35,7 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -213,23 +214,25 @@ def extract_climate_for_sites(
 
     # Build pyper.py command
     python_exe = sys.executable
-    var_list = " ".join(variables)
-    cmd = (
-        f'"{python_exe}" "{PYPER_SCRIPT}" '
-        f'-f "{tmp_in_path}" '
-        f'-e {var_list} '
-        f'-s {cstat} '
-        f'-m {mstat} '
-        f'-w {window} '
-        f'-src "{npy_src}"'
-    )
-    print(f"  Running pyper: {cmd}")
-    result_path = os.popen(cmd).read().strip()
+    cmd_args = [
+        python_exe, str(PYPER_SCRIPT),
+        "-f", str(tmp_in_path),
+        "-e", *variables,
+        "-s", str(cstat),
+        "-m", str(mstat),
+        "-w", str(window),
+        "-src", str(npy_src),
+    ]
+    print(f"  Running pyper: {' '.join(str(a) for a in cmd_args)}")
+    proc = subprocess.run(cmd_args, capture_output=True, text=True)
+    result_path = proc.stdout.strip()
 
     if not result_path or not Path(result_path).exists():
         os.unlink(tmp_in_path)
         print("  ERROR: pyper.py failed or returned no output path.")
-        print(f"  Command was: {cmd}")
+        if proc.stderr:
+            print(f"  stderr: {proc.stderr.strip()}")
+        print(f"  Command was: {' '.join(str(a) for a in cmd_args)}")
         sys.exit(1)
 
     # Read result

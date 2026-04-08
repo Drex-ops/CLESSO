@@ -1075,11 +1075,13 @@ def main():
 
         # Auto-detect effort input dir if not explicitly supplied
         if not effort_dir:
-            _search_paths = [
-                Path.home() / "Library/Mobile Documents/com~apple~CloudDocs"
-                    "/CODE/Effort_data_preper/outputs",
-                PROJECT_ROOT / "data" / "effort",
-            ]
+            _search_paths = [PROJECT_ROOT / "data" / "effort"]
+            if sys.platform == "darwin":
+                _search_paths.insert(
+                    0,
+                    Path.home() / "Library/Mobile Documents/com~apple~CloudDocs"
+                        "/CODE/Effort_data_preper/outputs",
+                )
             for candidate in _search_paths:
                 if candidate.is_dir():
                     effort_dir = str(candidate)

@@ -5,10 +5,12 @@
 \usepackage{bm}
 \usepackage{booktabs}
 \usepackage{hyperref}
+\usepackage{tikz}
+\usetikzlibrary{positioning, arrows.meta, calc, fit, backgrounds, shapes.geometric}
 
-\title{ObsPair modelling -- Neural Network variant}
+\title{CLESSOnet: ObsPair modelling for species richness and turnover via a Neural Network}
 \author{Andrew Hoskins}
-\date{March 2026}
+\date{April 2026}
 
 \begin{document}
 
@@ -16,9 +18,780 @@
 
 \section{Background}
 
-This document describes a neural network implementation of the CLESSO (Community-Level Species Similarity Observations) model. The core ecological framework -- estimating species richness ($\alpha$) and compositional turnover ($\beta$) from observation-pair data -- is identical to the TMB version described in the companion document. The key difference is that the parametric sub-models (linear terms, P-splines, I-splines) are replaced with neural networks, while preserving the ecological constraints that make the model interpretable.
+This document describes a neural network implementation of the CLESSO (Community-Level Estimates from Sparse Species Observations) model. The core ecological framework -- estimating species richness ($\alpha$) and compositional turnover ($\beta$) from observation-pair data -- is identical to the TMB version described in the companion document. The key difference is that the parametric sub-models (linear terms, P-splines, I-splines) are replaced with neural networks, while preserving the ecological constraints that make the model interpretable.
 
 The motivation for this variant is computational. The TMB implementation relies on a Laplace approximation over site-level random effects ($u_i$), which requires repeated sparse Cholesky factorisations of the joint precision matrix. For large numbers of sites ($>10^4$), this becomes prohibitively expensive -- often requiring days to converge. A neural network trained with mini-batch stochastic gradient descent eliminates the Laplace approximation entirely, reducing training from days to minutes while retaining (and potentially improving upon) the flexibility of the spline-based approach.
+
+Figure~\ref{fig:comp-graph} provides an overview of the computational graph, showing how site-level covariates flow through the alpha, effort, and beta sub-networks to produce a match probability and composite loss.
+
+% ── Computational graph ──────────────────────────────────────────────
+\begin{figure}[p]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+    % ── shared styles ──
+    >=Stealth,
+    node distance=8mm and 14mm,
+    % inputs
+    input/.style={
+        draw, rounded corners=2pt, fill=gray!12,
+        minimum height=7mm, minimum width=18mm,
+        font=\small, align=center},
+    % neural-network blocks
+    alphablock/.style={
+        draw, rounded corners=4pt, fill=blue!12,
+        minimum height=9mm, minimum width=22mm,
+        font=\small\bfseries, align=center},
+    effortblock/.style={
+        draw, rounded corners=4pt, fill=blue!8,
+        minimum height=9mm, minimum width=22mm,
+        font=\small\bfseries, align=center,
+        dashed},                        % dashed = optional
+    betablock/.style={
+        draw, rounded corners=4pt, fill=green!14,
+        minimum height=9mm, minimum width=22mm,
+        font=\small\bfseries, align=center},
+    % math operations
+    op/.style={
+        draw, circle, fill=yellow!15,
+        inner sep=1.5pt, font=\small, minimum size=7mm},
+    % intermediate / computed quantities
+    quant/.style={
+        draw, rounded corners=2pt, fill=white,
+        minimum height=7mm, minimum width=14mm,
+        font=\small, align=center},
+    % loss nodes
+    lossblock/.style={
+        draw, rounded corners=4pt, fill=red!12,
+        minimum height=9mm, minimum width=22mm,
+        font=\small\bfseries, align=center},
+    % annotation text
+    annot/.style={font=\scriptsize\itshape, text=black!60},
+    % arrows
+    arr/.style={->, thick},
+    darr/.style={->, thick, dashed},    % dashed arrow (optional path)
+]
+
+% =====================================================================
+%  INPUTS  (left column)
+% =====================================================================
+\node[input] (zi)   {$\mathbf{z}_i$\\[-1pt]{\scriptsize env covariates}};
+\node[input, below=5mm of zi]  (wi)   {$\mathbf{w}_i$\\[-1pt]{\scriptsize effort covariates}};
+\node[input, below=18mm of wi]  (zj)   {$\mathbf{z}_j$\\[-1pt]{\scriptsize env covariates}};
+\node[input, below=5mm of zj]  (wj)   {$\mathbf{w}_j$\\[-1pt]{\scriptsize effort covariates}};
+
+\node[input, below=18mm of wj] (evi) {$\tilde{\mathbf{x}}_i$\\[-1pt]{\scriptsize env values}};
+\node[input, below=5mm of evi] (evj) {$\tilde{\mathbf{x}}_j$\\[-1pt]{\scriptsize env values}};
+
+\node[input, below=32mm of evj] (iw) {\texttt{is\_within}\\[-1pt]{\scriptsize $\in\{0,1\}$}};
+\node[input, below=5mm of iw]  (y)    {$y$\\[-1pt]{\scriptsize match label}};
+
+% ── site-pair brace annotations ──
+\node[annot, left=2mm of zi] {site $i$};
+\node[annot, left=2mm of zj] {site $j$};
+
+% =====================================================================
+%  ALPHA PATHWAY  (site i)
+% =====================================================================
+% Alpha net (shared weights, site i)
+\node[alphablock, right=22mm of zi] (alphai)
+    {AlphaNet\\[-1pt]{\scriptsize MLP, SiLU}};
+\draw[arr] (zi) -- (alphai);
+
+% env logit
+\node[quant, right=12mm of alphai] (elogi)
+    {env\_logit$_i$};
+\draw[arr] (alphai) -- (elogi);
+
+% Effort net (site i)
+\node[effortblock, right=22mm of wi] (effi)
+    {EffortNet\\[-1pt]{\scriptsize MLP, SiLU}};
+\draw[darr] (wi) -- (effi);
+
+% effort logit
+\node[quant, right=12mm of effi] (efflogi)
+    {effort\_logit$_i$};
+\draw[darr] (effi) -- (efflogi);
+
+% sigma node for capture fraction
+\node[op, right=10mm of efflogi] (sigi) {$\sigma$};
+\draw[darr] (efflogi) -- (sigi);
+\node[annot, above=1pt of sigi] {$c_i\!\in\!(0,1)$};
+
+% softplus node for env
+\node[op, right=10mm of elogi] (spi) {\footnotesize sp};
+\draw[arr] (elogi) -- (spi);
+
+% alpha integration node
+\node[op, right=14mm of spi] (integi)
+    {\footnotesize $\times$};
+\draw[arr] (spi) -- (integi);
+\draw[darr] (sigi) -- (integi);
+
+% +1 node
+\node[op, right=8mm of integi] (plus1i) {$+1$};
+\draw[arr] (integi) -- (plus1i);
+
+% alpha_i output
+\node[quant, right=8mm of plus1i] (ai) {$\alpha_i$};
+\draw[arr] (plus1i) -- (ai);
+
+% =====================================================================
+%  ALPHA PATHWAY  (site j) – weight-shared
+% =====================================================================
+\node[alphablock, right=22mm of zj] (alphaj)
+    {AlphaNet\\[-1pt]{\scriptsize (shared weights)}};
+\draw[arr] (zj) -- (alphaj);
+
+\node[quant, right=12mm of alphaj] (elogj)
+    {env\_logit$_j$};
+\draw[arr] (alphaj) -- (elogj);
+
+\node[effortblock, right=22mm of wj] (effj)
+    {EffortNet\\[-1pt]{\scriptsize (shared weights)}};
+\draw[darr] (wj) -- (effj);
+
+\node[quant, right=12mm of effj] (efflogj)
+    {effort\_logit$_j$};
+\draw[darr] (effj) -- (efflogj);
+
+\node[op, right=10mm of efflogj] (sigj) {$\sigma$};
+\draw[darr] (efflogj) -- (sigj);
+\node[annot, above=1pt of sigj] {$c_j\!\in\!(0,1)$};
+
+\node[op, right=10mm of elogj] (spj) {\footnotesize sp};
+\draw[arr] (elogj) -- (spj);
+
+\node[op, right=14mm of spj] (integj)
+    {\footnotesize $\times$};
+\draw[arr] (spj) -- (integj);
+\draw[darr] (sigj) -- (integj);
+
+\node[op, right=8mm of integj] (plus1j) {$+1$};
+\draw[arr] (integj) -- (plus1j);
+
+\node[quant, right=8mm of plus1j] (aj) {$\alpha_j$};
+\draw[arr] (plus1j) -- (aj);
+
+% =====================================================================
+%  BETA PATHWAY  (Transform architecture)
+% =====================================================================
+
+% ── Per-dimension monotone transforms T_k (site i and site j) ──
+\node[betablock, right=22mm of evi, minimum width=30mm] (Tki)
+    {$T_1,\!\ldots,\!T_m$\\[-1pt]{\scriptsize monotone transforms}};
+\draw[arr] (evi) -- (Tki);
+
+\node[betablock, right=22mm of evj, minimum width=30mm] (Tkj)
+    {$T_1,\!\ldots,\!T_m$\\[-1pt]{\scriptsize (shared weights)}};
+\draw[arr] (evj) -- (Tkj);
+
+% ── Transformed values ──
+\node[quant, right=10mm of Tki] (txi) {$T(\tilde{\mathbf{x}}_i)$};
+\draw[arr] (Tki) -- (txi);
+
+\node[quant, right=10mm of Tkj] (txj) {$T(\tilde{\mathbf{x}}_j)$};
+\draw[arr] (Tkj) -- (txj);
+
+% ── Absolute difference in transformed space ──
+\node[op, right=14mm of txi, yshift=-11mm] (tdiff) {$|\cdot|$};
+\draw[arr] (txi.east) -- ++(6mm,0) |- (tdiff);
+\draw[arr] (txj.east) -- ++(6mm,0) |- (tdiff);
+\node[annot, above=2pt of tdiff] {$|T_k(\tilde{x}_{k,i})\!-\!T_k(\tilde{x}_{k,j})|$};
+
+% ── Per-dimension weighting g_k (origin-anchored) ──
+\node[betablock, right=14mm of tdiff] (gk)
+    {$g_1,\!\ldots,\!g_m$\\[-1pt]{\scriptsize monotone weights}};
+\draw[arr] (tdiff) -- (gk);
+\node[annot, below=2pt of gk] {origin-anchored};
+
+% ── Summation ──
+\node[op, right=12mm of gk] (bsum) {$\Sigma$};
+\draw[arr] (gk) -- (bsum);
+
+% ── Sigmoid clamp → eta ──
+\node[op, right=10mm of bsum, minimum size=8mm] (sigclamp)
+    {\scriptsize $\sigma_c$};
+\draw[arr] (bsum) -- (sigclamp);
+\node[annot, below=2pt of sigclamp] {$\eta_{\max}\!\cdot\!\sigma(\cdot\!-\!s)$};
+
+\node[quant, right=10mm of sigclamp] (eta) {$\eta$};
+\draw[arr] (sigclamp) -- (eta);
+
+% ── exp(-eta) → S ──
+\node[op, right=10mm of eta] (expn) {\scriptsize $e^{-(\cdot)}$};
+\draw[arr] (eta) -- (expn);
+
+\node[quant, right=8mm of expn] (S) {$S_{ij}$};
+\draw[arr] (expn) -- (S);
+
+% =====================================================================
+%  MATCH PROBABILITY NODE
+% =====================================================================
+% Place the p-match node to the right, between alpha and beta paths
+\node[quant, minimum width=28mm, fill=orange!10,
+      right=16mm of ai, yshift=-50mm] (pmatch)
+    {$p_{\mathrm{match}}$};
+
+% arrows from alpha_i, alpha_j, S, is_within → p_match
+\draw[arr] (ai.east) -- ++(8mm,0) |- (pmatch.west);
+\draw[arr] (aj.east) -- ++(8mm,0) |- (pmatch.west);
+\draw[arr] (S.east)  -- ++(6mm,0) |- (pmatch.south);
+\draw[arr] (iw.east) -| (pmatch.south);
+
+% annotation: the two branches
+\node[annot, above=2pt of pmatch, xshift=-3mm]
+    {within: $1/\alpha_i$\quad between: $S\!\cdot\!\frac{\alpha_i+\alpha_j}{2\alpha_i\alpha_j}$};
+
+% =====================================================================
+%  RETROSPECTIVE CORRECTION
+% =====================================================================
+\node[op, right=14mm of pmatch, minimum size=9mm] (retro)
+    {\scriptsize retro};
+\draw[arr] (pmatch) -- (retro);
+\node[annot, above=2pt of retro] {$p^{\mathrm{samp}}$};
+
+% =====================================================================
+%  LOSS
+% =====================================================================
+\node[lossblock, right=14mm of retro] (bce)
+    {BCE\\[-1pt]{\scriptsize per-stratum}};
+\draw[arr] (retro) -- (bce);
+\draw[arr] (y.east) -| (bce.south);
+
+% Composite loss
+\node[lossblock, right=14mm of bce] (loss)
+    {$\mathcal{L}$\\[-1pt]{\scriptsize composite}};
+\draw[arr] (bce) -- (loss);
+
+% Penalties feeding into composite loss
+\node[quant, above=10mm of loss, minimum width=24mm, fill=red!6]
+    (pen) {Penalties\\[-1pt]{\scriptsize lb, anchor, ac, effort}};
+\draw[arr] (pen) -- (loss);
+
+% draw dashed arrow from eta to penalty (anti-collapse uses eta)
+\draw[darr, bend left=15] (eta.north) |- (pen.west);
+% draw dashed arrow from alpha_i to penalty (lower-bound / anchor use alpha)
+\draw[darr, bend right=8] (ai.north) |- (pen.west);
+
+% =====================================================================
+%  BACKGROUND SHADING  (group boxes)
+% =====================================================================
+\begin{pgfonlayer}{background}
+    % alpha group (site i)
+    \node[fill=blue!4, rounded corners=6pt, inner sep=4pt,
+          fit=(alphai)(sigi)(plus1i)(ai),
+          label={[annot, yshift=0pt]above:{\normalsize Alpha pathway (site $i$)}}] {};
+    % alpha group (site j)
+    \node[fill=blue!4, rounded corners=6pt, inner sep=4pt,
+          fit=(alphaj)(sigj)(plus1j)(aj),
+          label={[annot, yshift=0pt]above:{\normalsize Alpha pathway (site $j$)}}] {};
+    % beta group
+    \node[fill=green!5, rounded corners=6pt, inner sep=4pt,
+          fit=(Tki)(Tkj)(tdiff)(gk)(sigclamp)(S),
+          label={[annot, yshift=0pt]above:{\normalsize Beta pathway (transform architecture)}}] {};
+    % loss group
+    \node[fill=red!4, rounded corners=6pt, inner sep=4pt,
+          fit=(retro)(bce)(loss)(pen)] {};
+\end{pgfonlayer}
+
+\end{tikzpicture}
+}% end resizebox
+\caption{%
+Computational graph of the CLESSO neural network forward pass (transform beta variant).
+\textbf{Blue nodes}: alpha (richness) pathway --- per-site environmental covariates $\mathbf{z}$ pass through a shared-weight AlphaNet (MLP) to produce $\alpha_i, \alpha_j > 1$ via softplus~$+$~1.
+\textbf{Dashed nodes/arrows}: optional EffortNet pathway --- effort covariates $\mathbf{w}$ produce a capture-completeness fraction $c \in (0,1)$ that modulates apparent richness (default: completeness mode, $\alpha^{\mathrm{obs}} = 1 + c\cdot\mathrm{softplus}(\mathrm{env\_logit})$).
+\textbf{Green nodes}: beta (turnover) pathway --- per-site standardised environment vectors $\tilde{\mathbf{x}}_i, \tilde{\mathbf{x}}_j$ each pass through shared-weight monotone transforms $T_k$ (the closest neural analog of GDM I-splines), producing transformed values.  Absolute differences in transformed space $|T_k(\tilde{x}_{k,i}) - T_k(\tilde{x}_{k,j})|$ are fed through per-dimension origin-anchored weighting functions $g_k$, summed, and mapped through a sigmoid clamp ($\sigma_c$) to produce turnover $\eta \in (0, \eta_{\max})$ and similarity $S = e^{-\eta}$.
+\textbf{Orange/red nodes}: likelihood and loss --- the match probability $p$ is computed from $\alpha_i, \alpha_j, S$, and $\texttt{is\_within}$, corrected via the retrospective Bernoulli adjustment, and evaluated under per-stratum BCE with design weights.  Penalty terms (lower-bound, anchor, anti-collapse, effort $L_2$) feed into the composite loss $\mathcal{L}$.
+The \emph{additive} beta variant (Section~\ref{sec:additive-beta}) replaces the $T_k \to |\cdot| \to g_k$ chain with a single set of per-dimension monotone functions $f_k(|\Delta x_k|)$ operating directly on pre-computed distances.
+``sp'' = softplus; ``$\sigma$'' = sigmoid; ``$\sigma_c$'' = sigmoid clamp $\eta_{\max}\cdot\sigma(\cdot - s)$; ``retro'' = retrospective Bernoulli correction.%
+}
+\label{fig:comp-graph}
+\end{figure}
+
+% ── Backward-pass computational graph ────────────────────────────────
+\begin{figure}[p]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+    >=Stealth,
+    node distance=7mm and 12mm,
+    % loss terms
+    lossterm/.style={
+        draw, rounded corners=4pt, fill=red!12,
+        minimum height=9mm, minimum width=24mm,
+        font=\small\bfseries, align=center},
+    % composite loss
+    bigloss/.style={
+        draw, rounded corners=6pt, fill=red!18,
+        minimum height=11mm, minimum width=30mm,
+        font=\normalsize\bfseries, align=center},
+    % gradient-flow intermediate nodes
+    grad/.style={
+        draw, rounded corners=2pt, fill=orange!10,
+        minimum height=7mm, minimum width=20mm,
+        font=\small, align=center},
+    % parameter groups
+    param/.style={
+        draw, rounded corners=4pt, fill=blue!12,
+        minimum height=10mm, minimum width=28mm,
+        font=\small\bfseries, align=center},
+    parambeta/.style={
+        draw, rounded corners=4pt, fill=green!14,
+        minimum height=10mm, minimum width=28mm,
+        font=\small\bfseries, align=center},
+    parameff/.style={
+        draw, rounded corners=4pt, fill=blue!8,
+        minimum height=10mm, minimum width=28mm,
+        font=\small\bfseries, align=center, dashed},
+    % gradient modifier nodes
+    modifier/.style={
+        draw, rounded corners=3pt, fill=violet!12,
+        minimum height=8mm, minimum width=22mm,
+        font=\small, align=center},
+    % optimizer nodes
+    optim/.style={
+        draw, rounded corners=3pt, fill=cyan!10,
+        minimum height=8mm, minimum width=22mm,
+        font=\small\bfseries, align=center},
+    % annotation text
+    annot/.style={font=\scriptsize\itshape, text=black!60},
+    annotr/.style={font=\scriptsize\itshape, text=red!70!black},
+    % arrows
+    gradarr/.style={->, thick, red!60!black},
+    penarr/.style={->, thick, red!40!black, densely dashed},
+    optarr/.style={->, thick, cyan!60!black},
+]
+
+% =====================================================================
+%  ROW 1: COMPOSITE LOSS
+% =====================================================================
+\node[bigloss] (L) {$\mathcal{L}_{\mathrm{total}}$};
+
+% =====================================================================
+%  ROW 2: LOSS TERMS (fan out below composite loss)
+% =====================================================================
+% Main BCE term
+\node[lossterm, below left=14mm and 55mm of L] (bce)
+    {$\mathcal{L}_{\mathrm{BCE}}$\\[-1pt]{\scriptsize per-stratum}};
+
+% Penalty terms - spread across
+\node[lossterm, left=8mm of bce] (lb)
+    {$\mathcal{L}_{\mathrm{lb}}$\\[-1pt]{\scriptsize lower-bound}};
+\node[lossterm, right=8mm of bce] (anch)
+    {$\mathcal{L}_{\mathrm{anch}}$\\[-1pt]{\scriptsize richness anchor}};
+\node[lossterm, right=8mm of anch] (areg)
+    {$\mathcal{L}_{\alpha\mathrm{reg}}$\\[-1pt]{\scriptsize $\alpha$ regression}};
+\node[lossterm, right=8mm of areg] (ac)
+    {$\mathcal{L}_{\mathrm{AC}}$\\[-1pt]{\scriptsize anti-collapse}};
+\node[lossterm, right=8mm of ac] (geo)
+    {$\mathcal{L}_{\mathrm{geo}}$\\[-1pt]{\scriptsize geo $L_2$}};
+\node[lossterm, right=8mm of geo] (effl2)
+    {$\mathcal{L}_{\mathrm{eff}}$\\[-1pt]{\scriptsize effort $L_2$}};
+
+% Stratum decomposition annotation
+\node[annot, below=1pt of bce] {$= \sum_{s} \lambda_s L_s + \lambda_{\mathrm{boost}} L_{\mathrm{boost}}$};
+\node[annot, below=1pt of lb] {$\alpha_{\mathrm{env}} \geq S_{\mathrm{obs}}$};
+\node[annot, below=1pt of ac] {$-\log(\eta + \epsilon)$};
+
+% Arrows from loss terms to composite
+\draw[gradarr] (bce) -- (L);
+\draw[penarr]  (lb) |- (L);
+\draw[penarr]  (anch) -- (L);
+\draw[penarr]  (areg) -- (L);
+\draw[penarr]  (ac) |- (L);
+\draw[penarr]  (geo) |- (L);
+\draw[penarr]  (effl2) |- (L);
+
+% Stratum weight annotations
+\node[annotr, above=2pt of bce, xshift=-2mm]
+    {$\lambda_W\!=\!0.25,\; \lambda_S\!=\!0.35,\; \lambda_N\!=\!0.25,\; \lambda_D\!=\!0.15$};
+
+% =====================================================================
+%  ROW 3: GRADIENT CHAIN (backward through correction + probability)
+% =====================================================================
+\node[grad, below=22mm of bce] (dretro)
+    {$\partial / \partial p$\\[-2pt]{\scriptsize through retro corr.}};
+\draw[gradarr] (bce) -- (dretro)
+    node[midway, right, annot] {chain rule through $p_{\mathrm{samp}}(p)$};
+
+% Split into within and between branches
+\node[grad, below left=16mm and 20mm of dretro] (dwithin)
+    {$\partial \log p / \partial \alpha_i$\\[-2pt]{\scriptsize within: $= -1/\alpha_i$}};
+\node[grad, below right=16mm and 20mm of dretro] (dbetween)
+    {$\partial \log p / \partial \eta$\\[-2pt]{\scriptsize between: $= -1$}};
+
+\draw[gradarr] (dretro) -- (dwithin)
+    node[midway, left, annot] {within};
+\draw[gradarr] (dretro) -- (dbetween)
+    node[midway, right, annot] {between};
+
+% Between also flows to alpha
+\node[grad, below=10mm of dwithin, xshift=10mm] (dalpha)
+    {$\partial \mathcal{L} / \partial \theta_\alpha$\\[-2pt]{\scriptsize accumulated}};
+
+\draw[gradarr] (dwithin) -- (dalpha);
+\draw[gradarr] (dbetween.south) -- ++(0,-5mm) -| (dalpha)
+    node[pos=0.25, right, annot] {also via $\alpha_{i},\alpha_{j}$};
+
+\node[grad, below=10mm of dbetween] (dbeta)
+    {$\partial \mathcal{L} / \partial \theta_\beta$\\[-2pt]{\scriptsize accumulated}};
+\draw[gradarr] (dbetween) -- (dbeta);
+
+% Penalty gradient contributions
+\draw[penarr] (lb.south) |- (dalpha)
+    node[pos=0.3, below, annot] {via $\alpha_{\mathrm{env}}$};
+\draw[penarr] (anch.south) |- (dalpha);
+\draw[penarr] (areg.south) |- (dalpha);
+\draw[penarr] (ac.south) |- (dbeta)
+    node[pos=0.3, below, annot] {via $\eta$};
+
+% =====================================================================
+%  ROW 4: GRADIENT MODIFICATIONS
+% =====================================================================
+\node[modifier, below=14mm of dbeta] (bhook)
+    {$\times\, 100$\\[-1pt]{\scriptsize beta grad hook}};
+\draw[gradarr] (dbeta) -- (bhook);
+\node[annot, right=3mm of bhook]
+    {compensates $e^{-\eta}$ attenuation};
+
+\node[modifier, below=14mm of dalpha] (clipA)
+    {clip $\lVert\nabla\rVert \leq 5$\\[-1pt]{\scriptsize grad clipping}};
+\draw[gradarr] (dalpha) -- (clipA);
+
+\node[modifier, below=6mm of bhook] (clipB)
+    {clip $\lVert\nabla\rVert \leq 5$\\[-1pt]{\scriptsize grad clipping}};
+\draw[gradarr] (bhook) -- (clipB);
+
+% effort gradient path
+\node[grad, left=12mm of dalpha] (deffort)
+    {$\partial \mathcal{L} / \partial \theta_{\mathrm{eff}}$};
+\draw[gradarr] (dwithin.south) -- ++(0,-3mm) -| (deffort)
+    node[pos=0.25, left, annot] {via $\partial\alpha / \partial c$};
+\draw[penarr] (effl2.south) |- ([yshift=4mm]deffort.north) -- (deffort);
+
+\node[modifier, below=14mm of deffort] (clipE)
+    {clip $\lVert\nabla\rVert \leq 5$\\[-1pt]{\scriptsize grad clipping}};
+\draw[gradarr] (deffort) -- (clipE);
+
+% geo L2 contribution
+\draw[penarr] (geo.south) |- ([yshift=6mm]clipA.north) -- (clipA)
+    node[pos=0.7, right, annot] {$\lambda_\alpha^{\mathrm{geo}}\!=\!0.2$};
+\draw[penarr] (geo.south) |- ([yshift=6mm]clipB.north) -- (clipB)
+    node[pos=0.7, right, annot] {$\lambda_\beta^{\mathrm{geo}}\!=\!1.0$};
+
+% =====================================================================
+%  ROW 5: PARAMETER GROUPS + OPTIMIZER
+% =====================================================================
+\node[param, below=14mm of clipA] (thetaA)
+    {$\theta_\alpha$\\[-1pt]{\scriptsize AlphaNet}};
+\node[parambeta, below=14mm of clipB] (thetaB)
+    {$\theta_\beta$\\[-1pt]{\scriptsize BetaNet}};
+\node[parameff, below=14mm of clipE] (thetaE)
+    {$\theta_{\mathrm{eff}}$\\[-1pt]{\scriptsize EffortNet}};
+
+% Optimizer nodes
+\node[optim, below=8mm of thetaA] (adamA)
+    {Adam\\[-1pt]{\scriptsize lr varies by phase}};
+\node[optim, below=8mm of thetaB] (adamB)
+    {Adam\\[-1pt]{\scriptsize lr varies by phase}};
+\node[optim, below=8mm of thetaE] (adamE)
+    {Adam\\[-1pt]{\scriptsize lr varies by phase}};
+
+\draw[optarr] (clipA)  -- (thetaA);
+\draw[optarr] (clipB)  -- (thetaB);
+\draw[optarr] (clipE)  -- (thetaE);
+\draw[optarr] (thetaA) -- (adamA);
+\draw[optarr] (thetaB) -- (adamB);
+\draw[optarr] (thetaE) -- (adamE);
+
+% =====================================================================
+%  CYCLIC TRAINING PHASE ANNOTATIONS (right side)
+% =====================================================================
+\node[right=30mm of L, text width=62mm, align=left] (phases) {
+    \parbox{62mm}{\small
+    \textbf{Cyclic training phases}\\[4pt]
+    \textbf{1A} alpha: train $\theta_\alpha, \theta_{\mathrm{eff}}$;
+    freeze $\theta_\beta$\\
+    {\scriptsize within pairs only, lr $= 10^{-3}$}\\[3pt]
+    \textbf{1B} beta: train $\theta_\beta$;
+    freeze $\theta_\alpha, \theta_{\mathrm{eff}}$\\
+    {\scriptsize between pairs only, lr $= 5 \times 10^{-2}$}\\[3pt]
+    \textbf{2} joint: all params unfrozen\\
+    {\scriptsize all pairs, $\alpha$: $5{\times}10^{-4}$, $\beta$: $5{\times}10^{-3}$}\\[3pt]
+    \textbf{3} calibration: all params unfrozen\\
+    {\scriptsize lr $= 10^{-4}$, no match-boost}
+    }
+};
+
+% Key insight annotations
+\node[below=8mm of phases, text width=62mm, align=left] (insights) {
+    \parbox{62mm}{\small
+    \textbf{Key gradient properties}\\[3pt]
+    {\scriptsize
+    $\bullet$ Log-space: $\partial \log p / \partial\eta = -1$
+    (constant, independent of $\alpha$)\\[2pt]
+    $\bullet$ Retro correction maps $p {\approx} 0.01 \to p_{\mathrm{samp}} {\approx} 0.5$,
+    balancing gradients to $O(1)$\\[2pt]
+    $\bullet$ Beta hook ($\times 100$) compensates $e^{-\eta}$
+    chain-rule attenuation\\[2pt]
+    $\bullet$ MonotoneLinear weight\_raw: zero weight decay
+    (prevents softplus collapse to $0.693$)\\[2pt]
+    $\bullet$ StepLR: $\gamma = 0.5$, step varies by phase
+    }
+    }
+};
+
+% =====================================================================
+%  BACKGROUND SHADING
+% =====================================================================
+\begin{pgfonlayer}{background}
+    % BCE gradient chain
+    \node[fill=red!4, rounded corners=6pt, inner sep=5pt,
+          fit=(bce)(dretro)(dwithin)(dbetween),
+          label={[annot, yshift=0pt]above left:{\normalsize BCE gradient chain}}] {};
+    % Alpha gradient group
+    \node[fill=blue!4, rounded corners=6pt, inner sep=5pt,
+          fit=(dalpha)(clipA)(thetaA)(adamA)] {};
+    % Beta gradient group
+    \node[fill=green!4, rounded corners=6pt, inner sep=5pt,
+          fit=(dbeta)(bhook)(clipB)(thetaB)(adamB)] {};
+    % Effort gradient group
+    \node[fill=blue!3, rounded corners=6pt, inner sep=5pt,
+          fit=(deffort)(clipE)(thetaE)(adamE)] {};
+\end{pgfonlayer}
+
+\end{tikzpicture}
+}% end resizebox
+\caption{%
+Computational graph of the CLESSO neural network backward pass (gradient flow).
+\textbf{Red/orange nodes}: gradient chain from the composite loss $\mathcal{L}$ through the per-stratum BCE, retrospective Bernoulli correction, and log-space match probability to the three parameter groups.
+Solid red arrows show the primary gradient flow from $\mathcal{L}_{\mathrm{BCE}}$; dashed red arrows show penalty contributions ($\mathcal{L}_{\mathrm{lb}}$, $\mathcal{L}_{\mathrm{anch}}$, $\mathcal{L}_{\mathrm{AC}}$, etc.).
+\textbf{Violet nodes}: gradient modifications --- $\times 100$ backward hook on BetaNet parameters (compensating $e^{-\eta}$ attenuation) and global gradient clipping ($\lVert\nabla\rVert_2 \leq 5$).
+\textbf{Cyan nodes}: Adam optimisers with per-phase differential learning rates.
+The right panel summarises the cyclic block-coordinate training schedule: Phase~1A trains $\theta_\alpha$ on within-site pairs while freezing $\theta_\beta$; Phase~1B trains $\theta_\beta$ on between-site pairs while freezing $\theta_\alpha$; Phase~2 fine-tunes all parameters jointly with differential LR ($10\times$ higher for $\beta$); Phase~3 (optional) runs a short calibration pass.
+Key design property: the log-space formulation ensures $\partial \log p / \partial\eta = -1$ regardless of $\alpha$ magnitude, and the retrospective correction normalises match/mismatch gradient scales to $O(1)$.%
+}
+\label{fig:backward-pass}
+\end{figure}
+
+% ── Full pipeline: sample generation → prediction ────────────────────
+\begin{figure}[p]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+    >=Stealth,
+    node distance=8mm and 18mm,
+    % raw data
+    rawdata/.style={
+        draw, rounded corners=2pt, fill=gray!12,
+        minimum height=8mm, minimum width=28mm,
+        font=\small, align=center},
+    % R processing
+    rscript/.style={
+        draw, rounded corners=4pt, fill=orange!14,
+        minimum height=9mm, minimum width=30mm,
+        font=\small\bfseries, align=center},
+    % intermediate files / artefacts
+    artifact/.style={
+        draw, rounded corners=2pt, fill=yellow!15,
+        minimum height=8mm, minimum width=28mm,
+        font=\small, align=center},
+    % python / training components
+    pyblock/.style={
+        draw, rounded corners=4pt, fill=blue!12,
+        minimum height=9mm, minimum width=30mm,
+        font=\small\bfseries, align=center},
+    % the model (single node)
+    modelblock/.style={
+        draw, rounded corners=6pt, fill=blue!22,
+        minimum height=14mm, minimum width=36mm,
+        font=\normalsize\bfseries, align=center,
+        double, double distance=1.5pt},
+    % output / prediction products
+    output/.style={
+        draw, rounded corners=4pt, fill=green!14,
+        minimum height=9mm, minimum width=30mm,
+        font=\small\bfseries, align=center},
+    % raster / map output
+    raster/.style={
+        draw, rounded corners=2pt, fill=green!8,
+        minimum height=8mm, minimum width=28mm,
+        font=\small, align=center},
+    % annotation text
+    annot/.style={font=\scriptsize\itshape, text=black!55},
+    % arrows
+    arr/.style={->, thick},
+    sarr/.style={->, thick, dashed, gray},  % secondary / optional
+]
+
+% =====================================================================
+%  COLUMN 1: RAW INPUTS
+% =====================================================================
+\node[rawdata] (occ) {Occurrence records\\[-1pt]{\scriptsize species $\times$ site}};
+\node[rawdata, below=8mm of occ] (envcov)
+    {Env.\ covariates\\[-1pt]{\scriptsize PCA, climate, geo}};
+\node[rawdata, below=8mm of envcov] (effcov)
+    {Effort covariates\\[-1pt]{\scriptsize survey effort}};
+\node[rawdata, below=8mm of effcov] (anchor)
+    {Richness anchor\\[-1pt]{\scriptsize raster, optional}};
+
+% =====================================================================
+%  COLUMN 2: R SAMPLING PIPELINE
+% =====================================================================
+\node[rscript, right=22mm of occ] (sampler)
+    {obs\_pair\_sampler.R\\[-1pt]{\scriptsize hex-balanced pairs}};
+\draw[arr] (occ) -- (sampler);
+\draw[arr] (envcov.east) -- ++(6mm,0) |- (sampler.west);
+
+\node[rscript, below=10mm of sampler] (stratsampler)
+    {clesso\_sampler\\[-1pt]{\scriptsize stratified W\,/\,S\,/\,N\,/\,D}};
+\draw[arr] (sampler) -- (stratsampler);
+
+\node[rscript, below=10mm of stratsampler] (exporter)
+    {export\_for\_nn.R\\[-1pt]{\scriptsize feather + metadata}};
+\draw[arr] (stratsampler) -- (exporter);
+\draw[arr] (effcov.east) -- ++(6mm,0) |- (exporter.west);
+\draw[arr] (anchor.east) -- ++(6mm,0) |- (exporter.west);
+
+% =====================================================================
+%  COLUMN 3: TRAINING ARTEFACTS / DATASET
+% =====================================================================
+\node[artifact, right=22mm of sampler] (pairs)
+    {pairs.feather\\[-1pt]{\scriptsize obs pairs + y + weights}};
+\draw[arr] (sampler.east) -- ++(6mm,0) |- (pairs.west);
+\draw[arr] (exporter.east) -- ++(6mm,0) |- (pairs.west);
+
+\node[artifact, below=8mm of pairs] (meta)
+    {metadata.json\\[-1pt]{\scriptsize retention rates, cov names}};
+\draw[arr] (exporter) -- (meta);
+
+\node[artifact, below=8mm of meta] (anchrast)
+    {anchor\_raster.npy\\[-1pt]{\scriptsize optional raster anchor}};
+\draw[sarr] (anchor.east) -- ++(6mm,0) |- (anchrast.west);
+
+% Python dataset
+\node[pyblock, below=8mm of anchrast] (dataset)
+    {PairDataset\\[-1pt]{\scriptsize dataset.py}};
+\draw[arr] (pairs.east) -- ++(6mm,0) |- (dataset.west);
+\draw[arr] (meta.east) -- ++(6mm,0) |- (dataset.west);
+\draw[sarr] (anchrast) -- (dataset);
+
+% =====================================================================
+%  COLUMN 4: TRAINING LOOP
+% =====================================================================
+\node[pyblock, right=22mm of pairs] (runcl)
+    {run\_clesso\_nn.py\\[-1pt]{\scriptsize training orchestration}};
+\draw[arr] (dataset.east) -- ++(6mm,0) |- (runcl.west);
+
+\node[modelblock, below=12mm of runcl] (model)
+    {CLESSONet\\[-1pt]{\scriptsize (see Figs.~\ref{fig:comp-graph}, \ref{fig:backward-pass})}};
+\draw[arr] (runcl) -- (model)
+    node[midway, right, annot] {cyclic train};
+
+\node[artifact, below=12mm of model] (ckpt)
+    {best\_model.pt\\[-1pt]{\scriptsize trained checkpoint}};
+\draw[arr] (model) -- (ckpt)
+    node[midway, right, annot] {save best val loss};
+
+% Calibration step (optional)
+\node[pyblock, right=18mm of ckpt] (calib)
+    {calibration\\[-1pt]{\scriptsize short de-bias pass}};
+\draw[sarr] (ckpt) -- (calib);
+
+\node[artifact, right=18mm of calib] (ckptcal)
+    {best\_model\_calibrated.pt\\[-1pt]{\scriptsize preferred for prediction}};
+\draw[sarr] (calib) -- (ckptcal);
+
+% =====================================================================
+%  COLUMN 5: PREDICTION INPUTS (raster grids)
+% =====================================================================
+\node[rawdata, right=22mm of runcl] (envgrid)
+    {Env.\ covariate grid\\[-1pt]{\scriptsize all land cells, $0.05^\circ$}};
+\node[rawdata, below=8mm of envgrid] (effgrid)
+    {Effort covariate grid\\[-1pt]{\scriptsize optional}};
+
+% =====================================================================
+%  COLUMN 6: PREDICTION
+% =====================================================================
+\node[pyblock, right=22mm of envgrid] (palpha)
+    {predict\_alpha\_surface.py\\[-1pt]{\scriptsize batch forward pass}};
+\draw[arr] (envgrid) -- (palpha);
+\draw[sarr] (effgrid.east) -- ++(6mm,0) |- (palpha.west);
+\draw[arr] (ckpt.north) -| (palpha.south);
+\draw[sarr] (ckptcal.north) -| (palpha.south);
+
+\node[pyblock, below=20mm of palpha] (pbeta)
+    {predict\_beta\_surface.py\\[-1pt]{\scriptsize landmark MDS}};
+\draw[arr] (envgrid.east) -- ++(8mm,0) |- (pbeta.west);
+\draw[arr] (ckpt.north) -| (pbeta.south);
+\draw[sarr] (ckptcal.north) -| (pbeta.south);
+
+% =====================================================================
+%  COLUMN 7: OUTPUTS
+% =====================================================================
+\node[output, right=22mm of palpha] (alphaout)
+    {Alpha surface\\[-1pt]{\scriptsize $\alpha_i$ map, GeoTIFF}};
+\draw[arr] (palpha) -- (alphaout);
+\node[raster, below=5mm of alphaout] (richnessmap)
+    {Species richness map\\[-1pt]{\scriptsize at $0.05^\circ$ resolution}};
+\draw[arr] (alphaout) -- (richnessmap);
+
+\node[output, right=22mm of pbeta] (betaout)
+    {Beta surface\\[-1pt]{\scriptsize $\eta_{ij}$ dissimilarity, RGB}};
+\draw[arr] (pbeta) -- (betaout);
+\node[raster, below=5mm of betaout] (turnovermap)
+    {Turnover / community map\\[-1pt]{\scriptsize LMDS RGB + cluster GeoTIFF}};
+\draw[arr] (betaout) -- (turnovermap);
+
+% =====================================================================
+%  PIPELINE STAGE LABELS (top row)
+% =====================================================================
+\node[annot, above=6mm of occ]        {\normalsize\bfseries Raw data};
+\node[annot, above=6mm of sampler]    {\normalsize\bfseries R sampling};
+\node[annot, above=6mm of pairs]      {\normalsize\bfseries Training data};
+\node[annot, above=6mm of runcl]      {\normalsize\bfseries Training};
+\node[annot, above=6mm of envgrid]    {\normalsize\bfseries Prediction inputs};
+\node[annot, above=6mm of palpha]     {\normalsize\bfseries Prediction};
+\node[annot, above=6mm of alphaout]   {\normalsize\bfseries Outputs};
+
+% =====================================================================
+%  BACKGROUND SHADING
+% =====================================================================
+\begin{pgfonlayer}{background}
+    % Raw inputs
+    \node[fill=gray!6, rounded corners=6pt, inner sep=5pt,
+          fit=(occ)(envcov)(effcov)(anchor)] {};
+    % R pipeline
+    \node[fill=orange!6, rounded corners=6pt, inner sep=5pt,
+          fit=(sampler)(stratsampler)(exporter)] {};
+    % Training artefacts
+    \node[fill=yellow!8, rounded corners=6pt, inner sep=5pt,
+          fit=(pairs)(meta)(anchrast)(dataset)] {};
+    % Training loop
+    \node[fill=blue!4, rounded corners=6pt, inner sep=5pt,
+          fit=(runcl)(model)(ckpt)] {};
+    % Prediction
+    \node[fill=blue!3, rounded corners=6pt, inner sep=5pt,
+          fit=(palpha)(pbeta)] {};
+    % Outputs
+    \node[fill=green!5, rounded corners=6pt, inner sep=5pt,
+          fit=(alphaout)(richnessmap)(betaout)(turnovermap)] {};
+\end{pgfonlayer}
+
+\end{tikzpicture}
+}% end resizebox
+\caption{%
+Full pipeline computational graph from sample generation to spatial prediction.
+\textbf{Grey}: raw input data (occurrence records, environmental and effort covariates, optional richness anchor raster).
+\textbf{Orange}: R sampling pipeline --- \texttt{obs\_pair\_sampler.R} generates hex-balanced match/mismatch pairs, \texttt{clesso\_sampler} stratifies them into within-site (W) and three between-site distance tiers (S, N, D), and \texttt{export\_for\_nn.R} writes the training artefacts.
+\textbf{Yellow}: training artefacts loaded into Python --- \texttt{pairs.feather} (observation pairs with targets and design weights) and \texttt{metadata.json} (per-stratum retention rates and covariate names).
+\textbf{Blue}: training loop --- \texttt{run\_clesso\_nn.py} orchestrates cyclic block-coordinate descent through the CLESSONet model (single node; internal architecture shown in Figs.~\ref{fig:comp-graph} and~\ref{fig:backward-pass}); the best validation checkpoint is saved to disk (with an optional short calibration pass).
+\textbf{Green}: spatial prediction --- \texttt{predict\_alpha\_surface.py} runs a batched forward pass over all land cells ($0.05^\circ$ grid) to produce a species richness GeoTIFF; \texttt{predict\_beta\_surface.py} selects landmark pixels, computes pairwise $\eta$, applies landmark MDS with Nystr\"{o}m extension, and writes an RGB turnover map and optional cluster GeoTIFF.
+Dashed arrows denote optional or secondary data flows (effort covariates, richness anchor, calibrated checkpoint).%
+}
+\label{fig:full-pipeline}
+\end{figure}
 
 \section{Pair constructs and likelihood}
 

@@ -2,16 +2,14 @@
     "latex-workshop.latex.tools": [
         {
             "name": "pdflatex",
-            "command": "pdflatex",
+            "command": "C:/Program Files/MiKTeX/miktex/bin/x64/pdflatex.exe",
             "args": [
                 "-synctex=1",
                 "-interaction=nonstopmode",
                 "-file-line-error",
                 "%DOC%"
             ],
-            "env": {
-                "PATH": "%WORKSPACE_FOLDER%/node_modules/.bin:/Users/andrewhoskins/Library/TinyTeX/bin/universal-darwin:/usr/local/bin:/usr/bin:/bin"
-            }
+            "env": {}
         },
         {
             "name": "latexmk",
@@ -24,9 +22,7 @@
                 "-outdir=%OUTDIR%",
                 "%DOC%"
             ],
-            "env": {
-                "PATH": "/Users/andrewhoskins/Library/TinyTeX/bin/universal-darwin:/usr/local/bin:/usr/bin:/bin"
-            }
+            "env": {}
         }
     ],
     "latex-workshop.latex.recipes": [

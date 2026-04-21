@@ -7,6 +7,7 @@
 \usepackage{hyperref}
 \usepackage{tikz}
 \usetikzlibrary{positioning, arrows.meta, calc, fit, backgrounds, shapes.geometric}
+\usepackage{pdflscape}
 
 \title{CLESSOnet: ObsPair modelling for species richness and turnover via a Neural Network}
 \author{Andrew Hoskins}
@@ -25,9 +26,12 @@ The motivation for this variant is computational. The TMB implementation relies 
 Figure~\ref{fig:comp-graph} provides an overview of the computational graph, showing how site-level covariates flow through the alpha, effort, and beta sub-networks to produce a match probability and composite loss.
 
 % ── Computational graph ──────────────────────────────────────────────
-\begin{figure}[p]
+\begin{landscape}
+\thispagestyle{empty}
+\vspace*{-1cm}
+\begin{figure}[h]
 \centering
-\resizebox{\textwidth}{!}{%
+\resizebox{0.99\textwidth}{!}{%
 \begin{tikzpicture}[
     % ── shared styles ──
     >=Stealth,
@@ -332,11 +336,16 @@ The \emph{additive} beta variant (Section~\ref{sec:additive-beta}) replaces the 
 }
 \label{fig:comp-graph}
 \end{figure}
+\vspace*{-0.5cm}
+\end{landscape}
 
 % ── Backward-pass computational graph ────────────────────────────────
-\begin{figure}[p]
+\begin{landscape}
+\thispagestyle{empty}
+\vspace*{-1cm}
+\begin{figure}[h]
 \centering
-\resizebox{\textwidth}{!}{%
+\resizebox{0.99\textwidth}{!}{%
 \begin{tikzpicture}[
     >=Stealth,
     node distance=7mm and 12mm,
@@ -598,11 +607,16 @@ Key design property: the log-space formulation ensures $\partial \log p / \parti
 }
 \label{fig:backward-pass}
 \end{figure}
+\vspace*{-0.5cm}
+\end{landscape}
 
 % ── Full pipeline: sample generation → prediction ────────────────────
-\begin{figure}[p]
+\begin{landscape}
+\thispagestyle{empty}
+\vspace*{-1cm}
+\begin{figure}[h]
 \centering
-\resizebox{\textwidth}{!}{%
+\resizebox{0.99\textwidth}{!}{%
 \begin{tikzpicture}[
     >=Stealth,
     node distance=8mm and 18mm,
@@ -816,6 +830,8 @@ Dashed arrows denote optional or secondary data flows (effort covariates, richne
 }
 \label{fig:full-pipeline}
 \end{figure}
+\vspace*{-0.5cm}
+\end{landscape}
 
 \section{Pair constructs and likelihood}
 

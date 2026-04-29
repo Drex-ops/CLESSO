@@ -100,11 +100,9 @@ class CLESSONNConfig:
     # ------------------------------------------------------------------
     # Beta (turnover) network architecture -- monotone network
     # ------------------------------------------------------------------
-    beta_type: str = "transform"  # "additive" | "factored" | "transform" | "deep"
-    beta_hidden: list[int] = field(default_factory=lambda: [128, 64, 32])  # only for beta_type="deep"
-    beta_n_knots: int = 32       # per-dimension knots for beta_type="additive"
+    beta_type: str = "transform"  # "factored" | "transform"
     beta_dropout: float = 0.1
-    beta_no_intercept: bool = True  # if True, remove bias from first MonotoneLinear in additive/factored/transform nets
+    beta_no_intercept: bool = True  # if True, remove bias from first MonotoneLinear in factored/transform nets
     transform_n_knots: int = 32  # hidden units in T_k transform nets (beta_type="transform")
     transform_g_knots: int = 16  # hidden units in g_k weighting nets (beta_type="transform")
     beta_lr_mult: float = 50.0  # LR multiplier for beta network (relative to base LR)

@@ -331,7 +331,6 @@ Computational graph of the CLESSO neural network forward pass (transform-interac
 \textbf{Dashed nodes/arrows}: optional EffortNet pathway --- effort covariates $\mathbf{w}$ produce a capture-completeness fraction $c \in (0,1)$ that modulates apparent richness (default: completeness mode, $\alpha^{\mathrm{obs}} = 1 + c\cdot\mathrm{softplus}(\mathrm{env\_logit})$).
 \textbf{Green nodes}: beta (turnover) pathway --- per-site standardised environment vectors $\tilde{\mathbf{x}}_i, \tilde{\mathbf{x}}_j$ pass through shared-weight monotone transforms $T_k$, producing transformed separations $d^{(T)}_{k,ij} = |T_k(\tilde{x}_{k,i}) - T_k(\tilde{x}_{k,j})|$ (GDM I-spline analogue). \textbf{Main path}: per-dimension origin-anchored weighting functions $g_k$ yield additive contributions $s_{k,ij} = g_k(d^{(T)}_{k,ij}) - g_k(0)$, summed to $z^{\mathrm{main}}$. \textbf{Interaction path}: shallow monotone encoders $e_k$ map each $d^{(T)}_{k,ij}$ to a low-dimensional embedding; the concatenated vector $\mathbf{h}_{ij} \in \mathbb{R}^{m d_{\mathrm{enc}}}$ is passed through a monotone interaction network $\phi$ with baseline subtraction, yielding a cross-dimension correction $z^{\mathrm{int}}_{ij} = \phi(\mathbf{h}_{ij}) - \phi(\mathbf{0})$, scaled by $\lambda_{\mathrm{int}}$. The combined predictor $z^{\mathrm{main}} + \lambda_{\mathrm{int}}\,z^{\mathrm{int}}$ is mapped through a sigmoid clamp ($\sigma_c$) to turnover $\eta \in (0, \eta_{\max})$ and similarity $S = e^{-\eta}$.
 \textbf{Orange/red nodes}: likelihood and loss --- the match probability $p$ is computed from $\alpha_i, \alpha_j, S$, and $\texttt{is\_within}$, corrected via the retrospective Bernoulli adjustment, and evaluated under per-stratum BCE with design weights.  Penalty terms (lower-bound, anchor, anti-collapse, effort $L_2$) feed into the composite loss $\mathcal{L}$.
-The \emph{additive} beta variant (Section~\ref{sec:additive-beta}) replaces the $T_k \to |\cdot| \to g_k$ chain with a single set of per-dimension monotone functions $f_k(|\Delta x_k|)$ operating directly on pre-computed distances.
 ``sp'' = softplus; ``$\sigma$'' = sigmoid; ``$\sigma_c$'' = sigmoid clamp $\eta_{\max}\cdot\sigma(\cdot - s)$; ``retro'' = retrospective Bernoulli correction.%
 }
 \label{fig:comp-graph}
@@ -1148,41 +1147,7 @@ The unconstrained $\mathbf{W}^{(\ell)}_{\text{raw}}$ are the learnable parameter
 \end{enumerate}
 
 Critically, \textbf{$L_2$ weight decay must not be applied to $\mathbf{W}_{\text{raw}}$}. Standard $L_2$ regularisation penalises the raw parameters toward zero, but $\text{softplus}(0) = \ln 2 \approx 0.693$ for every weight, which drives all effective weights to the same value and causes \textit{dimensional collapse} --- all environmental dimensions receive identical weight regardless of their ecological importance.
-
-\subsection{Deep monotone network (\texttt{beta\_type=``deep''})}
-
-The simplest approach replaces the I-spline transform with a deep monotone MLP:
-
-\begin{equation}
-    \eta_{i,j} = \text{softplus}\!\left(h_\beta(\bm{\Delta}_{i,j}; \bm{W}_\beta)\right)
-\end{equation}
-
-where $\bm{\Delta}_{i,j} = \left[|\tilde{x}_{1,i} - \tilde{x}_{1,j}|, \ldots, |\tilde{x}_{m,i} - \tilde{x}_{m,j}|\right] \geq \mathbf{0}$ is the vector of standardised environmental distances and $h_\beta$ is a monotone MLP built from MonotoneLinear layers with ReLU activations.
-
-This directly generalises the TMB approach: the I-spline + non-negative coefficient structure \textit{is} a single-layer monotone network with a specific (spline) feature transform. The multi-layer version is a universal approximator for monotone functions (Daniels \& Velikova, 2010). However, the deep variant is prone to dimensional collapse (all weights converging under weight decay) and is not the recommended architecture.
-
-\subsection{Additive monotone network (\texttt{beta\_type=``additive''})}
-\label{sec:additive-beta}
-
-The additive beta network is the direct neural analog of GDM's additive I-spline structure. Turnover decomposes as a sum of independent per-dimension monotone functions:
-
-\begin{equation}
-    \eta_{i,j} = \sum_{k=1}^{m} f_k\!\left(|\tilde{x}_{k,i} - \tilde{x}_{k,j}|\right)
-\end{equation}
-
-where each $f_k: \mathbb{R}_{\geq 0} \to \mathbb{R}$ is an independent monotone network with $n$ hidden units (default $n = 32$):
-
-\begin{equation}
-    g_k(d) = \mathbf{w}_2^\top\,\text{softplus}\!\left(\tilde{\mathbf{w}}_1\, d + \mathbf{b}_1\right), \qquad f_k(d) = g_k(d) - g_k(0)
-\end{equation}
-
-Here $\tilde{\mathbf{w}}_1 = \text{softplus}(\mathbf{w}_{1,\text{raw}}) \geq 0$ and $\mathbf{w}_2 = \text{softplus}(\mathbf{w}_{2,\text{raw}}) \geq 0$ are non-negative weight vectors. The hidden activation is \textbf{softplus} rather than ReLU: softplus has no dead zone (always nonzero gradient), giving naturally gradual onset of turnover rather than the hard on/off threshold behaviour of ReLU. Softplus is still monotone non-decreasing, preserving the monotonicity guarantee.
-
-The \textbf{baseline subtraction} $f_k(d) = g_k(d) - g_k(0)$ ensures that $f_k(0) = 0$ exactly, so zero environmental distance contributes zero turnover. Without this, the network biases would introduce a nonzero $\eta$ even for identical sites.
-
-The biases $\mathbf{b}_1$ in the first layer play the role of knot locations: they are initialised uniformly from $-3\sigma$ to $0\sigma$ of the standardised environmental distance, spreading the response onset across the observed range. The second-layer weights are initialised very small (at $\text{softplus}(-3) \approx 0.05$ effective weight) so that each dimension initially contributes $\approx 0.3$ at maximum distance, giving a total initial $\eta \approx 5$ across all dimensions.
-
-The final output is clamped: $\eta_{i,j} = \text{clamp}\!\left(\sum_k f_k, 0, 10\right)$. The upper bound of 10 corresponds to $S = e^{-10} \approx 4.5 \times 10^{-5}$, effectively complete dissimilarity. Without this clamp, the model can push $\eta \to \infty$ for all between-site pairs, learning the degenerate solution $p \approx 0$ everywhere.
+\label{sec:monotone-linear}
 
 \subsection{Factored deep monotone network (\texttt{beta\_type=``factored''})}
 \label{sec:factored-beta}
@@ -1204,7 +1169,7 @@ The architecture proceeds in three stages:
 
 \textbf{Monotonicity guarantee}: Each encoder is monotone in its input (non-negative weights + monotone activations). The interaction network has non-negative weights (MonotoneLinear) and takes non-negative inputs ($\mathbf{h}_k \geq 0$ via ReLU), so it is monotone in each $\mathbf{h}_k$. Since the composition of monotone functions is monotone, the full network is monotone in each $|\Delta x_k|$. Dropout is disabled throughout the factored network because baseline subtraction requires deterministic forward passes.
 
-The interaction term allows the model to capture effects such as: the impact of temperature distance on turnover depends on the magnitude of precipitation distance. The additive network (Section~\ref{sec:additive-beta}) cannot represent such interactions.
+The interaction term allows the model to capture effects such as: the impact of temperature distance on turnover depends on the magnitude of precipitation distance. A purely additive decomposition cannot represent such interactions.
 
 \subsection{Transform-first monotone network (\texttt{beta\_type=``transform''})}
 \label{sec:transform-beta}
@@ -1229,7 +1194,7 @@ where $\sigma_{\text{clamp}}(z) = \eta_{\max} \cdot \sigma(z - s)$ is a sigmoid 
     \begin{equation}
         g_k(d) = \tilde{\mathbf{v}}_2^\top\,\text{softplus}\!\left(\tilde{\mathbf{v}}_1\,d + \mathbf{c}_1\right)
     \end{equation}
-    with $n_g$ hidden units (default 16). The output is \textbf{origin-anchored} via baseline subtraction: the contribution of dimension~$k$ is $g_k(d_k) - g_k(0)$, ensuring zero distance contributes zero turnover. This mirrors the additive network's baseline subtraction (Section~\ref{sec:additive-beta}).
+    with $n_g$ hidden units (default 16). The output is \textbf{origin-anchored} via baseline subtraction: the contribution of dimension~$k$ is $g_k(d_k) - g_k(0)$, ensuring zero distance contributes zero turnover.
 \end{description}
 
 \paragraph{Relationship to GDM I-splines.}
@@ -1250,10 +1215,10 @@ In GDM, turnover is parameterised as $\eta_{i,j} = \sum_k \sum_s \beta_{k,s}\,|I
 The guarantee follows from three facts: (1)~$T_k$ is monotone non-decreasing (MonotoneLinear + softplus composition); (2)~if $|x_{k,i} - x_{k,j}|$ increases and $T_k$ is monotone, then $|T_k(x_{k,i}) - T_k(x_{k,j})|$ is non-decreasing; (3)~$g_k$ is monotone non-decreasing with $g_k(0) = 0$ via baseline subtraction. The sum of non-negative monotone terms is itself monotone and non-negative, so $\eta$ is monotone non-decreasing in each $|x_{k,i} - x_{k,j}|$.
 
 \paragraph{Output activation.}
-Unlike the additive and factored networks which use a hard clamp, the transform network uses a \textbf{sigmoid clamp}: $\eta = \eta_{\max} \cdot \sigma(\text{raw} - s)$, where $s$ is a learnable shift parameter calibrated at initialisation so that a typical pair ($\sim$0.5$\sigma$ apart in each dimension) yields $\eta \approx 1.5$. The sigmoid provides smooth, everywhere-nonzero gradients, avoiding the dead gradient zone at the upper clamp boundary that can trap the additive/factored networks.
+Unlike the factored network, which uses a hard clamp, the transform network uses a \textbf{sigmoid clamp}: $\eta = \eta_{\max} \cdot \sigma(\text{raw} - s)$, where $s$ is a learnable shift parameter calibrated at initialisation so that a typical pair ($\sim$0.5$\sigma$ apart in each dimension) yields $\eta \approx 1.5$. The sigmoid provides smooth, everywhere-nonzero gradients, avoiding the dead gradient zone at the upper clamp boundary that can trap the factored network.
 
 \paragraph{Data flow.}
-The transform network requires per-site environmental vectors $(\mathbf{x}_i, \mathbf{x}_j)$ as input, rather than the pre-computed distance vector $\bm{\Delta}_{i,j}$ used by the additive and factored networks. The dataset pipeline retains the raw (standardised) per-site environmental values alongside the pre-computed distances, so both pathways are available. For within-site pairs ($i = j$), the distances are identically zero by construction.
+The transform network requires per-site environmental vectors $(\mathbf{x}_i, \mathbf{x}_j)$ as input, rather than the pre-computed distance vector $\bm{\Delta}_{i,j}$ used by the factored network. The dataset pipeline retains the raw (standardised) per-site environmental values alongside the pre-computed distances, so both pathways are available. For within-site pairs ($i = j$), the distances are identically zero by construction.
 
 \subsection{Geographic distance as a beta input}
 
@@ -1263,7 +1228,7 @@ Optionally, the beta network can include geographic (Haversine) distance as an a
     \bm{\Delta}_{i,j} = \left[|\tilde{x}_{1,i} - \tilde{x}_{1,j}|, \ldots, |\tilde{x}_{m,i} - \tilde{x}_{m,j}|, \; \frac{d_{\text{geo}}(i,j)}{\sigma_{\text{geo}}}\right]
 \end{equation}
 
-where $d_{\text{geo}}(i,j)$ is the great-circle distance in kilometres and $\sigma_{\text{geo}}$ is estimated from random site pairs. This additional dimension gets its own monotone sub-network (additive or encoded) and allows the model to capture \textit{distance decay} --- the empirical observation that community similarity decreases with geographic distance independent of environmental differences (e.g.\ dispersal limitation).
+where $d_{\text{geo}}(i,j)$ is the great-circle distance in kilometres and $\sigma_{\text{geo}}$ is estimated from random site pairs. This additional dimension gets its own monotone sub-network and allows the model to capture \textit{distance decay} --- the empirical observation that community similarity decreases with geographic distance independent of environmental differences (e.g.\ dispersal limitation).
 
 The geographic distance feature is typically introduced in Phase~2 of the cyclic fine-tuning procedure (Section~\ref{sec:cyclic-finetune}), after the environmental signal has been learned.
 
@@ -1271,55 +1236,52 @@ The geographic distance feature is typically introduced in Phase~2 of the cyclic
 
 \begin{center}
 \small
-\begin{tabular}{l|l|l|l|l}
-    & TMB (I-spline) & Additive NN & Transform NN & Factored NN \\
+\begin{tabular}{l|l|l|l}
+    & TMB (I-spline) & Transform NN & Factored NN \\
     \hline
-    Monotonicity & Non-neg coef $\times$ I-spline & Non-neg weights $\times$ softplus & Non-neg weights $\times$ softplus & Non-neg weights $\times$ softplus \\
-    Input & Per-site $x_{k,i}$ & Pre-computed $|\Delta x_k|$ & Per-site $x_{k,i}$ & Pre-computed $|\Delta x_k|$ \\
-    Flexibility & $S \times m$ params & $n \times m$ params & $(n_T + n_g) \times m$ params & $n \times m$ + interaction \\
-    Interactions & None (additive) & None (additive) & None (additive) & Learned via shared network \\
-    $f_k(0) = 0$ & By construction & Baseline subtraction & Baseline subtraction & Baseline subtraction \\
-    $\eta$ range & $[0, \infty)$ & $[0, 10]$ clamped & $(0, 10)$ sigmoid & $[0, 10]$ clamped \\
-    Collapse risk & Low & Low & Low & Low (per-dim encoders) \\
-    GDM analogy & Identical structure & Learned $f_k$ on distance & Closest analog & Extended with interactions \\
+    Monotonicity & Non-neg coef $\times$ I-spline & Non-neg weights $\times$ softplus & Non-neg weights $\times$ softplus \\
+    Input & Per-site $x_{k,i}$ & Per-site $x_{k,i}$ & Pre-computed $|\Delta x_k|$ \\
+    Flexibility & $S \times m$ params & $(n_T + n_g) \times m$ params & $n \times m$ + interaction \\
+    Interactions & None (additive) & None (additive) & Learned via shared network \\
+    $f_k(0) = 0$ & By construction & Baseline subtraction & Baseline subtraction \\
+    $\eta$ range & $[0, \infty)$ & $(0, 10)$ sigmoid & $[0, 10]$ clamped \\
+    Collapse risk & Low & Low & Low (per-dim encoders) \\
+    GDM analogy & Identical structure & Closest analog & Extended with interactions \\
 \end{tabular}
 \end{center}
 
-The factored network is the default (\texttt{beta\_type=``factored''}) as it combines per-variable interpretability with the ability to capture cross-dimension interactions. The additive variant (\texttt{beta\_type=``additive''}) is available when strict additivity and maximal interpretability are preferred. The transform variant (\texttt{beta\_type=``transform''}) is the closest neural analog of GDM's I-spline parameterisation and is preferred when the goal is to recover ecologically interpretable per-dimension transforms comparable to GDM partial functions.
+The transform variant (\texttt{beta\_type=``transform''}) is the default: it is the closest neural analog of GDM's I-spline parameterisation and is preferred when the goal is to recover ecologically interpretable per-dimension transforms comparable to GDM partial functions. The factored variant (\texttt{beta\_type=``factored''}) is available when cross-dimension interactions are expected and some interpretability can be traded for capacity.
 
-\subsection{Discussion: similarities and differences between the four beta architectures}
+\subsection{Discussion: similarities and differences between the beta architectures}
 \label{sec:beta-discussion}
 
-All four beta architectures --- including the TMB I-spline baseline --- share the same fundamental structure: turnover $\eta_{i,j}$ is a non-negative, monotone non-decreasing function of the environmental separation between sites $i$ and $j$, decomposed additively across covariate dimensions (with the factored network adding an interaction term on top). They all guarantee $\eta \geq 0$ and monotonicity in each $|x_{k,i} - x_{k,j}|$, and they all produce ecologically interpretable per-dimension response curves showing how turnover accumulates with environmental distance. The differences lie in \emph{where} the nonlinear transform is applied and \emph{what} the network takes as input.
+The surviving beta architectures --- the TMB I-spline baseline, the transform NN, and the factored NN --- share the same fundamental structure: turnover $\eta_{i,j}$ is a non-negative, monotone non-decreasing function of the environmental separation between sites $i$ and $j$, decomposed additively across covariate dimensions (with the factored network adding an interaction term on top). They all guarantee $\eta \geq 0$ and monotonicity in each $|x_{k,i} - x_{k,j}|$, and they all produce ecologically interpretable per-dimension response curves showing how turnover accumulates with environmental distance. The differences lie in \emph{where} the nonlinear transform is applied and \emph{what} the network takes as input.
 
 \paragraph{Distance-first vs.\ transform-first.}
-The additive and factored networks are \textbf{distance-first}: the data pipeline pre-computes environmental distances $|\tilde{x}_{k,i} - \tilde{x}_{k,j}|$ and the network learns a monotone function of those distances. The transform network is \textbf{transform-first}: it receives the raw per-site environmental values $(\tilde{x}_{k,i}, \tilde{x}_{k,j})$, applies a learned monotone transform $T_k$ to each, and \emph{then} takes the distance in transformed space. The TMB I-spline approach is also transform-first --- $|I_s(x_{k,i}) - I_s(x_{k,j})|$ --- making the transform NN the closest neural analog of GDM.
+The factored network is \textbf{distance-first}: the data pipeline pre-computes environmental distances $|\tilde{x}_{k,i} - \tilde{x}_{k,j}|$ and the network learns a monotone function of those distances. The transform network is \textbf{transform-first}: it receives the raw per-site environmental values $(\tilde{x}_{k,i}, \tilde{x}_{k,j})$, applies a learned monotone transform $T_k$ to each, and \emph{then} takes the distance in transformed space. The TMB I-spline approach is also transform-first --- $|I_s(x_{k,i}) - I_s(x_{k,j})|$ --- making the transform NN the closest neural analog of GDM.
 
-This distinction matters ecologically. The distance-first approach treats every unit of standardised environmental distance the same: a 1$\sigma$ difference in temperature contributes the same raw input regardless of whether the pair is at 5\textdegree C vs.\ 6\textdegree C or at 30\textdegree C vs.\ 31\textdegree C. The learned monotone function $f_k$ can then up-weight or down-weight \emph{different magnitudes of distance}, but it cannot distinguish \emph{where on the environmental axis} the distance occurs.
+This distinction matters ecologically. The distance-first approach treats every unit of standardised environmental distance the same: a 1$\sigma$ difference in temperature contributes the same raw input regardless of whether the pair is at 5\textdegree C vs.\ 6\textdegree C or at 30\textdegree C vs.\ 31\textdegree C. The learned monotone function can then up-weight or down-weight \emph{different magnitudes of distance}, but it cannot distinguish \emph{where on the environmental axis} the distance occurs.
 
 The transform-first approach can make this distinction. If $T_k$ compresses the upper end of the temperature axis (i.e.\ $T_k'(x)$ is small for large $x$), then a 1\textdegree C difference between warm sites maps to a smaller transformed distance than the same 1\textdegree C difference between cool sites. This is precisely the behaviour of GDM's I-splines, where the spline basis functions concentrate their ``knots'' (regions of rapid change) in the part of the environmental axis where species turnover is most sensitive.
 
 \paragraph{Parameters and capacity.}
 For a model with $m$ environmental dimensions:
 \begin{itemize}
-    \item The \textbf{additive NN} has $\sim 2n \cdot m$ parameters (one two-layer monotone network per dimension, with $n$ hidden units).
-    \item The \textbf{transform NN} has $\sim 2(n_T + n_g) \cdot m$ parameters: a $T_k$ network ($n_T$ hidden units) plus a $g_k$ network ($n_g$ hidden units) per dimension. With defaults $n_T = 32, n_g = 16$, this is roughly $3\times$ the additive network.
+    \item The \textbf{transform NN} has $\sim 2(n_T + n_g) \cdot m$ parameters: a $T_k$ network ($n_T$ hidden units) plus a $g_k$ network ($n_g$ hidden units) per dimension, with defaults $n_T = 32, n_g = 16$.
     \item The \textbf{factored NN} has $\sim 2n \cdot m$ per-dimension encoder parameters plus the shared interaction network. The interaction network scales as $\mathcal{O}(m \cdot d_{\text{enc}} \cdot d_{\text{hidden}})$, so total capacity grows superlinearly with dimension count.
     \item The \textbf{TMB I-spline} has $S \times m$ parameters (one coefficient per spline basis per dimension), typically 8--20 basis functions.
 \end{itemize}
 
 \paragraph{Interpretability.}
-The additive and transform networks are the most interpretable: each dimension's contribution can be visualised independently by sweeping the input while holding other dimensions at zero. For the additive network this produces response curves $f_k(d)$ showing turnover as a function of environmental distance. For the transform network, one can additionally visualise the $T_k$ transform itself, showing how the raw environmental axis is nonlinearly rescaled --- directly analogous to plotting GDM's fitted I-spline partial functions. The factored network's additive component is equally interpretable, but the interaction component requires joint response surfaces (two-dimensional sweeps) to visualise, making it harder to summarise succinctly.
+The transform network is the most interpretable: each dimension's contribution can be visualised independently by sweeping the input while holding other dimensions at zero, producing response curves $g_k(d_k) - g_k(0)$ showing turnover as a function of transformed environmental distance. One can additionally visualise the $T_k$ transform itself, showing how the raw environmental axis is nonlinearly rescaled --- directly analogous to plotting GDM's fitted I-spline partial functions. The factored network's additive component is equally interpretable, but the interaction component requires joint response surfaces (two-dimensional sweeps) to visualise, making it harder to summarise succinctly.
 
 \paragraph{Gradient behaviour.}
-The additive and factored networks use a hard clamp ($\text{clamp}(\cdot, 0, 10)$) for the output, which has zero gradient when $\eta$ hits the boundary. In practice, pairs near the upper boundary can become ``stuck'' with no gradient signal to refine their turnover estimate. The transform network uses a sigmoid output activation $\eta_{\max} \cdot \sigma(\cdot - s)$, which always has nonzero gradient regardless of the $\eta$ value, providing smoother optimisation dynamics at the cost of never reaching exactly $\eta = 0$ or $\eta = 10$.
+The factored network uses a hard clamp ($\text{clamp}(\cdot, 0, 10)$) for the output, which has zero gradient when $\eta$ hits the boundary. In practice, pairs near the upper boundary can become ``stuck'' with no gradient signal to refine their turnover estimate. The transform network uses a sigmoid output activation $\eta_{\max} \cdot \sigma(\cdot - s)$, which always has nonzero gradient regardless of the $\eta$ value, providing smoother optimisation dynamics at the cost of never reaching exactly $\eta = 0$ or $\eta = 10$.
 
 \paragraph{When to use each.}
 \begin{itemize}
-    \item \textbf{Additive}: simplest, fastest, most interpretable. Preferred when there are many environmental dimensions and strict per-variable additivity is desired. Cannot represent cross-dimension interactions or position-dependent sensitivity.
-    \item \textbf{Transform}: closest to GDM, position-aware, fully interpretable. Preferred when the goal is to recover ecologically meaningful per-dimension transforms and to allow position-dependent sensitivity along environmental axes. Somewhat more expensive due to two forward passes per dimension (one per site). Like the additive network, it cannot represent cross-dimension interactions.
+    \item \textbf{Transform} (default): closest to GDM, position-aware, fully interpretable. Preferred when the goal is to recover ecologically meaningful per-dimension transforms and to allow position-dependent sensitivity along environmental axes. Cannot represent cross-dimension interactions.
     \item \textbf{Factored}: most flexible, captures interactions. Preferred when cross-dimension effects are expected (e.g.\ temperature--precipitation interactions) and some interpretability can be traded for capacity. The per-dimension encoders retain variable-level interpretability for the additive component.
-    \item \textbf{Deep}: included for completeness but not recommended. Prone to dimensional collapse under weight decay and offers no per-variable interpretability.
 \end{itemize}
 
 \section{Optimisation}
@@ -1345,7 +1307,7 @@ Training details:
     \item \textbf{Learning rate scheduling}: Cosine annealing with warm restarts ($T_0 = 30$ epochs, $T_{\text{mult}} = 2$), giving cycle lengths of 30, 60, 120,\ldots\ epochs. The minimum LR is $10^{-6}$.
     \item \textbf{Early stopping}: halt training if validation loss does not improve for a configurable number of epochs (default 40 for full-phase training; 5 within each beta phase of cyclic training).
     \item \textbf{Gradient clipping}: max norm of 5.0 on all parameters to prevent exploding gradients.
-    \item \textbf{Weight decay}: $L_2$ penalty of $10^{-5}$ on alpha parameters and beta bias parameters. \textit{No weight decay} on beta \texttt{weight\_raw} parameters (see Section~\ref{sec:additive-beta}).
+    \item \textbf{Weight decay}: $L_2$ penalty of $10^{-5}$ on alpha parameters and beta bias parameters. \textit{No weight decay} on beta \texttt{weight\_raw} parameters (see Section~\ref{sec:monotone-linear}).
     \item \textbf{Dropout}: applied between hidden layers (default rate 0.1) to reduce overfitting.
     \item \textbf{Batch size}: 8192 pairs per mini-batch (default).
 \end{itemize}
@@ -1476,7 +1438,7 @@ For each between-site pair~$p$, a hardness score is computed using the current p
 \end{equation}
 Within each coarse cell, pairs are ranked by $h_p$ and partitioned into $D$ difficulty bins (default $D = 3$: easy, medium, hard) using quantile boundaries. Let $d(p)$ denote the difficulty bin for pair~$p$, and $N_{c,d}$ the number of pairs in cell~$c$ and bin~$d$.
 
-Using quantile-based bins rather than absolute NLL thresholds avoids a subtle issue: pairs near the $\eta = 10$ clamp boundary (Section~\ref{sec:additive-beta}) have irreducibly high NLL due to the modelling constraint, not because they are informative. Quantile ranking within each cell ensures these pairs are distributed across bins rather than dominating the ``hard'' bin.
+Using quantile-based bins rather than absolute NLL thresholds avoids a subtle issue: pairs near the $\eta = 10$ clamp boundary (Section~\ref{sec:factored-beta}) have irreducibly high NLL due to the modelling constraint, not because they are informative. Quantile ranking within each cell ensures these pairs are distributed across bins rather than dominating the ``hard'' bin.
 
 \paragraph{Mixture proposal.}
 The proposal distribution for between-site pairs is a mixture:
@@ -1522,7 +1484,7 @@ The neural network variant is not a different model in the ecological sense. The
     \hline
     $\alpha_i$ & Linear + P-spline + random effect & MLP (SiLU) with softplus output \\
     Effort separation & Not modelled & Additive/multiplicative EffortNet \\
-    $\eta_{i,j}$ & I-spline + non-negative coefficients & Additive/factored monotone network \\
+    $\eta_{i,j}$ & I-spline + non-negative coefficients & Transform/factored monotone network \\
     $p_p$ & Same formula & Same formula \\
     $\mathcal{L}$ & Same weighted Bernoulli NLL & Same (+ retrospective correction) \\
     $\mathcal{R}_\alpha$ & Same softplus$^2$ lower-bound penalty & Same softplus$^2$ lower-bound penalty \\
@@ -1531,7 +1493,7 @@ The neural network variant is not a different model in the ecological sense. The
 \end{tabular}
 \end{center}
 
-The neural network can be viewed as replacing the manually specified basis functions (B-splines, I-splines) with learned feature representations, and replacing the Gaussian random effects with implicit regularisation through dropout and weight decay. The additive beta network (default) preserves the per-variable interpretability of GDM while gaining the flexibility of learned (rather than pre-specified) knot placements.
+The neural network can be viewed as replacing the manually specified basis functions (B-splines, I-splines) with learned feature representations, and replacing the Gaussian random effects with implicit regularisation through dropout and weight decay. The transform beta network (default) preserves the per-variable interpretability of GDM while gaining the flexibility of learned (rather than pre-specified) knot placements.
 
 \section{Post-training: diagnostics and spatial prediction}
 
@@ -1687,8 +1649,8 @@ These considerations are important regardless of whether the sub-models are spec
 
 \begin{itemize}
     \item All the interpretive considerations from the TMB document apply: $\alpha$ represents ``effective richness under the recording process'' rather than true species counts, and the equal-draw assumption means our estimates conflate richness with evenness.
-    \item The additive monotone network can be interrogated post-hoc by sweeping each environmental dimension while holding others at zero, producing per-variable response curves analogous to the I-spline partial functions in GDM. The factored network additionally allows examination of joint response surfaces.
-    \item The ability to capture variable interactions (factored beta) is a double-edged sword --- more flexible, but harder to interpret. Careful examination of joint response surfaces is recommended. The additive beta is preferred when interpretability is paramount.
+    \item The transform monotone network can be interrogated post-hoc by sweeping each environmental dimension while holding others at zero, producing per-variable response curves analogous to the I-spline partial functions in GDM. The factored network additionally allows examination of joint response surfaces.
+    \item The ability to capture variable interactions (factored beta) is a double-edged sword --- more flexible, but harder to interpret. Careful examination of joint response surfaces is recommended. The transform beta is preferred when interpretability is paramount.
     \item The effort/detectability decomposition (Section~\ref{sec:effort-decomposition}) provides a principled way to separate observation-process artefacts from ecological signal in the alpha model. The effort logit surface is a useful diagnostic: regions where $f_\omega > 0$ indicate that recording effort inflates apparent richness, while $f_\omega < 0$ indicates under-sampled areas. Comparing the environment-only and full alpha surfaces quantifies the magnitude of the sampling-effort correction.
     \item The network's richness predictions should be compared against the TMB P-spline predictions on the same data to assess consistency between the two approaches.
     \item If uncertainty quantification is needed (which the TMB \texttt{sdreport} provides), options include MC dropout at prediction time, deep ensembles, or training multiple models with different random seeds.
@@ -1710,13 +1672,11 @@ These considerations are important regardless of whether the sub-models are spec
     \item Experiment with different hard-pair mining strengths ($\lambda_{\text{hm}}$) and binning strategies to see how they affect convergence speed and final performance.
     \item Look at temperature / platt scaling calibration instead of the full tuning happening now
     \item Reduce alphanet complexity (e.g.\ smaller network, stronger regularisation) to see if it helps with identifiability and prevents it from absorbing turnover signal.
-    \item Go back to additive betanet and see if it can learn a reasonable fit without the beta LR multiplier and gradient amplification, especially with the retrospective correction in place.
     \item Explore adding stopping on blocked AUC or other classification metrics in addition to the validation loss, to ensure the model is not just improving likelihood but also predictive performance on the match/mismatch task.
     \item Need to work on the stratum weighting approach to ensure weights calculated are as expected. In particular make sure that design weight track through from sampling to estimation
     \item Need to brainstorm completeness model approach. Model is conceptually neat, I think there is more informaiton we could include into the completeness section (e.g.n unique visits, repeated sampling, n unique observers, unique species vs observation fraction, triplets?, systematic survey identifier, n 'sites' within hex [or radius])
     \item Look more closely at the standardisation of ecological distances in the betanet - could be masking effect
     \item When $\Delta$ env = 0, $\eta$ also = 0  might want to revisit this given model doesn't capture all sources of variation in a community. 
-    \item Additive betanet initialisation current initialises at $\eta = 5$, look at what $eta = 5$ translates to, we might want ot reduce this
     \item We want eta to range between 0-2, higher effectively gives total dissimilarity. Need to work on betanet to pull it down. This will affect eta collapse controls and many other things. $\eta$ collapse mechanism pushes $\eta$ to be above 1 which is approx. 0.3 dissimilarity so we loose the finer gradient. 
     \item Put some thought into seperating the covariate set. Do the same things matter for alpha and beta?!?!
     \item Play around with regularisaiton of alphanet, increase drop out, stronger $\lambda$ on interaction weights, shallower network, to see if it helps with identifiability and prevents alpha from absorbing turnover signal.
@@ -1747,7 +1707,7 @@ These considerations are important regardless of whether the sub-models are spec
     \item Check batch-size sensitivity (smaller versus larger batches), because very large batches can reduce gradient noise but sometimes worsen generalisation.
     \item Run multiple random seeds for the same configuration and quantify variability in validation and test AUC, to determine whether the current performance gap is partly due to optimisation variance rather than systematic model failure.
     \item Try a simple seed ensemble of the best few models, to see whether averaging predictions improves test AUC and stabilises the ranking.
-    \item Compare the neural network fit against a deliberately simpler baseline (e.g.\ additive beta + small alpha net, or even a spline / shallow model) to establish whether the current extra flexibility is actually buying test performance.
+    \item Compare the neural network fit against a deliberately simpler baseline (e.g.\ a spline / shallow model) to establish whether the current extra flexibility is actually buying test performance.
     \item Look into chelsa and terraclimate covariates as alternatives to AWAP, to see whether the choice of climate dataset is influencing the fit and generalisation.
 \end{itemize}
 

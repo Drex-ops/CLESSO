@@ -1,6 +1,6 @@
 """Quick smoke tests for TransformBetaNet."""
 import torch
-from src.clesso_nn.model import TransformBetaNet, CLESSONet, AdditiveBetaNet
+from src.clesso_nn.model import TransformBetaNet, CLESSONet
 
 
 def test_creation():
@@ -66,19 +66,6 @@ def test_clessonet_integration():
     print(f"PASS: CLESSONet forward, eta range [{fwd['eta'].min().item():.4f}, {fwd['eta'].max().item():.4f}]")
 
 
-def test_backward_compat():
-    model = CLESSONet(K_alpha=8, K_env=5, beta_type="additive")
-    assert isinstance(model.beta_net, AdditiveBetaNet)
-    B = 16
-    z_i = torch.randn(B, 8)
-    z_j = torch.randn(B, 8)
-    env_diff = torch.rand(B, 5)
-    is_within = torch.zeros(B)
-    fwd = model.forward(z_i, z_j, env_diff, is_within)
-    assert fwd["eta"].shape == (B,)
-    print("PASS: backward compat (additive)")
-
-
 def test_gradients():
     tbn = TransformBetaNet(input_dim=5, n_transform_knots=16, n_g_knots=8)
     env_i = torch.randn(4, 5, requires_grad=True)
@@ -120,7 +107,6 @@ if __name__ == "__main__":
     test_same_site()
     test_transform_site()
     test_clessonet_integration()
-    test_backward_compat()
     test_gradients()
     test_geo_dist()
     test_monotonicity()

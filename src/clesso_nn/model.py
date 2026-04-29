@@ -3,13 +3,13 @@ model.py -- Neural network architecture for CLESSO.
 
 Three components:
   1. AlphaNet:         site covariates → richness (α > 1)
-  2. MonotoneBetaNet:  |env_i − env_j| → turnover η ≥ 0  (monotone network)
+  2. Beta network:     env site values → turnover η ≥ 0
+                       (TransformBetaNet or FactoredDeepBetaNet)
   3. CLESSONet:        combines both, computes match probability and loss
 
-The monotone beta network enforces that increasing environmental distance
-always produces equal or greater compositional dissimilarity — the same
-constraint achieved by I-splines + non-negative coefficients in the TMB
-model, but with greater flexibility.
+The beta network enforces monotone non-decreasing response in environmental
+distance — the same constraint achieved by I-splines + non-negative
+coefficients in the TMB model, but with greater flexibility.
 """
 
 from __future__ import annotations
@@ -200,181 +200,6 @@ class MonotoneLinear(nn.Module):
         return out
 
 
-class MonotoneBetaNet(nn.Module):
-    """Deep monotone network mapping environmental distances → turnover η.
-
-    Architecture:
-        input |env_diff| (K_env) → [MonotoneLinear→ReLU] × L → MonotoneLinear(1)
-        output = softplus(raw)   (ensures η ≥ 0)
-
-    Because:
-      - All inputs are |env_i − env_j| ≥ 0
-      - All weights are non-negative (via MonotoneLinear)
-      - All activations (ReLU) are monotone non-decreasing
-
-    The composition is monotone non-decreasing in each input dimension.
-    This guarantees: more environmental distance → higher η → lower
-    similarity S = exp(−η), matching the ecological constraint from GDM.
-
-    NOTE: This deep variant is prone to dimensional collapse (all weights
-    converging to the same value under weight decay). Prefer AdditiveBetaNet
-    which mirrors GDM's additive I-spline structure.
-    """
-
-    def __init__(
-        self,
-        input_dim: int,
-        hidden_dims: list[int] = (64, 32, 16),
-        dropout: float = 0.1,
-    ):
-        super().__init__()
-        layers = []
-        prev = input_dim
-        for h in hidden_dims:
-            layers.extend([
-                MonotoneLinear(prev, h),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-            ])
-            prev = h
-        layers.append(MonotoneLinear(prev, 1))
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, env_diff: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            env_diff: (batch, K_env) non-negative pairwise env distances
-        Returns:
-            eta: (batch,) non-negative turnover values
-        """
-        raw = self.net(env_diff).squeeze(-1)
-        return F.softplus(raw)
-
-
-class AdditiveBetaNet(nn.Module):
-    """Additive monotone beta network: η = Σ_k f_k(|Δx_k|).
-
-    Each f_k is an independent per-dimension monotone network:
-        f_k: scalar |Δx_k| → MonotoneLinear(n_knots) → Softplus → MonotoneLinear(1)
-
-    Uses **softplus** (not ReLU) as the hidden activation. Softplus has no
-    dead zone — it always has a nonzero gradient, giving naturally gradual
-    onset of turnover rather than the hard on/off threshold behavior of ReLU.
-    Softplus is still monotone non-decreasing, so the monotonicity guarantee
-    is preserved.
-
-    This directly mirrors GDM's additive I-spline + non-negative coefficient
-    structure, but with learned smooth transformations. Each dimension MUST
-    develop its own response curve, preventing the dimensional collapse that
-    plagues the deep MonotoneBetaNet.
-    """
-
-    def __init__(
-        self,
-        input_dim: int,
-        n_knots: int = 32,
-        dropout: float = 0.1,
-        no_intercept: bool = False,
-    ):
-        super().__init__()
-        self.K_env = input_dim
-        self.n_knots = n_knots
-        self.no_intercept = no_intercept
-        self.eta_max = 10.0
-
-        # Learnable shift for sigmoid output: controls midpoint of η range.
-        # Init so η ≈ 1.5 when total ≈ 0 → sigmoid(0 − shift) = 0.15 → shift ≈ 1.73
-        self.sigmoid_shift = nn.Parameter(torch.tensor(1.75))
-
-        # Per-dimension monotone transformation: scalar → n_knots → 1
-        # Softplus activation instead of ReLU: no dead zone, gradual onset
-        # no_intercept=True removes bias from first layer (forces origin-anchored shape)
-        self.dim_nets = nn.ModuleList()
-        for _ in range(input_dim):
-            self.dim_nets.append(nn.Sequential(
-                MonotoneLinear(1, n_knots, bias=not no_intercept),
-                nn.Softplus(),
-                nn.Dropout(dropout),
-                MonotoneLinear(n_knots, 1, bias=False),  # no output bias → f_k(0)≈0
-            ))
-
-        self._init_knots()
-        self._calibrate_sigmoid_shift()
-
-    def _calibrate_sigmoid_shift(self, target_eta: float = 1.5):
-        """Set sigmoid_shift so η ≈ target_eta for typical standardised input.
-
-        Runs a no-grad forward pass with |Δx| = 0.5 (half a standard deviation)
-        to measure the raw network total, then solves for the shift that maps
-        that total to the desired initial η.
-        """
-        with torch.no_grad():
-            x = torch.ones(64, self.K_env) * 0.5
-            total = torch.zeros(64)
-            zero = torch.zeros(1, 1)
-            for k in range(self.K_env):
-                g_k = self.dim_nets[k](x[:, k:k+1])
-                g_k_0 = self.dim_nets[k](zero)
-                total += (g_k - g_k_0).squeeze(-1)
-            mean_raw = total.mean().item()
-            # sigmoid(mean_raw - shift) = target_eta / eta_max
-            # shift = mean_raw - logit(target_eta / eta_max)
-            t = target_eta / self.eta_max
-            logit_t = math.log(t / (1.0 - t))
-            self.sigmoid_shift.data.fill_(mean_raw - logit_t)
-
-    def _init_knots(self):
-        """Initialise per-dimension networks for gradual response onset.
-
-        With softplus activation, every neuron contributes at all input values
-        (no dead zone). The biases control where each neuron's contribution
-        accelerates. We spread biases so responses ramp smoothly from ~0.1σ
-        to ~3σ of standardised environmental distance.
-
-        Second-layer weights are initialised small so each dimension
-        contributes ~0.3 at max distance, giving total η ≈ 5 across 17 dims.
-        """
-        for net in self.dim_nets:
-            first_layer = True
-            for m in net.modules():
-                if isinstance(m, MonotoneLinear):
-                    if first_layer:
-                        # First layer: controls knot positions
-                        nn.init.uniform_(m.weight_raw, -0.5, 0.5)
-                        if m.bias is not None:
-                            n = m.bias.shape[0]
-                            knots = torch.linspace(-3.0, 0.0, n)
-                            m.bias.data.copy_(knots)
-                        first_layer = False
-                    else:
-                        # Second layer (output): very small so per-dim
-                        # contribution is modest (~0.3 at max distance).
-                        # softplus(-3) ≈ 0.05, so 32 neurons × 0.05 ≈ 1.6
-                        # but each neuron's delta is small → f_k(max) ≈ 0.3
-                        nn.init.constant_(m.weight_raw, -3.0)
-
-    def forward(self, env_diff: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            env_diff: (batch, K_env) non-negative pairwise env distances
-        Returns:
-            eta: (batch,) non-negative turnover values η ≥ 0
-        """
-        total = torch.zeros(env_diff.shape[0], device=env_diff.device)
-        # Zero-input baseline (shared across batch) — computed once per forward
-        zero = torch.zeros(1, 1, device=env_diff.device)
-        for k in range(self.K_env):
-            x_k = env_diff[:, k : k + 1]         # (batch, 1)
-            g_k = self.dim_nets[k](x_k)           # (batch, 1)
-            g_k_0 = self.dim_nets[k](zero)         # (1, 1) — baseline at zero
-            f_k = g_k - g_k_0                      # f_k(0) = 0 exactly
-            total = total + f_k.squeeze(-1)         # (batch,)
-        # Sigmoid output: bounded to (0, eta_max) with healthy gradients
-        # everywhere, including near the ceiling.  The learnable shift controls
-        # where the midpoint of the sigmoid sits relative to the additive total.
-        return _sigmoid_clamp(total, self.sigmoid_shift, max_val=self.eta_max)
-
-
 class TransformBetaNet(nn.Module):
     """Transform-first beta network: learn T_k, then take distances.
 
@@ -386,8 +211,8 @@ class TransformBetaNet(nn.Module):
     where T_k is a monotone per-dimension transform and g_k is a monotone
     per-dimension weighting network (both using MonotoneLinear + Softplus).
 
-    Key difference from AdditiveBetaNet:
-        AdditiveBetaNet:   f_k(|x_i - x_j|)     — learns on pre-computed distances
+    Key difference from older additive variants:
+        Additive (now removed): f_k(|x_i - x_j|)     — learns on pre-computed distances
         TransformBetaNet:  g_k(|T_k(x_i) - T_k(x_j)|) — learns transform first
 
     The transform-first approach lets the network discover that e.g. the
@@ -478,7 +303,7 @@ class TransformBetaNet(nn.Module):
                         if m.bias is not None:
                             nn.init.zeros_(m.bias)
 
-        # Weight nets: small init (same pattern as AdditiveBetaNet dim_nets)
+        # Weight nets: small init (per-dimension monotone weighting)
         for net_list in [self.weight_nets, self.geo_nets]:
             for net in net_list:
                 first_layer = True
@@ -576,8 +401,8 @@ class TransformBetaNet(nn.Module):
 class FactoredDeepBetaNet(nn.Module):
     """Factored deep beta network: per-dimension monotone encoders + monotone interaction.
 
-    Combines the per-dimension specialisation of AdditiveBetaNet with cross-dimension
-    interactions, without the collapse problems of the fully-connected MonotoneBetaNet.
+    Combines per-dimension specialisation with cross-dimension
+    interactions, using a factored encoder + projector architecture.
 
     Architecture:
         1. Per-dim monotone encoder: |Δx_k| → h_k  (private, positive weights via Softplus)
@@ -609,7 +434,7 @@ class FactoredDeepBetaNet(nn.Module):
         self.no_intercept = no_intercept
         self.eta_max = 10.0
 
-        # Learnable shift for sigmoid output (see AdditiveBetaNet for rationale)
+        # Learnable shift for sigmoid output (bounded η with healthy gradients)
         self.sigmoid_shift = nn.Parameter(torch.tensor(1.75))
 
         if interaction_hidden is None:
@@ -791,7 +616,6 @@ def expand_model_for_geo(
         K_alpha=K_alpha_new,
         K_env=K_env_new,
         alpha_hidden=config.alpha_hidden,
-        beta_hidden=config.beta_hidden,
         alpha_dropout=config.alpha_dropout,
         beta_dropout=config.beta_dropout,
         alpha_activation=config.alpha_activation,
@@ -800,7 +624,6 @@ def expand_model_for_geo(
         alpha_anchor_tolerance=config.alpha_anchor_tolerance,
         alpha_regression_lambda=config.alpha_regression_lambda,
         beta_type=config.beta_type,
-        beta_n_knots=config.beta_n_knots,
         beta_no_intercept=config.beta_no_intercept,
         transform_n_knots=getattr(config, 'transform_n_knots', 32),
         transform_g_knots=getattr(config, 'transform_g_knots', 16),
@@ -838,12 +661,7 @@ def expand_model_for_geo(
         beta_old = model_phase1.beta_net
         beta_new = model_new.beta_net
 
-        if isinstance(beta_old, AdditiveBetaNet):
-            # Copy per-dimension spline nets
-            for k in range(K_env_old):
-                beta_new.dim_nets[k].load_state_dict(beta_old.dim_nets[k].state_dict())
-
-        elif isinstance(beta_old, FactoredDeepBetaNet):
+        if isinstance(beta_old, FactoredDeepBetaNet):
             # Copy per-dimension encoders + projectors
             for k in range(K_env_old):
                 beta_new.encoders[k].load_state_dict(beta_old.encoders[k].state_dict())
@@ -859,7 +677,7 @@ def expand_model_for_geo(
             # New geo_nets keep fresh initialisation
 
         else:
-            # Deep beta or unknown — skip beta transfer
+            # Unknown beta variant — skip beta transfer
             print("  [expand_model_for_geo] WARNING: Beta weight transfer not supported "
                   f"for {type(beta_old).__name__}, using fresh init")
 
@@ -887,7 +705,7 @@ def expand_model_for_geo(
 class CLESSONet(nn.Module):
     """Joint alpha-beta model for CLESSO.
 
-    Combines AlphaNet (richness) and MonotoneBetaNet (turnover) with the
+    Combines AlphaNet (richness) and a monotone beta network (turnover) with the
     CLESSO likelihood:
         within-site:   p_match = 1 / α_i
         between-site:  p_match = S_ij * (α_i + α_j) / (2 * α_i * α_j)
@@ -901,7 +719,6 @@ class CLESSONet(nn.Module):
         K_alpha: int,
         K_env: int,
         alpha_hidden: list[int] = (64, 32, 16),
-        beta_hidden: list[int] = (64, 32, 16),
         alpha_dropout: float = 0.1,
         beta_dropout: float = 0.1,
         alpha_activation: str = "relu",
@@ -909,8 +726,7 @@ class CLESSONet(nn.Module):
         alpha_anchor_lambda: float = 1.0,
         alpha_anchor_tolerance: float = 1.6,
         alpha_regression_lambda: float = 1.0,
-        beta_type: str = "additive",
-        beta_n_knots: int = 32,
+        beta_type: str = "transform",
         beta_no_intercept: bool = False,
         transform_n_knots: int = 32,
         transform_g_knots: int = 16,
@@ -935,10 +751,7 @@ class CLESSONet(nn.Module):
         else:
             self.effort_net = None
 
-        if beta_type == "additive":
-            self.beta_net = AdditiveBetaNet(K_env, beta_n_knots, beta_dropout,
-                                            no_intercept=beta_no_intercept)
-        elif beta_type == "factored":
+        if beta_type == "factored":
             self.beta_net = FactoredDeepBetaNet(
                 K_env, encoder_hidden=16, encoder_depth=2,
                 interaction_hidden=[32], dropout=0.0,
@@ -950,11 +763,9 @@ class CLESSONet(nn.Module):
                 n_g_knots=transform_g_knots, dropout=beta_dropout,
                 no_intercept=beta_no_intercept,
             )
-        elif beta_type == "deep":
-            self.beta_net = MonotoneBetaNet(K_env, beta_hidden, beta_dropout)
         else:
             raise ValueError(f"Unknown beta_type: {beta_type!r}. "
-                             "Use 'additive', 'factored', 'transform', or 'deep'.")
+                             "Use 'transform' or 'factored'.")
 
         self.alpha_lb_lambda = alpha_lb_lambda
         self.alpha_anchor_lambda = alpha_anchor_lambda
@@ -1012,11 +823,7 @@ class CLESSONet(nn.Module):
 
         # --- Beta: penalise parameters of geo dim_nets / encoders ---
         if K_env_env > 0 and K_env_env < getattr(self.beta_net, 'K_env', 0):
-            if isinstance(self.beta_net, AdditiveBetaNet):
-                for k in range(K_env_env, self.beta_net.K_env):
-                    for p in self.beta_net.dim_nets[k].parameters():
-                        beta_geo_l2 = beta_geo_l2 + p.pow(2).sum()
-            elif isinstance(self.beta_net, FactoredDeepBetaNet):
+            if isinstance(self.beta_net, FactoredDeepBetaNet):
                 for k in range(K_env_env, self.beta_net.K_env):
                     for p in self.beta_net.encoders[k].parameters():
                         beta_geo_l2 = beta_geo_l2 + p.pow(2).sum()

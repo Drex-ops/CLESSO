@@ -10,7 +10,7 @@ from clesso_nn.model import CLESSONet, EffortNet
 
 def test_no_effort_backward_compat():
     """Model without effort should work identically to before."""
-    m = CLESSONet(K_alpha=17, K_env=15, beta_type="additive", beta_n_knots=32)
+    m = CLESSONet(K_alpha=17, K_env=15, beta_type="transform")
     m.eval()
     assert m.effort_net is None
     z = torch.randn(4, 17)
@@ -25,7 +25,7 @@ def test_no_effort_backward_compat():
 def test_effort_model_construction():
     """Model with effort should create EffortNet."""
     m = CLESSONet(
-        K_alpha=17, K_env=15, beta_type="additive", beta_n_knots=32,
+        K_alpha=17, K_env=15, beta_type="transform",
         K_effort=6, effort_hidden=[64, 32], effort_dropout=0.1,
     )
     assert m.effort_net is not None
@@ -39,7 +39,7 @@ def test_effort_model_construction():
 def test_effort_alpha_decomposition():
     """Additive decomposition should work correctly."""
     m = CLESSONet(
-        K_alpha=17, K_env=15, beta_type="additive", beta_n_knots=32,
+        K_alpha=17, K_env=15, beta_type="transform",
         K_effort=6, effort_hidden=[64, 32], effort_dropout=0.1,
     )
     z = torch.randn(4, 17)
@@ -63,7 +63,7 @@ def test_effort_alpha_decomposition():
 def test_forward_with_effort():
     """Forward pass should accept w_i/w_j."""
     m = CLESSONet(
-        K_alpha=17, K_env=15, beta_type="additive", beta_n_knots=32,
+        K_alpha=17, K_env=15, beta_type="transform",
         K_effort=6, effort_hidden=[64, 32], effort_dropout=0.1,
     )
     z_i = torch.randn(8, 17)
@@ -84,7 +84,7 @@ def test_forward_with_effort():
 def test_compute_loss_with_effort():
     """compute_loss should include effort_loss."""
     m = CLESSONet(
-        K_alpha=17, K_env=15, beta_type="additive", beta_n_knots=32,
+        K_alpha=17, K_env=15, beta_type="transform",
         K_effort=6, effort_hidden=[64, 32], effort_dropout=0.1,
     )
     z_i = torch.randn(8, 17)
@@ -136,7 +136,7 @@ def test_effort_net_zero_init():
 def test_completeness_mode():
     """Completeness mode: α_obs = 1 + c · softplus(env_logit), c ∈ (0,1)."""
     m = CLESSONet(
-        K_alpha=17, K_env=15, beta_type="additive", beta_n_knots=32,
+        K_alpha=17, K_env=15, beta_type="transform",
         K_effort=6, effort_hidden=[64, 32], effort_dropout=0.1,
         effort_mode="completeness",
     )
@@ -164,7 +164,7 @@ def test_completeness_mode():
 def test_multiplicative_mode():
     """Multiplicative mode: α_obs = (softplus(logit)+1) · σ(effort_logit)."""
     m = CLESSONet(
-        K_alpha=17, K_env=15, beta_type="additive", beta_n_knots=32,
+        K_alpha=17, K_env=15, beta_type="transform",
         K_effort=6, effort_hidden=[64, 32], effort_dropout=0.1,
         effort_mode="multiplicative",
     )
@@ -186,7 +186,7 @@ def test_multiplicative_mode():
 def test_gradient_flow():
     """Gradients should flow through effort_net during backprop."""
     m = CLESSONet(
-        K_alpha=17, K_env=15, beta_type="additive", beta_n_knots=32,
+        K_alpha=17, K_env=15, beta_type="transform",
         K_effort=6, effort_hidden=[64, 32], effort_dropout=0.1,
     )
     m.effort_penalty = 0.01

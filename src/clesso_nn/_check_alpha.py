@@ -16,18 +16,15 @@ cfg = ckpt["config"]
 beta_no_intercept = cfg.get("beta_no_intercept", None)
 if beta_no_intercept is None:
     sd = ckpt["model_state_dict"]
-    beta_no_intercept = "beta_net.encoders.0.0.bias" not in sd and \
-                        "beta_net.dim_nets.0.0.bias" not in sd
+    beta_no_intercept = "beta_net.encoders.0.0.bias" not in sd
 
 model = CLESSONet(
     K_alpha=cfg["K_alpha"], K_env=cfg["K_env"],
     alpha_hidden=cfg["alpha_hidden"],
-    beta_hidden=cfg.get("beta_hidden", [64, 32, 16]),
     alpha_dropout=cfg["alpha_dropout"],
     beta_dropout=cfg["beta_dropout"],
     alpha_activation=cfg["alpha_activation"],
-    beta_type=cfg.get("beta_type", "deep"),
-    beta_n_knots=cfg.get("beta_n_knots", 32),
+    beta_type=cfg.get("beta_type", "transform"),
     beta_no_intercept=beta_no_intercept,
     K_effort=cfg.get("K_effort", 0),
     effort_hidden=cfg.get("effort_hidden", [64, 32]),

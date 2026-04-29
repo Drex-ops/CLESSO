@@ -683,7 +683,6 @@ def _save_checkpoint(model, optimizer, epoch, val_loss, site_data, config, path)
             "K_env": site_data.K_env,
             "K_effort": site_data.K_effort,
             "alpha_hidden": config.alpha_hidden,
-            "beta_hidden": config.beta_hidden,
             "alpha_dropout": config.alpha_dropout,
             "beta_dropout": config.beta_dropout,
             "alpha_activation": config.alpha_activation,
@@ -692,7 +691,6 @@ def _save_checkpoint(model, optimizer, epoch, val_loss, site_data, config, path)
             "alpha_anchor_tolerance": config.alpha_anchor_tolerance,
             "alpha_regression_lambda": config.alpha_regression_lambda,
             "beta_type": config.beta_type,
-            "beta_n_knots": config.beta_n_knots,
             "beta_no_intercept": config.beta_no_intercept,
             "transform_n_knots": config.transform_n_knots,
             "transform_g_knots": config.transform_g_knots,
@@ -1842,22 +1840,36 @@ def train_finetune_geo(
                 effort_params.append(p)
 
     # Beta params: existing per-dim components vs new geo components
-    from src.clesso_nn.model import AdditiveBetaNet, FactoredDeepBetaNet
+    from src.clesso_nn.model import FactoredDeepBetaNet, TransformBetaNet
 
     beta = model.beta_net
-    if isinstance(beta, AdditiveBetaNet):
-        for k, dk in enumerate(beta.dim_nets):
+    if isinstance(beta, TransformBetaNet):
+        # Env params: transform_nets[k] + weight_nets[k] for k in range(K_env)
+        # New geo params: geo_nets[g] for g in range(n_geo_dims)
+        for k in range(beta.K_env):
+            parts = list(beta.transform_nets[k].parameters()) + \
+                    list(beta.weight_nets[k].parameters())
             if k < n_env_dims:
-                for p in dk.parameters():
+                for p in parts:
                     if freeze_existing:
                         p.requires_grad = False
                     else:
                         p.requires_grad = True
                         existing_params.append(p)
             else:
-                for p in dk.parameters():
+                for p in parts:
                     p.requires_grad = True
                     new_geo_params.append(p)
+        for g in range(beta.n_geo_dims):
+            for p in beta.geo_nets[g].parameters():
+                p.requires_grad = True
+                new_geo_params.append(p)
+        # sigmoid_shift: treat as existing
+        if freeze_existing:
+            beta.sigmoid_shift.requires_grad = False
+        else:
+            beta.sigmoid_shift.requires_grad = True
+            existing_params.append(beta.sigmoid_shift)
 
     elif isinstance(beta, FactoredDeepBetaNet):
         # Per-dim encoders + projectors: existing vs new
@@ -1883,7 +1895,7 @@ def train_finetune_geo(
                 existing_params.append(p)
 
     else:
-        # Deep beta or unknown — treat all as existing
+        # Unknown beta variant — treat all as existing
         for p in beta.parameters():
             if freeze_existing:
                 p.requires_grad = False

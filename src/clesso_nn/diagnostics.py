@@ -355,7 +355,7 @@ def run_diagnostics(
             "",
             f"Alpha network:  {cfg_model['alpha_hidden']}  "
             f"(dropout={cfg_model['alpha_dropout']}, act={cfg_model['alpha_activation']})",
-            f"Beta network:   {cfg_model['beta_hidden']}  "
+            f"Beta network:   {cfg_model.get('beta_type', 'transform')}  "
             f"(monotone, dropout={cfg_model['beta_dropout']})",
             f"Alpha LB lambda: {cfg_model.get('alpha_lb_lambda', 'N/A')}",
         ]

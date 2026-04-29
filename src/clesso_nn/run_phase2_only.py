@@ -54,12 +54,12 @@ def main():
     # Rebuild Phase 1 model and load weights
     model_p1 = CLESSONet(
         K_alpha=K_alpha_p1, K_env=K_env_p1,
-        alpha_hidden=cfg.alpha_hidden, beta_hidden=cfg.beta_hidden,
+        alpha_hidden=cfg.alpha_hidden,
         alpha_dropout=cfg.alpha_dropout, beta_dropout=cfg.beta_dropout,
         alpha_activation=cfg.alpha_activation,
         alpha_lb_lambda=cfg.alpha_lower_bound_lambda,
         alpha_regression_lambda=cfg.alpha_regression_lambda,
-        beta_type=cfg.beta_type, beta_n_knots=cfg.beta_n_knots,
+        beta_type=cfg.beta_type,
         transform_n_knots=cfg.transform_n_knots, transform_g_knots=cfg.transform_g_knots,
         K_effort=ckpt["config"].get("K_effort", 0),
         effort_hidden=ckpt["config"].get("effort_hidden", [64, 32]),

@@ -11,7 +11,7 @@ Algorithm (follows the R predict_spatial_lmds approach):
   2. Standardise env + geo using training statistics
   3. Select k landmark pixels via spatial k-means (stratified)
   4. Compute pairwise η between all landmark pairs (k×k)
-     using the trained AdditiveBetaNet
+     using the trained TransformBetaNet
   5. Compute η from every pixel to each landmark (n×k)
   6. Convert η to dissimilarity: D = 1 - exp(-η)
   7. Classical MDS on landmark D matrix + Nyström extension for all pixels
@@ -214,21 +214,18 @@ def load_model(checkpoint_path, device="cpu"):
     beta_no_intercept = cfg.get("beta_no_intercept", None)
     if beta_no_intercept is None:
         sd = ckpt["model_state_dict"]
-        beta_no_intercept = "beta_net.encoders.0.0.bias" not in sd and \
-                            "beta_net.dim_nets.0.0.bias" not in sd
+        beta_no_intercept = "beta_net.encoders.0.0.bias" not in sd
 
     model = CLESSONet(
         K_alpha=cfg["K_alpha"],
         K_env=cfg["K_env"],
         alpha_hidden=cfg["alpha_hidden"],
-        beta_hidden=cfg.get("beta_hidden", [64, 32, 16]),
         alpha_dropout=cfg["alpha_dropout"],
         beta_dropout=cfg["beta_dropout"],
         alpha_activation=cfg["alpha_activation"],
         alpha_lb_lambda=cfg.get("alpha_lb_lambda", 0.0),
         alpha_regression_lambda=cfg.get("alpha_regression_lambda", 0.0),
-        beta_type=cfg.get("beta_type", "deep"),
-        beta_n_knots=cfg.get("beta_n_knots", 32),
+        beta_type=cfg.get("beta_type", "transform"),
         beta_no_intercept=beta_no_intercept,
         transform_n_knots=cfg.get("transform_n_knots", 32),
         transform_g_knots=cfg.get("transform_g_knots", 16),
@@ -580,7 +577,7 @@ def write_rgb_geotiff(output_path, rgb_vals, mask, grid):
         dst.write(out)
         dst.update_tags(
             DESCRIPTION="CLESSO NN beta turnover (Landmark MDS → RGB)",
-            MODEL="CLESSONet VAS — AdditiveBetaNet",
+            MODEL="CLESSONet VAS — TransformBetaNet",
             RED="MDS Dimension 1",
             GREEN="MDS Dimension 2",
             BLUE="MDS Dimension 3",

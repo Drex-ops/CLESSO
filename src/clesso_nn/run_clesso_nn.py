@@ -5,7 +5,7 @@ run_clesso_nn.py -- End-to-end pipeline for CLESSO neural network model.
 Pipeline:
   1. Load data exported from R pipeline (feather files from export_for_nn.R)
   2. Build site data structures and pair dataset
-  3. Create AlphaNet + MonotoneBetaNet architecture
+  3. Create AlphaNet + monotone beta network architecture
   4. Train with early stopping and progress logging
   5. Evaluate and export predictions
   6. Verify monotonicity of the beta (turnover) network
@@ -188,7 +188,6 @@ def main(export_dir: str | None = None, config_overrides: dict | None = None):
         K_alpha=site_data.K_alpha,
         K_env=site_data.K_env,
         alpha_hidden=cfg.alpha_hidden,
-        beta_hidden=cfg.beta_hidden,
         alpha_dropout=cfg.alpha_dropout,
         beta_dropout=cfg.beta_dropout,
         alpha_activation=cfg.alpha_activation,
@@ -197,7 +196,6 @@ def main(export_dir: str | None = None, config_overrides: dict | None = None):
         alpha_anchor_tolerance=cfg.alpha_anchor_tolerance,
         alpha_regression_lambda=cfg.alpha_regression_lambda,
         beta_type=cfg.beta_type,
-        beta_n_knots=cfg.beta_n_knots,
         beta_no_intercept=cfg.beta_no_intercept,
         transform_n_knots=cfg.transform_n_knots,
         transform_g_knots=cfg.transform_g_knots,
@@ -264,10 +262,13 @@ def main(export_dir: str | None = None, config_overrides: dict | None = None):
               f"L2={cfg.effort_penalty}, mode={cfg.effort_mode})")
     print(f"  Architecture:")
     print(f"    Alpha: {cfg.alpha_hidden} (dropout={cfg.alpha_dropout})")
-    if cfg.beta_type == "additive":
-        print(f"    Beta:  additive, {cfg.beta_n_knots} knots/dim × {site_data.K_env} dims (dropout={cfg.beta_dropout})")
+    if cfg.beta_type == "transform":
+        print(f"    Beta:  transform ({cfg.transform_n_knots} T-knots, "
+              f"{cfg.transform_g_knots} g-knots) × {site_data.K_env} dims "
+              f"(dropout={cfg.beta_dropout})")
     else:
-        print(f"    Beta:  deep monotone {cfg.beta_hidden} (dropout={cfg.beta_dropout})")
+        print(f"    Beta:  factored × {site_data.K_env} dims "
+              f"(dropout={cfg.beta_dropout})")
     print(f"    Beta LR multiplier: {cfg.beta_lr_mult}×")
 
     # ------------------------------------------------------------------
@@ -610,10 +611,6 @@ if __name__ == "__main__":
         help="Alpha hidden dims as comma-separated ints, e.g. '64,32,16'",
     )
     parser.add_argument(
-        "--beta-hidden", type=str, default=None,
-        help="Beta hidden dims as comma-separated ints, e.g. '64,32,16'",
-    )
-    parser.add_argument(
         "--effort-input-dir", type=str, default=None,
         help="Directory containing effort INPUT rasters (.flt/.hdr). "
              "Output surfaces go to the model output directory.",
@@ -663,7 +660,5 @@ if __name__ == "__main__":
         overrides["effort_weight_decay"] = args.effort_weight_decay
     if args.effort_mode is not None:
         overrides["effort_mode"] = args.effort_mode
-    if args.beta_hidden is not None:
-        overrides["beta_hidden"] = [int(x) for x in args.beta_hidden.split(",")]
 
     main(args.export_dir, overrides if overrides else None)

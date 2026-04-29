@@ -3,8 +3,8 @@
 \providecommand\HyField@AuxAddToFields[1]{}
 \providecommand\HyField@AuxAddToCoFields[2]{}
 \@writefile{toc}{\contentsline {section}{\numberline {1}Background}{1}{section.1}\protected@file@percent }
-\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Computational graph of the CLESSO neural network forward pass (transform-interaction beta variant; Section~\ref {sec:transform-interaction-beta}). \textbf  {Blue nodes}: alpha (richness) pathway --- per-site environmental covariates $\mathbf  {z}$ pass through a shared-weight AlphaNet (MLP) to produce $\alpha _i, \alpha _j > 1$ via softplus~$+$~1. \textbf  {Dashed nodes/arrows}: optional EffortNet pathway --- effort covariates $\mathbf  {w}$ produce a capture-completeness fraction $c \in (0,1)$ that modulates apparent richness (default: completeness mode, $\alpha ^{\mathrm  {obs}} = 1 + c\cdot \mathrm  {softplus}(\mathrm  {env\_logit})$). \textbf  {Green nodes}: beta (turnover) pathway --- per-site standardised environment vectors $\tilde  {\mathbf  {x}}_i, \tilde  {\mathbf  {x}}_j$ pass through shared-weight monotone transforms $T_k$, producing transformed separations $d^{(T)}_{k,ij} = |T_k(\tilde  {x}_{k,i}) - T_k(\tilde  {x}_{k,j})|$ (GDM I-spline analogue). \textbf  {Main path}: per-dimension origin-anchored weighting functions $g_k$ yield additive contributions $s_{k,ij} = g_k(d^{(T)}_{k,ij}) - g_k(0)$, summed to $z^{\mathrm  {main}}$. \textbf  {Interaction path}: shallow monotone encoders $e_k$ map each $d^{(T)}_{k,ij}$ to a low-dimensional embedding; the concatenated vector $\mathbf  {h}_{ij} \in \mathbb  {R}^{m d_{\mathrm  {enc}}}$ is passed through a monotone interaction network $\phi $ with baseline subtraction, yielding a cross-dimension correction $z^{\mathrm  {int}}_{ij} = \phi (\mathbf  {h}_{ij}) - \phi (\mathbf  {0})$, scaled by $\lambda _{\mathrm  {int}}$. The combined predictor $z^{\mathrm  {main}} + \lambda _{\mathrm  {int}}\,z^{\mathrm  {int}}$ is mapped through a sigmoid clamp ($\sigma _c$) to turnover $\eta \in (0, \eta _{\max })$ and similarity $S = e^{-\eta }$. \textbf  {Orange/red nodes}: likelihood and loss --- the match probability $p$ is computed from $\alpha _i, \alpha _j, S$, and $\texttt  {is\_within}$, corrected via the retrospective Bernoulli adjustment, and evaluated under per-stratum BCE with design weights. Penalty terms (lower-bound, anchor, anti-collapse, effort $L_2$) feed into the composite loss $\mathcal  {L}$. The \emph  {additive} beta variant (Section~\ref {sec:additive-beta}) replaces the $T_k \to |\cdot | \to g_k$ chain with a single set of per-dimension monotone functions $f_k(|\Delta x_k|)$ operating directly on pre-computed distances. ``sp'' = softplus; ``$\sigma $'' = sigmoid; ``$\sigma _c$'' = sigmoid clamp $\eta _{\max }\cdot \sigma (\cdot - s)$; ``retro'' = retrospective Bernoulli correction.}}{3}{figure.1}\protected@file@percent }
-\newlabel{fig:comp-graph}{{1}{3}{Computational graph of the CLESSO neural network forward pass (transform-interaction beta variant; Section~\ref {sec:transform-interaction-beta}). \textbf {Blue nodes}: alpha (richness) pathway --- per-site environmental covariates $\mathbf {z}$ pass through a shared-weight AlphaNet (MLP) to produce $\alpha _i, \alpha _j > 1$ via softplus~$+$~1. \textbf {Dashed nodes/arrows}: optional EffortNet pathway --- effort covariates $\mathbf {w}$ produce a capture-completeness fraction $c \in (0,1)$ that modulates apparent richness (default: completeness mode, $\alpha ^{\mathrm {obs}} = 1 + c\cdot \mathrm {softplus}(\mathrm {env\_logit})$). \textbf {Green nodes}: beta (turnover) pathway --- per-site standardised environment vectors $\tilde {\mathbf {x}}_i, \tilde {\mathbf {x}}_j$ pass through shared-weight monotone transforms $T_k$, producing transformed separations $d^{(T)}_{k,ij} = |T_k(\tilde {x}_{k,i}) - T_k(\tilde {x}_{k,j})|$ (GDM I-spline analogue). \textbf {Main path}: per-dimension origin-anchored weighting functions $g_k$ yield additive contributions $s_{k,ij} = g_k(d^{(T)}_{k,ij}) - g_k(0)$, summed to $z^{\mathrm {main}}$. \textbf {Interaction path}: shallow monotone encoders $e_k$ map each $d^{(T)}_{k,ij}$ to a low-dimensional embedding; the concatenated vector $\mathbf {h}_{ij} \in \mathbb {R}^{m d_{\mathrm {enc}}}$ is passed through a monotone interaction network $\phi $ with baseline subtraction, yielding a cross-dimension correction $z^{\mathrm {int}}_{ij} = \phi (\mathbf {h}_{ij}) - \phi (\mathbf {0})$, scaled by $\lambda _{\mathrm {int}}$. The combined predictor $z^{\mathrm {main}} + \lambda _{\mathrm {int}}\,z^{\mathrm {int}}$ is mapped through a sigmoid clamp ($\sigma _c$) to turnover $\eta \in (0, \eta _{\max })$ and similarity $S = e^{-\eta }$. \textbf {Orange/red nodes}: likelihood and loss --- the match probability $p$ is computed from $\alpha _i, \alpha _j, S$, and $\texttt {is\_within}$, corrected via the retrospective Bernoulli adjustment, and evaluated under per-stratum BCE with design weights. Penalty terms (lower-bound, anchor, anti-collapse, effort $L_2$) feed into the composite loss $\mathcal {L}$. The \emph {additive} beta variant (Section~\ref {sec:additive-beta}) replaces the $T_k \to |\cdot | \to g_k$ chain with a single set of per-dimension monotone functions $f_k(|\Delta x_k|)$ operating directly on pre-computed distances. ``sp'' = softplus; ``$\sigma $'' = sigmoid; ``$\sigma _c$'' = sigmoid clamp $\eta _{\max }\cdot \sigma (\cdot - s)$; ``retro'' = retrospective Bernoulli correction}{figure.1}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Computational graph of the CLESSO neural network forward pass (transform-interaction beta variant; Section~\ref {sec:transform-interaction-beta}). \textbf  {Blue nodes}: alpha (richness) pathway --- per-site environmental covariates $\mathbf  {z}$ pass through a shared-weight AlphaNet (MLP) to produce $\alpha _i, \alpha _j > 1$ via softplus~$+$~1. \textbf  {Dashed nodes/arrows}: optional EffortNet pathway --- effort covariates $\mathbf  {w}$ produce a capture-completeness fraction $c \in (0,1)$ that modulates apparent richness (default: completeness mode, $\alpha ^{\mathrm  {obs}} = 1 + c\cdot \mathrm  {softplus}(\mathrm  {env\_logit})$). \textbf  {Green nodes}: beta (turnover) pathway --- per-site standardised environment vectors $\tilde  {\mathbf  {x}}_i, \tilde  {\mathbf  {x}}_j$ pass through shared-weight monotone transforms $T_k$, producing transformed separations $d^{(T)}_{k,ij} = |T_k(\tilde  {x}_{k,i}) - T_k(\tilde  {x}_{k,j})|$ (GDM I-spline analogue). \textbf  {Main path}: per-dimension origin-anchored weighting functions $g_k$ yield additive contributions $s_{k,ij} = g_k(d^{(T)}_{k,ij}) - g_k(0)$, summed to $z^{\mathrm  {main}}$. \textbf  {Interaction path}: shallow monotone encoders $e_k$ map each $d^{(T)}_{k,ij}$ to a low-dimensional embedding; the concatenated vector $\mathbf  {h}_{ij} \in \mathbb  {R}^{m d_{\mathrm  {enc}}}$ is passed through a monotone interaction network $\phi $ with baseline subtraction, yielding a cross-dimension correction $z^{\mathrm  {int}}_{ij} = \phi (\mathbf  {h}_{ij}) - \phi (\mathbf  {0})$, scaled by $\lambda _{\mathrm  {int}}$. The combined predictor $z^{\mathrm  {main}} + \lambda _{\mathrm  {int}}\,z^{\mathrm  {int}}$ is mapped through a sigmoid clamp ($\sigma _c$) to turnover $\eta \in (0, \eta _{\max })$ and similarity $S = e^{-\eta }$. \textbf  {Orange/red nodes}: likelihood and loss --- the match probability $p$ is computed from $\alpha _i, \alpha _j, S$, and $\texttt  {is\_within}$, corrected via the retrospective Bernoulli adjustment, and evaluated under per-stratum BCE with design weights. Penalty terms (lower-bound, anchor, anti-collapse, effort $L_2$) feed into the composite loss $\mathcal  {L}$. ``sp'' = softplus; ``$\sigma $'' = sigmoid; ``$\sigma _c$'' = sigmoid clamp $\eta _{\max }\cdot \sigma (\cdot - s)$; ``retro'' = retrospective Bernoulli correction.}}{3}{figure.1}\protected@file@percent }
+\newlabel{fig:comp-graph}{{1}{3}{Computational graph of the CLESSO neural network forward pass (transform-interaction beta variant; Section~\ref {sec:transform-interaction-beta}). \textbf {Blue nodes}: alpha (richness) pathway --- per-site environmental covariates $\mathbf {z}$ pass through a shared-weight AlphaNet (MLP) to produce $\alpha _i, \alpha _j > 1$ via softplus~$+$~1. \textbf {Dashed nodes/arrows}: optional EffortNet pathway --- effort covariates $\mathbf {w}$ produce a capture-completeness fraction $c \in (0,1)$ that modulates apparent richness (default: completeness mode, $\alpha ^{\mathrm {obs}} = 1 + c\cdot \mathrm {softplus}(\mathrm {env\_logit})$). \textbf {Green nodes}: beta (turnover) pathway --- per-site standardised environment vectors $\tilde {\mathbf {x}}_i, \tilde {\mathbf {x}}_j$ pass through shared-weight monotone transforms $T_k$, producing transformed separations $d^{(T)}_{k,ij} = |T_k(\tilde {x}_{k,i}) - T_k(\tilde {x}_{k,j})|$ (GDM I-spline analogue). \textbf {Main path}: per-dimension origin-anchored weighting functions $g_k$ yield additive contributions $s_{k,ij} = g_k(d^{(T)}_{k,ij}) - g_k(0)$, summed to $z^{\mathrm {main}}$. \textbf {Interaction path}: shallow monotone encoders $e_k$ map each $d^{(T)}_{k,ij}$ to a low-dimensional embedding; the concatenated vector $\mathbf {h}_{ij} \in \mathbb {R}^{m d_{\mathrm {enc}}}$ is passed through a monotone interaction network $\phi $ with baseline subtraction, yielding a cross-dimension correction $z^{\mathrm {int}}_{ij} = \phi (\mathbf {h}_{ij}) - \phi (\mathbf {0})$, scaled by $\lambda _{\mathrm {int}}$. The combined predictor $z^{\mathrm {main}} + \lambda _{\mathrm {int}}\,z^{\mathrm {int}}$ is mapped through a sigmoid clamp ($\sigma _c$) to turnover $\eta \in (0, \eta _{\max })$ and similarity $S = e^{-\eta }$. \textbf {Orange/red nodes}: likelihood and loss --- the match probability $p$ is computed from $\alpha _i, \alpha _j, S$, and $\texttt {is\_within}$, corrected via the retrospective Bernoulli adjustment, and evaluated under per-stratum BCE with design weights. Penalty terms (lower-bound, anchor, anti-collapse, effort $L_2$) feed into the composite loss $\mathcal {L}$. ``sp'' = softplus; ``$\sigma $'' = sigmoid; ``$\sigma _c$'' = sigmoid clamp $\eta _{\max }\cdot \sigma (\cdot - s)$; ``retro'' = retrospective Bernoulli correction}{figure.1}{}}
 \@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Computational graph of the CLESSO neural network backward pass (gradient flow). \textbf  {Red/orange nodes}: gradient chain from the composite loss $\mathcal  {L}$ through the per-stratum BCE, retrospective Bernoulli correction, and log-space match probability to the three parameter groups. Solid red arrows show the primary gradient flow from $\mathcal  {L}_{\mathrm  {BCE}}$; dashed red arrows show penalty contributions ($\mathcal  {L}_{\mathrm  {lb}}$, $\mathcal  {L}_{\mathrm  {anch}}$, $\mathcal  {L}_{\mathrm  {AC}}$, etc.). \textbf  {Violet nodes}: gradient modifications --- $\times 100$ backward hook on BetaNet parameters (compensating $e^{-\eta }$ attenuation) and global gradient clipping ($\lVert \nabla \rVert _2 \leq 5$). \textbf  {Cyan nodes}: Adam optimisers with per-phase differential learning rates. The right panel summarises the cyclic block-coordinate training schedule: Phase~1A trains $\theta _\alpha $ on within-site pairs while freezing $\theta _\beta $; Phase~1B trains $\theta _\beta $ on between-site pairs while freezing $\theta _\alpha $; Phase~2 fine-tunes all parameters jointly with differential LR ($10\times $ higher for $\beta $); Phase~3 (optional) runs a short calibration pass. Key design property: the log-space formulation ensures $\partial \log p / \partial \eta = -1$ regardless of $\alpha $ magnitude, and the retrospective correction normalises match/mismatch gradient scales to $O(1)$.}}{5}{figure.2}\protected@file@percent }
 \newlabel{fig:backward-pass}{{2}{5}{Computational graph of the CLESSO neural network backward pass (gradient flow). \textbf {Red/orange nodes}: gradient chain from the composite loss $\mathcal {L}$ through the per-stratum BCE, retrospective Bernoulli correction, and log-space match probability to the three parameter groups. Solid red arrows show the primary gradient flow from $\mathcal {L}_{\mathrm {BCE}}$; dashed red arrows show penalty contributions ($\mathcal {L}_{\mathrm {lb}}$, $\mathcal {L}_{\mathrm {anch}}$, $\mathcal {L}_{\mathrm {AC}}$, etc.). \textbf {Violet nodes}: gradient modifications --- $\times 100$ backward hook on BetaNet parameters (compensating $e^{-\eta }$ attenuation) and global gradient clipping ($\lVert \nabla \rVert _2 \leq 5$). \textbf {Cyan nodes}: Adam optimisers with per-phase differential learning rates. The right panel summarises the cyclic block-coordinate training schedule: Phase~1A trains $\theta _\alpha $ on within-site pairs while freezing $\theta _\beta $; Phase~1B trains $\theta _\beta $ on between-site pairs while freezing $\theta _\alpha $; Phase~2 fine-tunes all parameters jointly with differential LR ($10\times $ higher for $\beta $); Phase~3 (optional) runs a short calibration pass. Key design property: the log-space formulation ensures $\partial \log p / \partial \eta = -1$ regardless of $\alpha $ magnitude, and the retrospective correction normalises match/mismatch gradient scales to $O(1)$}{figure.2}{}}
 \@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces Full pipeline computational graph from sample generation to spatial prediction. \textbf  {Grey}: raw input data (occurrence records, environmental and effort covariates, optional richness anchor raster). \textbf  {Orange}: R sampling pipeline --- \texttt  {obs\_pair\_sampler.R} generates hex-balanced match/mismatch pairs, \texttt  {clesso\_sampler} stratifies them into within-site (W) and three between-site distance tiers (S, N, D), and \texttt  {export\_for\_nn.R} writes the training artefacts. \textbf  {Yellow}: training artefacts loaded into Python --- \texttt  {pairs.feather} (observation pairs with targets and design weights) and \texttt  {metadata.json} (per-stratum retention rates and covariate names). \textbf  {Blue}: training loop --- \texttt  {run\_clesso\_nn.py} orchestrates cyclic block-coordinate descent through the CLESSONet model (single node; internal architecture shown in Figs.~\ref {fig:comp-graph} and~\ref {fig:backward-pass}); the best validation checkpoint is saved to disk (with an optional short calibration pass). \textbf  {Green}: spatial prediction --- \texttt  {predict\_alpha\_surface.py} runs a batched forward pass over all land cells ($0.05^\circ $ grid) to produce a species richness GeoTIFF; \texttt  {predict\_beta\_surface.py} selects landmark pixels, computes pairwise $\eta $, applies landmark MDS with Nystr\"{o}m extension, and writes an RGB turnover map and optional cluster GeoTIFF. Dashed arrows denote optional or secondary data flows (effort covariates, richness anchor, calibrated checkpoint).}}{6}{figure.3}\protected@file@percent }
@@ -45,90 +45,88 @@
 \@writefile{toc}{\contentsline {section}{\numberline {6}Beta sub-model: monotone turnover network}{16}{section.6}\protected@file@percent }
 \@writefile{toc}{\contentsline {subsection}{\numberline {6.1}TMB approach}{16}{subsection.6.1}\protected@file@percent }
 \@writefile{toc}{\contentsline {subsection}{\numberline {6.2}Shared building block: MonotoneLinear layers}{16}{subsection.6.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {6.3}Deep monotone network (\texttt  {beta\_type=``deep''})}{17}{subsection.6.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {6.4}Additive monotone network (\texttt  {beta\_type=``additive''})}{17}{subsection.6.4}\protected@file@percent }
-\newlabel{sec:additive-beta}{{6.4}{17}{Additive monotone network (\texttt {beta\_type=``additive''})}{subsection.6.4}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {6.5}Factored deep monotone network (\texttt  {beta\_type=``factored''})}{18}{subsection.6.5}\protected@file@percent }
-\newlabel{sec:factored-beta}{{6.5}{18}{Factored deep monotone network (\texttt {beta\_type=``factored''})}{subsection.6.5}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {6.6}Transform-first monotone network (\texttt  {beta\_type=``transform''})}{19}{subsection.6.6}\protected@file@percent }
-\newlabel{sec:transform-beta}{{6.6}{19}{Transform-first monotone network (\texttt {beta\_type=``transform''})}{subsection.6.6}{}}
-\newlabel{eq:transform-beta}{{25}{19}{Transform-first monotone network (\texttt {beta\_type=``transform''})}{equation.25}{}}
-\@writefile{toc}{\contentsline {paragraph}{Relationship to GDM I-splines.}{20}{section*.9}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Monotonicity guarantee.}{20}{section*.10}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Output activation.}{20}{section*.11}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Data flow.}{20}{section*.12}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {6.7}Geographic distance as a beta input}{20}{subsection.6.7}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {6.8}Comparison}{21}{subsection.6.8}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {6.9}Discussion: similarities and differences between the four beta architectures}{21}{subsection.6.9}\protected@file@percent }
-\newlabel{sec:beta-discussion}{{6.9}{21}{Discussion: similarities and differences between the four beta architectures}{subsection.6.9}{}}
-\@writefile{toc}{\contentsline {paragraph}{Distance-first vs.\ transform-first.}{21}{section*.13}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Parameters and capacity.}{22}{section*.14}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Interpretability.}{22}{section*.15}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Gradient behaviour.}{22}{section*.16}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{When to use each.}{23}{section*.17}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {7}Optimisation}{23}{section.7}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {7.1}Gradient imbalance between alpha and beta}{24}{subsection.7.1}\protected@file@percent }
-\newlabel{sec:grad-imbalance}{{7.1}{24}{Gradient imbalance between alpha and beta}{subsection.7.1}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {7.2}Training modes}{25}{subsection.7.2}\protected@file@percent }
-\newlabel{sec:training-modes}{{7.2}{25}{Training modes}{subsection.7.2}{}}
-\@writefile{toc}{\contentsline {subsubsection}{\numberline {7.2.1}Joint training (\texttt  {mode=``joint''})}{25}{subsubsection.7.2.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsubsection}{\numberline {7.2.2}Two-stage training (\texttt  {mode=``two\_stage''})}{25}{subsubsection.7.2.2}\protected@file@percent }
-\newlabel{sec:two-stage}{{7.2.2}{25}{Two-stage training (\texttt {mode=``two\_stage''})}{subsubsection.7.2.2}{}}
-\@writefile{toc}{\contentsline {subsubsection}{\numberline {7.2.3}Cyclic block-coordinate descent (\texttt  {mode=``cyclic''})}{25}{subsubsection.7.2.3}\protected@file@percent }
-\newlabel{sec:cyclic}{{7.2.3}{25}{Cyclic block-coordinate descent (\texttt {mode=``cyclic''})}{subsubsection.7.2.3}{}}
-\@writefile{toc}{\contentsline {subsubsection}{\numberline {7.2.4}Cyclic + fine-tuning (\texttt  {mode=``cyclic\_finetune''})}{26}{subsubsection.7.2.4}\protected@file@percent }
-\newlabel{sec:cyclic-finetune}{{7.2.4}{26}{Cyclic + fine-tuning (\texttt {mode=``cyclic\_finetune''})}{subsubsection.7.2.4}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {7.3}Hard-pair mining with importance correction}{26}{subsection.7.3}\protected@file@percent }
-\newlabel{sec:hard-mining}{{7.3}{26}{Hard-pair mining with importance correction}{subsection.7.3}{}}
-\@writefile{toc}{\contentsline {paragraph}{Target and proposal distributions.}{27}{section*.18}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Coarse pair strata.}{27}{section*.19}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Difficulty strata.}{27}{section*.20}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Mixture proposal.}{28}{section*.21}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Variance control.}{28}{section*.22}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Practical training scheme.}{28}{section*.23}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Interpretation.}{29}{section*.24}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {8}Relationship to TMB model}{29}{section.8}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {9}Post-training: diagnostics and spatial prediction}{29}{section.9}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {9.1}Diagnostics}{29}{subsection.9.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {9.2}Alpha surface}{30}{subsection.9.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {9.3}Beta surface (community composition map)}{30}{subsection.9.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {10}Identifiability considerations and practical safeguards}{31}{section.10}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {10.1}Primary source of identifiability}{31}{subsection.10.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {10.2}Constraining the turnover baseline}{32}{subsection.10.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {10.3}Controlling flexibility asymmetrically}{32}{subsection.10.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {10.4}Separating spatial and environmental structure}{32}{subsection.10.4}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {10.5}Observation-process covariates and auxiliary information}{33}{subsection.10.5}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {10.6}Pair design and training strategy}{33}{subsection.10.6}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {10.7}Summary}{34}{subsection.10.7}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {11}Further thoughts}{35}{section.11}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {12}Thing to try}{36}{section.12}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {12.1}Habitat condition decomposition for alpha}{39}{subsection.12.1}\protected@file@percent }
-\newlabel{sec:condition-decomposition}{{12.1}{39}{Habitat condition decomposition for alpha}{subsection.12.1}{}}
-\newlabel{eq:alpha-condition}{{44}{40}{Habitat condition decomposition for alpha}{equation.44}{}}
-\@writefile{toc}{\contentsline {paragraph}{Interpretation.}{40}{section*.25}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Relationship to effort/completeness.}{40}{section*.26}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Regularisation.}{41}{section*.27}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Advantages.}{41}{section*.28}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Potential limitations.}{41}{section*.29}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {12.2}Elastic distance weighting for cyclic optimisation}{41}{subsection.12.2}\protected@file@percent }
-\newlabel{sec:elastic-weighting}{{12.2}{41}{Elastic distance weighting for cyclic optimisation}{subsection.12.2}{}}
-\@writefile{toc}{\contentsline {paragraph}{Pair distance.}{41}{section*.30}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Elastic alpha and beta weights.}{42}{section*.31}\protected@file@percent }
-\newlabel{eq:elastic-weights}{{51}{42}{Elastic alpha and beta weights}{equation.51}{}}
-\@writefile{toc}{\contentsline {paragraph}{Key point.}{42}{section*.32}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsubsection}{\numberline {12.2.1}Alpha phase}{42}{subsubsection.12.2.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsubsection}{\numberline {12.2.2}Beta phase}{43}{subsubsection.12.2.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Interpretation.}{43}{section*.33}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Choice of distance metric.}{43}{section*.34}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Learning the weighting curve.}{43}{section*.35}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Advantages.}{43}{section*.36}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Potential limitations.}{44}{section*.37}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {12.3}Transform-first monotone network with controlled interactions (\texttt  {beta\_type=``transform\_interaction''})}{44}{subsection.12.3}\protected@file@percent }
-\newlabel{sec:transform-interaction-beta}{{12.3}{44}{Transform-first monotone network with controlled interactions (\texttt {beta\_type=``transform\_interaction''})}{subsection.12.3}{}}
-\newlabel{eq:transform-interaction-beta}{{61}{45}{Transform-first monotone network with controlled interactions (\texttt {beta\_type=``transform\_interaction''})}{equation.61}{}}
-\@writefile{toc}{\contentsline {paragraph}{Monotonicity and ecological interpretation.}{45}{section*.38}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Why the interaction is ``controlled''.}{45}{section*.39}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Recommended default settings.}{45}{section*.40}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Optional regularisation.}{45}{section*.41}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Interpretability trade-off.}{46}{section*.42}\protected@file@percent }
-\gdef \@abspage@last{46}
+\newlabel{sec:monotone-linear}{{6.2}{17}{Shared building block: MonotoneLinear layers}{Item.9}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.3}Factored deep monotone network (\texttt  {beta\_type=``factored''})}{17}{subsection.6.3}\protected@file@percent }
+\newlabel{sec:factored-beta}{{6.3}{17}{Factored deep monotone network (\texttt {beta\_type=``factored''})}{subsection.6.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.4}Transform-first monotone network (\texttt  {beta\_type=``transform''})}{18}{subsection.6.4}\protected@file@percent }
+\newlabel{sec:transform-beta}{{6.4}{18}{Transform-first monotone network (\texttt {beta\_type=``transform''})}{subsection.6.4}{}}
+\newlabel{eq:transform-beta}{{22}{18}{Transform-first monotone network (\texttt {beta\_type=``transform''})}{equation.22}{}}
+\@writefile{toc}{\contentsline {paragraph}{Relationship to GDM I-splines.}{19}{section*.9}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Monotonicity guarantee.}{19}{section*.10}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Output activation.}{19}{section*.11}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Data flow.}{19}{section*.12}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.5}Geographic distance as a beta input}{19}{subsection.6.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.6}Comparison}{20}{subsection.6.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.7}Discussion: similarities and differences between the four beta architectures}{20}{subsection.6.7}\protected@file@percent }
+\newlabel{sec:beta-discussion}{{6.7}{20}{Discussion: similarities and differences between the four beta architectures}{subsection.6.7}{}}
+\@writefile{toc}{\contentsline {paragraph}{Distance-first vs.\ transform-first.}{20}{section*.13}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Parameters and capacity.}{21}{section*.14}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Interpretability.}{21}{section*.15}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Gradient behaviour.}{21}{section*.16}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{When to use each.}{22}{section*.17}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {7}Optimisation}{22}{section.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.1}Gradient imbalance between alpha and beta}{23}{subsection.7.1}\protected@file@percent }
+\newlabel{sec:grad-imbalance}{{7.1}{23}{Gradient imbalance between alpha and beta}{subsection.7.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.2}Training modes}{24}{subsection.7.2}\protected@file@percent }
+\newlabel{sec:training-modes}{{7.2}{24}{Training modes}{subsection.7.2}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {7.2.1}Joint training (\texttt  {mode=``joint''})}{24}{subsubsection.7.2.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {7.2.2}Two-stage training (\texttt  {mode=``two\_stage''})}{24}{subsubsection.7.2.2}\protected@file@percent }
+\newlabel{sec:two-stage}{{7.2.2}{24}{Two-stage training (\texttt {mode=``two\_stage''})}{subsubsection.7.2.2}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {7.2.3}Cyclic block-coordinate descent (\texttt  {mode=``cyclic''})}{24}{subsubsection.7.2.3}\protected@file@percent }
+\newlabel{sec:cyclic}{{7.2.3}{24}{Cyclic block-coordinate descent (\texttt {mode=``cyclic''})}{subsubsection.7.2.3}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {7.2.4}Cyclic + fine-tuning (\texttt  {mode=``cyclic\_finetune''})}{25}{subsubsection.7.2.4}\protected@file@percent }
+\newlabel{sec:cyclic-finetune}{{7.2.4}{25}{Cyclic + fine-tuning (\texttt {mode=``cyclic\_finetune''})}{subsubsection.7.2.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.3}Hard-pair mining with importance correction}{25}{subsection.7.3}\protected@file@percent }
+\newlabel{sec:hard-mining}{{7.3}{25}{Hard-pair mining with importance correction}{subsection.7.3}{}}
+\@writefile{toc}{\contentsline {paragraph}{Target and proposal distributions.}{26}{section*.18}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Coarse pair strata.}{26}{section*.19}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Difficulty strata.}{26}{section*.20}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Mixture proposal.}{27}{section*.21}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Variance control.}{27}{section*.22}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Practical training scheme.}{27}{section*.23}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Interpretation.}{28}{section*.24}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {8}Relationship to TMB model}{28}{section.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {9}Post-training: diagnostics and spatial prediction}{28}{section.9}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {9.1}Diagnostics}{28}{subsection.9.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {9.2}Alpha surface}{29}{subsection.9.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {9.3}Beta surface (community composition map)}{29}{subsection.9.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {10}Identifiability considerations and practical safeguards}{30}{section.10}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {10.1}Primary source of identifiability}{30}{subsection.10.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {10.2}Constraining the turnover baseline}{31}{subsection.10.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {10.3}Controlling flexibility asymmetrically}{31}{subsection.10.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {10.4}Separating spatial and environmental structure}{31}{subsection.10.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {10.5}Observation-process covariates and auxiliary information}{32}{subsection.10.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {10.6}Pair design and training strategy}{32}{subsection.10.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {10.7}Summary}{33}{subsection.10.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {11}Further thoughts}{34}{section.11}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {12}Thing to try}{35}{section.12}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {12.1}Habitat condition decomposition for alpha}{38}{subsection.12.1}\protected@file@percent }
+\newlabel{sec:condition-decomposition}{{12.1}{38}{Habitat condition decomposition for alpha}{subsection.12.1}{}}
+\newlabel{eq:alpha-condition}{{41}{39}{Habitat condition decomposition for alpha}{equation.41}{}}
+\@writefile{toc}{\contentsline {paragraph}{Interpretation.}{39}{section*.25}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Relationship to effort/completeness.}{39}{section*.26}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Regularisation.}{40}{section*.27}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Advantages.}{40}{section*.28}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Potential limitations.}{40}{section*.29}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {12.2}Elastic distance weighting for cyclic optimisation}{40}{subsection.12.2}\protected@file@percent }
+\newlabel{sec:elastic-weighting}{{12.2}{40}{Elastic distance weighting for cyclic optimisation}{subsection.12.2}{}}
+\@writefile{toc}{\contentsline {paragraph}{Pair distance.}{40}{section*.30}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Elastic alpha and beta weights.}{41}{section*.31}\protected@file@percent }
+\newlabel{eq:elastic-weights}{{48}{41}{Elastic alpha and beta weights}{equation.48}{}}
+\@writefile{toc}{\contentsline {paragraph}{Key point.}{41}{section*.32}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {12.2.1}Alpha phase}{41}{subsubsection.12.2.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {12.2.2}Beta phase}{42}{subsubsection.12.2.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Interpretation.}{42}{section*.33}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Choice of distance metric.}{42}{section*.34}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Learning the weighting curve.}{42}{section*.35}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Advantages.}{42}{section*.36}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Potential limitations.}{43}{section*.37}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {12.3}Transform-first monotone network with controlled interactions (\texttt  {beta\_type=``transform\_interaction''})}{43}{subsection.12.3}\protected@file@percent }
+\newlabel{sec:transform-interaction-beta}{{12.3}{43}{Transform-first monotone network with controlled interactions (\texttt {beta\_type=``transform\_interaction''})}{subsection.12.3}{}}
+\newlabel{eq:transform-interaction-beta}{{58}{44}{Transform-first monotone network with controlled interactions (\texttt {beta\_type=``transform\_interaction''})}{equation.58}{}}
+\@writefile{toc}{\contentsline {paragraph}{Monotonicity and ecological interpretation.}{44}{section*.38}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Why the interaction is ``controlled''.}{44}{section*.39}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Recommended default settings.}{44}{section*.40}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Optional regularisation.}{44}{section*.41}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Interpretability trade-off.}{45}{section*.42}\protected@file@percent }
+\gdef \@abspage@last{45}

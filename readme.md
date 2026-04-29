@@ -1,6 +1,6 @@
 # CLESSO
 
-CLESSO is a biodiversity modelling workflow for TERN-style observation data.
+CLESSO is a biodiversity modelling workflow for ALA/GBIF-style observation data.
 It builds site-level richness (alpha) and turnover/similarity (beta) models from
 species occurrence records, environmental covariates, and sampled
 observation-pairs.
